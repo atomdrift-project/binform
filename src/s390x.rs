@@ -274,9 +274,34 @@ fn writes(insn: &[u8]) -> u32 {
     }
 }
 
+/// Whether `bytes` begin a frame: the registers saved up to `%r15` in the
+/// caller's save area (`stmg %r6, %r15, 48(%r15)`, or `stm` in 31-bit code).
+pub(crate) fn starts_frame(bytes: &[u8]) -> bool {
+    match bytes {
+        // STMG R1, R15, D(R15)
+        [0xeb, regs, base, _, _, 0x24, ..] => regs & 0xf == 0xf && base >> 4 == 0xf,
+        // STM R1, R15, D(R15)
+        [0x90, regs, base, ..] => regs & 0xf == 0xf && base >> 4 == 0xf,
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn frames() {
+        // stmg %r6, %r15, 0x30(%r15)
+        assert!(starts_frame(&[0xeb, 0x6f, 0xf0, 0x30, 0x00, 0x24]));
+        // stm %r6, %r15, 0x18(%r15)
+        assert!(starts_frame(&[0x90, 0x6f, 0xf0, 0x18]));
+        // lgr %r5, %r4
+        assert!(!starts_frame(&[0xb9, 0x04, 0x00, 0x54]));
+        // stmg %r6, %r14, 0x30(%r15): not up to r15
+        assert!(!starts_frame(&[0xeb, 0x6e, 0xf0, 0x30, 0x00, 0x24]));
+        assert!(!starts_frame(&[]));
+    }
 
     fn run(code: &[u8], addr: u64) -> Vec<Insn> {
         let mut state = State::default();

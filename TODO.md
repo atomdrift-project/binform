@@ -43,8 +43,10 @@
   - SuperH static bots now cover 70-88% (`bot-sh-uclibc-static`: 77%).
     What remains: code reached only through tables and pointers kept
     outside literal pools.
-  - s390x static-pie (`s390x/bad-00b6e99b...`, four copies) covers 58%
-    with 1070 invalid and 2045 unresolved.
+  - Packed and encrypted code: the sweep now skips kilobytes of
+    near-random bytes (`bot-s390x-static-pie`, whose `.text` is mostly an
+    encrypted payload: 1070 invalid down to 50). Such files cover little,
+    as they should; unpacking them is out of scope.
   - MIPS R6 (`jq` 1.8.1 `mips32r6`/`mips64r6`) covers 37-50%: the R6
     compact branches and relocated encodings are not decoded.
   - PE for Windows CE on Arm and Thumb (machines 0x1c0, 0x1c2) is not

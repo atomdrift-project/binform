@@ -352,6 +352,7 @@ impl Decoder {
             Self::Arm64(_) => crate::arm64::starts_frame(bytes),
             Self::Arm { thumb, .. } => crate::arm::starts_frame(*thumb, bytes),
             Self::SuperH(_) => crate::superh::starts_frame(bytes),
+            Self::S390x(_) => crate::s390x::starts_frame(bytes),
             _ => false,
         }
     }

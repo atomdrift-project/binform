@@ -821,6 +821,33 @@ fn superh_uclibc_static() {
     });
 }
 
+/// A static-pie s390x bot whose `.text` is mostly an encrypted payload:
+/// the sweep starts nothing in it, and the real code after it is found
+/// through calls and tail calls to frames.
+#[test]
+fn s390x_encrypted_payload() {
+    check("bot-s390x-static-pie", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::S390x);
+        let payload = 0xa0_1000..0xa5_a000;
+        let inside: Vec<u64> = outcome
+            .recovery
+            .functions
+            .iter()
+            .map(|f| f.entry)
+            .filter(|entry| payload.contains(entry))
+            .collect();
+        assert!(inside.is_empty(), "functions in the payload: {inside:x?}");
+        assert!(outcome.recovery.functions.len() > 200);
+        let tails = outcome.found(Found::TAIL_CALL);
+        assert!(tails >= 10, "only {tails} tail calls to frames");
+        finds_rizin_except(outcome, &[]);
+        // Coverage is low, as it should be for a packed file.
+        assert!(coverage(outcome) < 25, "covers {}%", coverage(outcome));
+        assert!(outcome.recovery.invalid <= 60);
+        assert!(outcome.recovery.unresolved <= 200);
+    });
+}
+
 /// MSVC's Windows on 32-bit Arm: Thumb-2 entries from `.pdata`, and calls
 /// to imports through slots loaded from literal pools.
 #[test]

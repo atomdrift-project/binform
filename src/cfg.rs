@@ -315,7 +315,9 @@ impl Work<'_> {
     /// Linear sweep of every code segment for direct calls into code, and
     /// direct jumps to code that starts a frame. (Code after `int3` padding
     /// is no sign of a function: MSVC aligns jump targets inside functions
-    /// with it.)
+    /// with it.) Windows of bytes as random as compressed or encrypted data
+    /// (a packer's payload kept in `.text`) are skipped: what decodes there
+    /// is noise, and its calls go nowhere real.
     fn sweep(&mut self, most: usize) {
         let segments: Vec<(u64, &[u8])> = self
             .memory
@@ -327,7 +329,17 @@ impl Work<'_> {
         for (base, bytes) in segments {
             self.decoder.reset();
             let mut offset = 0_usize;
+            let mut window = usize::MAX;
             while let Some(rest) = bytes.get(offset..).filter(|rest| !rest.is_empty()) {
+                if offset / WINDOW != window {
+                    window = offset / WINDOW;
+                    let start = window * WINDOW;
+                    if bytes.get(start..start + WINDOW).is_some_and(random) {
+                        offset = start + WINDOW;
+                        self.decoder.reset();
+                        continue;
+                    }
+                }
                 let addr = base.wrapping_add(offset as u64) | mode;
                 let Some(insn) = self.decode(rest, addr) else {
                     return;
@@ -797,4 +809,56 @@ fn runs(insns: &BTreeMap<u64, Insn>) -> Vec<(u64, u64)> {
         }
     }
     runs
+}
+
+/// The bytes the sweep judges a window at a time.
+const WINDOW: usize = 1024;
+
+/// Whether `bytes` are as random as compressed or encrypted data: more than
+/// 7.5 bits of entropy a byte. Machine code, even dense Thumb-2, stays
+/// under 7.2 over a kilobyte; random bytes come to about 7.8.
+fn random(bytes: &[u8]) -> bool {
+    let mut counts = [0_u32; 256];
+    for &byte in bytes {
+        if let Some(count) = counts.get_mut(usize::from(byte)) {
+            *count += 1;
+        }
+    }
+    let total = f64::from(u32::try_from(bytes.len()).unwrap_or(u32::MAX));
+    let entropy: f64 = counts
+        .iter()
+        .filter(|&&count| count > 0)
+        .map(|&count| {
+            let p = f64::from(count) / total;
+            -p * p.log2()
+        })
+        .sum();
+    entropy > 7.5
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn randomness() {
+        // A xorshift stream: random. A repeated instruction pattern: not.
+        let mut x = 0x2545_f491_u32;
+        let noise: Vec<u8> = (0..WINDOW)
+            .map(|_| {
+                x ^= x << 13;
+                x ^= x >> 17;
+                x ^= x << 5;
+                x.to_le_bytes()[0]
+            })
+            .collect();
+        assert!(random(&noise));
+        let code: Vec<u8> = [0x55, 0x48, 0x89, 0xe5, 0xc3]
+            .iter()
+            .copied()
+            .cycle()
+            .take(WINDOW)
+            .collect();
+        assert!(!random(&code));
+    }
 }
