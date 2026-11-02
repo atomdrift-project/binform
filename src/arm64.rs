@@ -22,7 +22,7 @@ pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
     let Some(word) = word else {
         return Insn {
             len: 4,
-            flow: Flow::Stop,
+            flow: Flow::Invalid,
             note: Note::None,
             pad: false,
         };
@@ -95,9 +95,13 @@ fn flow(state: &mut State, word: u32, addr: u64) -> Flow {
             _ => Flow::Stop,
         };
     }
-    if word & 0xffe0_001f == 0xd420_0000 || word & 0xffe0_001f == 0xd440_0000 || word >> 16 == 0 {
-        // BRK, HLT, UDF
+    if word & 0xffe0_001f == 0xd420_0000 || word & 0xffe0_001f == 0xd440_0000 {
+        // BRK, HLT
         return Flow::Stop;
+    }
+    if word >> 16 == 0 {
+        // UDF: permanently undefined, what zeros decode as.
+        return Flow::Invalid;
     }
     if word & 0x1f00_0000 == 0x1000_0000 {
         // ADR, ADRP
@@ -346,7 +350,7 @@ mod tests {
         assert_eq!(one(0xd61f_0200, 0x1000), Flow::JumpRegister(16)); // br x16
         assert_eq!(one(0xd63f_0200, 0x1000), Flow::CallIndirect); // blr x16
         assert_eq!(one(0xd420_0000, 0x1000), Flow::Stop); // brk #0
-        assert_eq!(one(0x0000_0000, 0x1000), Flow::Stop); // udf #0
+        assert_eq!(one(0x0000_0000, 0x1000), Flow::Invalid); // udf #0
         assert_eq!(one(0xaa01_03e0, 0x1000), Flow::Next); // mov x0, x1
     }
 

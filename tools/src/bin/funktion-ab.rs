@@ -220,16 +220,20 @@ fn compare(options: &Options, file: &Path) -> Option<Value> {
         "native_ms": native_ms,
         "rizin_ms": rizin_ms,
         "native": native_shape.json(),
+        "code": recovery.code,
+        "covered": recovery.covered,
+        "invalid": recovery.invalid,
+        "unresolved": recovery.unresolved,
         "truncated": recovery.truncated,
     });
     let Some(rows) = rizin else {
         report["rizin"] = Value::Null;
         return Some(report);
     };
-    if let Some(dir) = &options.save {
-        if let Err(error) = save(dir, file, &script, &rows) {
-            eprintln!("funktion-ab: saving {}: {error}", file.display());
-        }
+    if let Some(dir) = &options.save
+        && let Err(error) = save(dir, file, &script, &rows)
+    {
+        eprintln!("funktion-ab: saving {}: {error}", file.display());
     }
 
     let mut rizin_shape = Shape::default();

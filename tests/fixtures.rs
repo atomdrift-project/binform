@@ -413,3 +413,29 @@ fn pe_arm64_msvc() {
         assert!(outcome.cases() > 500, "only {} A64 cases", outcome.cases());
     });
 }
+
+/// What Go's `runtime.debugCallV2` runs after a `brk` that a debugger
+/// resumes from: no instruction reaches it.
+const DEBUG_CALL: &str = "runtime.debugCallV2's code after a `brk` a debugger resumes from";
+
+/// Go on Windows A64: no `.pdata`, and a function table with no section of
+/// its own whose header leaves the text start to the loader.
+#[test]
+fn pe_arm64_go() {
+    check("does-nothing-windows-arm64.exe", |outcome| {
+        let named = outcome.found(Found::SYMBOL);
+        assert!(named > 2000, "only {named} functions from the Go table");
+        finds_rizin_except(outcome, &[(0x1_4007_b2a8, DEBUG_CALL)]);
+    });
+}
+
+/// Go on macOS A64 with the function table's magic number overwritten, as
+/// garble does.
+#[test]
+fn macho_arm64_go_garbled() {
+    check("does-nothing-darwin-arm64-garbled", |outcome| {
+        let named = outcome.found(Found::SYMBOL);
+        assert!(named > 2000, "only {named} functions from the Go table");
+        finds_rizin_except(outcome, &[(0x1_0007_ac08, DEBUG_CALL)]);
+    });
+}

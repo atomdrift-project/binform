@@ -10,7 +10,7 @@ pub(crate) fn decode(bitness: u32, got: Option<u64>, bytes: &[u8], addr: u64) ->
     if instruction.is_invalid() {
         return Insn {
             len: 1,
-            flow: Flow::Stop,
+            flow: Flow::Invalid,
             note: Note::None,
             pad: false,
         };
@@ -305,7 +305,7 @@ mod tests {
             Flow::JumpRegister(register_id(Register::RAX))
         ); // jmp rax
         assert_eq!(one(64, &[0x48, 0x89, 0xc8], at).flow, Flow::Next); // mov rax, rcx
-        assert_eq!(one(64, &[0x06], at).flow, Flow::Stop); // invalid in 64-bit mode
+        assert_eq!(one(64, &[0x06], at).flow, Flow::Invalid); // in 64-bit mode
     }
 
     #[test]

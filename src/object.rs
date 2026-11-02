@@ -17,6 +17,7 @@ use crate::decode::Memory;
 use crate::{Arch, Handler, Image, Import, Origin, Seed, Segment};
 
 mod eh;
+mod gopclntab;
 mod relocate;
 
 /// Why bytes could not become an [`Image`].
@@ -59,6 +60,40 @@ pub fn image(bytes: &[u8]) -> Result<Image<'_>, Error> {
         Some(_) => macho_image(bytes, &MachO::parse(bytes, 0).map_err(format)?),
         None => Err(Error::Format("too short".into())),
     }
+}
+
+/// The functions of a Go binary's function table, which in a PE file has no
+/// section of its own: the first header in data whose first function is
+/// code. Entries count from the first code section when the header leaves
+/// the text start to the loader.
+fn pe_gopclntab(segments: &[Segment<'_>]) -> Vec<(u64, String)> {
+    let memory = Memory::new(segments);
+    let text = segments
+        .iter()
+        .find(|segment| segment.executable)
+        .map(|segment| segment.addr);
+    for segment in segments.iter().filter(|segment| !segment.executable) {
+        let data: &[u8] = &segment.bytes;
+        // Each header starts at a pointer-aligned magic number, two zero
+        // bytes, the instruction size quantum, and the pointer size.
+        let headers = data.chunks_exact(4).enumerate().filter_map(|(i, word)| {
+            let magic = u32::from_le_bytes(word.try_into().ok()?);
+            let rest = data.get(i * 4 + 4..i * 4 + 8)?;
+            (gopclntab::MAGICS.contains(&magic) && rest.get(..2) == Some(&[0, 0][..]))
+                .then(|| data.get(i * 4..))
+                .flatten()
+        });
+        for table in headers {
+            let functions = gopclntab::functions(table, text, false);
+            if functions
+                .first()
+                .is_some_and(|&(entry, _)| memory.is_code(entry))
+            {
+                return functions;
+            }
+        }
+    }
+    Vec::new()
 }
 
 /// `len` bytes at file offset `offset`, cut short at the end of the file.
@@ -172,11 +207,23 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf<'_>) -> Result<Image<'a>, Error> {
             .zip(finis)
             .map(|(i, addr)| seed(addr, Origin::Fini(i))),
     );
-    let mut handlers = Vec::new();
+    if let Some((_, sh)) = sections.find(".gopclntab") {
+        let text = sections.find(".text").map(|(addr, _)| addr);
+        let table = file_range(bytes, sh.sh_offset, sh.sh_size);
+        seeds.extend(
+            gopclntab::functions(table, text, true)
+                .into_iter()
+                .map(|(addr, name)| seed(addr, Origin::Symbol(name))),
+        );
+    }
+    let (mut handlers, mut extents) = (Vec::new(), Vec::new());
     if let Some((addr, sh)) = sections.find(".eh_frame") {
-        let (starts, pads) = eh::eh_frame(&memory, addr, sh.sh_size, elf.is_64);
-        seeds.extend(starts.into_iter().map(|addr| seed(addr, Origin::Unwind)));
-        handlers = pads;
+        (extents, handlers) = eh::eh_frame(&memory, addr, sh.sh_size, elf.is_64);
+        seeds.extend(
+            extents
+                .iter()
+                .map(|extent| seed(extent.start, Origin::Unwind)),
+        );
     }
     seeds.extend(
         elf_stubs(arch, &sections)
@@ -221,6 +268,7 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf<'_>) -> Result<Image<'a>, Error> {
         seeds,
         imports,
         handlers,
+        extents,
         got,
     })
 }
@@ -359,7 +407,7 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &PE<'_>) -> Result<Image<'a>, Error> {
         _ => return Err(Error::Arch(format!("PE machine {machine:#06x}"))),
     };
     let base = pe.image_base;
-    let segments = pe
+    let segments: Vec<Segment<'a>> = pe
         .sections
         .iter()
         .map(|section| {
@@ -401,6 +449,12 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &PE<'_>) -> Result<Image<'a>, Error> {
                 .map(|(i, &addr)| seed(addr, Origin::Tls(i))),
         );
     }
+    seeds.extend(
+        pe_gopclntab(&segments)
+            .into_iter()
+            .map(|(addr, name)| seed(addr, Origin::Symbol(name))),
+    );
+    let mut extents = Vec::new();
     if let Some(exceptions) = &pe.exception_data {
         if arch == Arch::Arm64 {
             for function in exceptions.functions_arm64().flatten() {
@@ -418,6 +472,7 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &PE<'_>) -> Result<Image<'a>, Error> {
                 if !chained {
                     let addr = base.wrapping_add(u64::from(function.begin_address));
                     seeds.push(seed(addr, Origin::Unwind));
+                    extents.push(addr..base.wrapping_add(u64::from(function.end_address)));
                 }
             }
         }
@@ -437,6 +492,7 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &PE<'_>) -> Result<Image<'a>, Error> {
         seeds,
         imports,
         handlers: Vec::new(),
+        extents,
         got: None,
     })
 }
@@ -703,6 +759,19 @@ fn macho_image<'a>(bytes: &'a [u8], macho: &MachO<'_>) -> Result<Image<'a>, Erro
         }
     }
 
+    if let Some(section) = sections.iter().find(|section| section.named("__gopclntab")) {
+        let text = sections
+            .iter()
+            .find(|section| section.named("__text"))
+            .map(|section| section.addr);
+        let table = file_range(bytes, section.offset, section.size);
+        seeds.extend(
+            gopclntab::functions(table, text, true)
+                .into_iter()
+                .map(|(addr, name)| seed(addr, Origin::Symbol(name))),
+        );
+    }
+
     // Stubs: each jumps through the symbol pointer its index names.
     for section in &sections {
         if section.flags & mach::constants::SECTION_TYPE != S_SYMBOL_STUBS || section.reserved2 == 0
@@ -716,11 +785,14 @@ fn macho_image<'a>(bytes: &'a [u8], macho: &MachO<'_>) -> Result<Image<'a>, Erro
 
     let memory = Memory::new(&segments);
     let width: u8 = if macho.is_64 { 8 } else { 4 };
-    let mut handlers = Vec::new();
+    let (mut handlers, mut extents) = (Vec::new(), Vec::new());
     if let Some(section) = sections.iter().find(|section| section.named("__eh_frame")) {
-        let (starts, pads) = eh::eh_frame(&memory, section.addr, section.size, macho.is_64);
-        seeds.extend(starts.into_iter().map(|addr| seed(addr, Origin::Unwind)));
-        handlers = pads;
+        (extents, handlers) = eh::eh_frame(&memory, section.addr, section.size, macho.is_64);
+        seeds.extend(
+            extents
+                .iter()
+                .map(|extent| seed(extent.start, Origin::Unwind)),
+        );
     }
     if let (Some(base), Some(section)) = (
         text,
@@ -747,6 +819,7 @@ fn macho_image<'a>(bytes: &'a [u8], macho: &MachO<'_>) -> Result<Image<'a>, Erro
         seeds,
         imports,
         handlers,
+        extents,
         got: None,
     })
 }

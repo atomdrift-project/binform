@@ -29,6 +29,7 @@ fn image(arch: Arch, segments: Vec<Segment<'_>>, seeds: Vec<Seed>) -> Image<'_> 
         seeds,
         imports: Vec::new(),
         handlers: Vec::new(),
+        extents: Vec::new(),
         got: None,
     }
 }
@@ -367,4 +368,62 @@ fn main_from_an_unnamed_start_routine() {
         let main = recovery.functions.iter().find(|f| f.entry == 0x1100);
         assert_eq!(main.is_some_and(|f| f.found.contains(Found::MAIN)), found);
     }
+}
+
+/// LLVM's A64 switch on an enum whose range it knows: a byte table with no
+/// bound before it. The cases are unknown, but the unwind table says how
+/// far the function runs, and its unreached code is the cases.
+#[test]
+fn unbounded_table_cases_lie_in_the_extent() {
+    let code = words(&[
+        0x7940_0008, // 0x10000 ldrh w8, [x0]
+        0x9000_0089, // 0x10004 adrp x9, 0x20000
+        0x9100_0129, // 0x10008 add x9, x9, #0
+        0x1000_008a, // 0x1000c adr x10, 0x1001c
+        0x3868_692b, // 0x10010 ldrb w11, [x9, x8]
+        0x8b0b_094a, // 0x10014 add x10, x10, x11, lsl #2
+        0xd61f_0140, // 0x10018 br x10
+        0x5280_0020, // 0x1001c mov w0, #1
+        0xd65f_03c0, // 0x10020 ret
+        0xd503_201f, // 0x10024 nop
+        0x5280_0040, // 0x10028 mov w0, #2
+        0xd65f_03c0, // 0x1002c ret
+        0x5280_0060, // 0x10030 mov w0, #3: past the function
+        0xd65f_03c0, // 0x10034 ret
+    ]);
+    let table = [0, 3];
+    let segments = || {
+        vec![
+            segment(0x1_0000, &code, true),
+            segment(0x2_0000, &table, false),
+        ]
+    };
+
+    let alone = funktion::recover(&image(Arch::Arm64, segments(), vec![entry(0x1_0000)]));
+    assert_eq!(alone.unresolved, 1);
+    assert_eq!(function(&alone.functions, 0x1_0000).blocks, 1);
+
+    let mut spanned = image(Arch::Arm64, segments(), vec![entry(0x1_0000)]);
+    spanned.extents.push(0x1_0000..0x1_0030);
+    let recovery = funktion::recover(&spanned);
+    assert_eq!(recovery.functions.len(), 1);
+    let switch = function(&recovery.functions, 0x1_0000);
+    assert_eq!((switch.blocks, switch.size), (3, 0x30));
+    assert_eq!(recovery.covered, 0x2c, "the nop is no case");
+}
+
+/// What a caller weighs before trusting a recovery: code no function
+/// covers, and paths into bytes that do not decode.
+#[test]
+fn weak_recovery_says_so() {
+    let mut code = vec![0x90, 0x90, 0x06]; // nop; nop; invalid in 64-bit mode
+    code.resize(0x100, 0);
+    let recovery = funktion::recover(&image(
+        Arch::X86_64,
+        vec![segment(0x1000, &code, true)],
+        vec![entry(0x1000)],
+    ));
+    assert_eq!((recovery.code, recovery.covered), (0x100, 2));
+    assert_eq!(recovery.invalid, 1);
+    assert_eq!(recovery.unresolved, 0);
 }

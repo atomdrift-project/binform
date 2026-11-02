@@ -39,6 +39,7 @@ mod cfg;
 pub mod cil;
 mod decode;
 use std::borrow::Cow;
+use std::ops::Range;
 
 #[cfg(feature = "object")]
 pub mod object;
@@ -82,7 +83,8 @@ pub enum Origin {
     Fini(u32),
     /// The `n`th TLS callback (PE).
     Tls(u32),
-    /// A symbol-table entry naming a function.
+    /// A symbol-table entry naming a function, or a Go function-table
+    /// (`.gopclntab`) entry.
     Symbol(String),
     /// An exported function.
     Export(String),
@@ -140,6 +142,12 @@ pub struct Image<'a> {
     pub imports: Vec<Import>,
     /// Landing pads, explored as part of the functions they belong to.
     pub handlers: Vec<Handler>,
+    /// The code each function spans, by unwind tables that say so (ELF and
+    /// Mach-O `.eh_frame`, x86-64 PE `.pdata`), each range starting at its
+    /// function's entry. Code inside a range that no path reaches is
+    /// explored too, after an indirect jump funktion cannot follow: the
+    /// cases of a jump table without a bound.
+    pub extents: Vec<Range<u64>>,
     /// The value 32-bit x86 position-independent PLT stubs address the GOT
     /// through (`jmp [ebx + disp]`), when the binary has one.
     pub got: Option<u64>,
@@ -323,13 +331,23 @@ pub enum RefKind {
     Case,
 }
 
-/// The result of [`recover`].
+/// The result of [`recover`], with the facts that say how far to trust it.
+/// A caller that falls back to another tool decides when from these: code
+/// that recovery mostly does not cover (packed or encrypted code), paths
+/// that run into bytes that do not decode (data, or the wrong instruction
+/// set), and jumps whose targets are unknown.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Recovery {
     /// Functions in entry-address order.
     pub functions: Vec<Function>,
+    /// Bytes of executable code in the image.
+    pub code: u64,
     /// Bytes of executable code that lie in some function's instructions.
     pub covered: u64,
+    /// Instructions on the paths functions take that do not decode.
+    pub invalid: u64,
+    /// Indirect jumps whose targets recovery could not determine.
+    pub unresolved: u64,
     /// Whether a [`Limits`] bound stopped recovery early.
     pub truncated: bool,
 }

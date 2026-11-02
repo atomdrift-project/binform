@@ -1,5 +1,5 @@
-# funktion: 1178 functions, 293100 bytes of code covered, 0 landing pads, 13 cases
-# rizin: 1099 functions; 1071 shared, 1048 with the same blocks (1045 of 1065 without landing pads)
+# funktion: 1178 functions, 295456 bytes of code covered, 0 landing pads, 13 cases
+# rizin: 1099 functions; 1071 shared, 1049 with the same blocks (1046 of 1065 without landing pads)
 only rizin 0x8 fcn.00000008: not code
 only rizin 0x10 fcn.00000010: not code
 only rizin 0x18 fcn.00000018: not code
@@ -796,7 +796,7 @@ only rizin 0x6a885 fcn.0006a885: not code
 0x3f030 size=251 blocks=12 edges=18 cc=8 cases=0 found=SYMBOL | UNWIND rizin=12/8
 0x3f130 size=749 blocks=24 edges=40 cc=20 cases=0 found=SYMBOL | UNWIND rizin=24/20
 0x3f420 size=1440 blocks=43 edges=76 cc=35 cases=0 found=SYMBOL | UNWIND rizin=43/35
-0x3f9c0 size=2433 blocks=22 edges=31 cc=13 cases=0 found=SYMBOL | UNWIND rizin=127/74
+0x3f9c0 size=3098 blocks=127 edges=187 cc=64 cases=0 found=SYMBOL | UNWIND rizin=127/74
 0x405e0 size=672 blocks=28 edges=40 cc=14 cases=0 found=SYMBOL | UNWIND rizin=28/14
 0x40880 size=12 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
 0x40890 size=27 blocks=3 edges=3 cc=2 cases=0 found=UNWIND rizin=-

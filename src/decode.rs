@@ -43,8 +43,10 @@ pub(crate) enum Flow {
     JumpIndirect,
     /// Return.
     Return,
-    /// Trap, halt, or bytes that do not decode.
+    /// Trap or halt.
     Stop,
+    /// Bytes that do not decode as an instruction.
+    Invalid,
 }
 
 /// What an instruction does to registers, as far as finding a jump table

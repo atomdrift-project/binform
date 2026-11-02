@@ -74,7 +74,14 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
         handlers: HashMap::new(),
         starts: HashMap::new(),
         explored: HashSet::new(),
+        extents: HashMap::new(),
     };
+    for extent in &image.extents {
+        if extent.start < extent.end {
+            let end = work.extents.entry(extent.start).or_insert(extent.end);
+            *end = (*end).max(extent.end);
+        }
+    }
     for handler in &image.handlers {
         work.handlers
             .entry(handler.function)
@@ -110,6 +117,7 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
 
     let mut functions = Vec::new();
     let mut runs = Vec::new();
+    let (mut invalid, mut unresolved) = (0_u64, 0_u64);
     let mut queue: Vec<u64> = work.entries.keys().rev().copied().collect();
     let mut done = HashSet::new();
     while let Some(entry) = queue.pop() {
@@ -132,6 +140,8 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
             }
         }
         runs.extend(explored.runs);
+        invalid = invalid.saturating_add(explored.invalid);
+        unresolved = unresolved.saturating_add(explored.unresolved);
         functions.push(explored.function);
     }
     // Callers explored after a function add to how it was found.
@@ -145,7 +155,15 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
     functions.sort_by_key(|function| function.entry);
     Recovery {
         functions,
+        code: image
+            .segments
+            .iter()
+            .filter(|segment| segment.executable)
+            .map(|segment| segment.bytes.len() as u64)
+            .fold(0, u64::saturating_add),
         covered: covered(runs),
+        invalid,
+        unresolved,
         truncated: work.truncated,
     }
 }
@@ -186,6 +204,8 @@ struct Work<'a> {
     starts: HashMap<u64, usize>,
     /// Entries explored so far.
     explored: HashSet<u64>,
+    /// Function start -> the end of the code unwind tables say it spans.
+    extents: HashMap<u64, u64>,
 }
 
 /// One explored function, and what it found beyond itself.
@@ -197,6 +217,10 @@ struct Explored {
     mains: Vec<u64>,
     /// Address ranges of its instructions.
     runs: Vec<(u64, u64)>,
+    /// Instructions on its paths that do not decode.
+    invalid: u64,
+    /// Indirect jumps it makes to targets not known.
+    unresolved: u64,
 }
 
 impl Work<'_> {
@@ -367,146 +391,176 @@ impl Work<'_> {
         let mut mains = Vec::new();
         let mut ends = HashSet::new(); // calls that never return
         let mut cases: HashMap<u64, u32> = HashMap::new();
+        let (mut invalid, mut unresolved) = (0_u64, 0_u64);
+        let extent = self.extents.get(&entry).copied();
+        // How far into the extent the search for unreached code has come.
+        let mut cursor = entry;
 
-        while let Some((start, mut tracker)) = pending.pop() {
-            let mut addr = start;
-            self.decoder.reset();
-            // Whether the last instruction walked runs into `addr`, other
-            // than by returning from a call (which may never return).
-            let mut falls = false;
-            loop {
-                if insns.contains_key(&addr) {
-                    break;
-                }
-                if addr != entry
-                    && let Some(&found) = self.entries.get(&addr)
-                {
-                    // Code that runs straight into a start known only from
-                    // unwind data continues there: a compiler that
-                    // shrink-wraps a function gives its parts their own
-                    // unwind entries. Anything else there is another
-                    // function.
-                    if !(falls && found == Found::UNWIND) || self.explored.contains(&addr) {
+        loop {
+            while let Some((start, mut tracker)) = pending.pop() {
+                let mut addr = start;
+                self.decoder.reset();
+                // Whether the last instruction walked runs into `addr`, other
+                // than by returning from a call (which may never return).
+                let mut falls = false;
+                loop {
+                    if insns.contains_key(&addr) {
                         break;
                     }
-                    self.entries.remove(&addr);
-                    if refs.iter().any(|r: &Ref| r.to == addr) {
-                        leaders.insert(addr);
-                    }
-                }
-                let Some(bytes) = self.memory.code(addr) else {
-                    break;
-                };
-                let Some(insn) = self.decode(bytes, addr) else {
-                    break;
-                };
-                insns.insert(addr, insn);
-                // Padding after a call that never returns runs into
-                // nothing.
-                if !insn.pad {
-                    falls = matches!(insn.flow, Flow::Next | Flow::Branch(_));
-                }
-                let next = addr.wrapping_add(u64::from(insn.len));
-                let target = |to: u64,
-                              tracker: &Tracker,
-                              leaders: &mut BTreeSet<u64>,
-                              pending: &mut Vec<(u64, Tracker)>| {
-                    // A jump to another function's start is a tail call.
-                    let local = to == entry || !self.entries.contains_key(&to);
-                    if local && self.memory.is_code(to) && leaders.insert(to) {
-                        pending.push((to, tracker.clone()));
-                    }
-                };
-                // Branches and calls only read registers; what a call
-                // changes, `call` forgets below.
-                if insn.flow == Flow::Next {
-                    tracker.note(insn.note);
-                }
-                match insn.flow {
-                    Flow::Next => {}
-                    Flow::CallIndirect => tracker.call(),
-                    Flow::Call(to) => {
-                        mains.extend(self.main(entry, to, next, &tracker));
-                        tracker.call();
-                        // A PC thunk returns the address after the call.
-                        let thunk = self
-                            .memory
-                            .code(to)
-                            .and_then(|code| self.decoder.pc_thunk(code));
-                        if let Some(reg) = thunk {
-                            tracker.note(Note::Address { reg, addr: next });
-                        }
-                        refs.push(Ref {
-                            from: addr,
-                            to,
-                            kind: RefKind::Call,
-                        });
-                        calls.push(to);
-                        if self.never_returns(to) {
-                            ends.insert(addr);
+                    if addr != entry
+                        && let Some(&found) = self.entries.get(&addr)
+                    {
+                        // Code that runs straight into a start known only from
+                        // unwind data continues there: a compiler that
+                        // shrink-wraps a function gives its parts their own
+                        // unwind entries. Anything else there is another
+                        // function.
+                        if !(falls && found == Found::UNWIND) || self.explored.contains(&addr) {
                             break;
                         }
-                    }
-                    Flow::CallSlot(slot) => {
-                        mains.extend(self.main(entry, slot, next, &tracker));
-                        tracker.call();
-                        refs.push(Ref {
-                            from: addr,
-                            to: slot,
-                            kind: RefKind::Call,
-                        });
-                        if self.noreturn.contains(&slot) {
-                            ends.insert(addr);
-                            break;
+                        self.entries.remove(&addr);
+                        if refs.iter().any(|r: &Ref| r.to == addr) {
+                            leaders.insert(addr);
                         }
                     }
-                    Flow::Branch(to) => {
-                        refs.push(Ref {
-                            from: addr,
-                            to,
-                            kind: RefKind::Branch,
-                        });
-                        target(to, &tracker, &mut leaders, &mut pending);
-                        // The fall-through starts a block; this walk decodes it.
-                        leaders.insert(next);
-                    }
-                    Flow::Jump(to) => {
-                        refs.push(Ref {
-                            from: addr,
-                            to,
-                            kind: RefKind::Jump,
-                        });
-                        target(to, &tracker, &mut leaders, &mut pending);
+                    let Some(bytes) = self.memory.code(addr) else {
                         break;
-                    }
-                    Flow::JumpSlot(slot) => {
-                        refs.push(Ref {
-                            from: addr,
-                            to: slot,
-                            kind: RefKind::Jump,
-                        });
+                    };
+                    let Some(insn) = self.decode(bytes, addr) else {
                         break;
+                    };
+                    insns.insert(addr, insn);
+                    // Padding after a call that never returns runs into
+                    // nothing.
+                    if !insn.pad {
+                        falls = matches!(insn.flow, Flow::Next | Flow::Branch(_));
                     }
-                    Flow::JumpMemory(_) | Flow::JumpRegister(_) => {
-                        let table = tracker.jump(insn.flow);
-                        let targets = table
-                            .map(|table| table.targets(&self.memory, self.table_entries))
-                            .unwrap_or_default();
-                        cases.insert(addr, u32::try_from(targets.len()).unwrap_or(u32::MAX));
-                        for to in targets {
+                    let next = addr.wrapping_add(u64::from(insn.len));
+                    let target =
+                        |to: u64,
+                         tracker: &Tracker,
+                         leaders: &mut BTreeSet<u64>,
+                         pending: &mut Vec<(u64, Tracker)>| {
+                            // A jump to another function's start is a tail call.
+                            let local = to == entry || !self.entries.contains_key(&to);
+                            if local && self.memory.is_code(to) && leaders.insert(to) {
+                                pending.push((to, tracker.clone()));
+                            }
+                        };
+                    // Branches and calls only read registers; what a call
+                    // changes, `call` forgets below.
+                    if insn.flow == Flow::Next {
+                        tracker.note(insn.note);
+                    }
+                    match insn.flow {
+                        Flow::Next => {}
+                        Flow::CallIndirect => tracker.call(),
+                        Flow::Call(to) => {
+                            mains.extend(self.main(entry, to, next, &tracker));
+                            tracker.call();
+                            // A PC thunk returns the address after the call.
+                            let thunk = self
+                                .memory
+                                .code(to)
+                                .and_then(|code| self.decoder.pc_thunk(code));
+                            if let Some(reg) = thunk {
+                                tracker.note(Note::Address { reg, addr: next });
+                            }
                             refs.push(Ref {
                                 from: addr,
                                 to,
-                                kind: RefKind::Case,
+                                kind: RefKind::Call,
+                            });
+                            calls.push(to);
+                            if self.never_returns(to) {
+                                ends.insert(addr);
+                                break;
+                            }
+                        }
+                        Flow::CallSlot(slot) => {
+                            mains.extend(self.main(entry, slot, next, &tracker));
+                            tracker.call();
+                            refs.push(Ref {
+                                from: addr,
+                                to: slot,
+                                kind: RefKind::Call,
+                            });
+                            if self.noreturn.contains(&slot) {
+                                ends.insert(addr);
+                                break;
+                            }
+                        }
+                        Flow::Branch(to) => {
+                            refs.push(Ref {
+                                from: addr,
+                                to,
+                                kind: RefKind::Branch,
                             });
                             target(to, &tracker, &mut leaders, &mut pending);
+                            // The fall-through starts a block; this walk decodes it.
+                            leaders.insert(next);
                         }
-                        break;
+                        Flow::Jump(to) => {
+                            refs.push(Ref {
+                                from: addr,
+                                to,
+                                kind: RefKind::Jump,
+                            });
+                            target(to, &tracker, &mut leaders, &mut pending);
+                            break;
+                        }
+                        Flow::JumpSlot(slot) => {
+                            refs.push(Ref {
+                                from: addr,
+                                to: slot,
+                                kind: RefKind::Jump,
+                            });
+                            break;
+                        }
+                        Flow::JumpMemory(_) | Flow::JumpRegister(_) => {
+                            let table = tracker.jump(insn.flow);
+                            let targets = table
+                                .map(|table| table.targets(&self.memory, self.table_entries))
+                                .unwrap_or_default();
+                            cases.insert(addr, u32::try_from(targets.len()).unwrap_or(u32::MAX));
+                            if targets.is_empty() {
+                                unresolved = unresolved.saturating_add(1);
+                            }
+                            for to in targets {
+                                refs.push(Ref {
+                                    from: addr,
+                                    to,
+                                    kind: RefKind::Case,
+                                });
+                                target(to, &tracker, &mut leaders, &mut pending);
+                            }
+                            break;
+                        }
+                        Flow::JumpIndirect => {
+                            unresolved = unresolved.saturating_add(1);
+                            break;
+                        }
+                        Flow::Invalid => {
+                            invalid = invalid.saturating_add(1);
+                            break;
+                        }
+                        Flow::Return | Flow::Stop => break,
                     }
-                    Flow::JumpIndirect | Flow::Return | Flow::Stop => break,
+                    addr = next;
                 }
-                addr = next;
             }
+            // After a jump to targets not known, code the unwind table gives
+            // this function that no path reached is reached from there: the
+            // cases of a table without a bound (a switch on an enum the
+            // compiler knows the range of).
+            let Some(end) = extent.filter(|_| unresolved > 0) else {
+                break;
+            };
+            let Some(gap) = self.unreached(entry, end, &mut cursor, &insns) else {
+                break;
+            };
+            leaders.insert(gap);
+            pending.push((gap, Tracker::new(self.decoder.address_width())));
         }
 
         let (blocks, edges, exits) = self.graph(entry, &insns, &leaders, &ends, &cases);
@@ -534,7 +588,45 @@ impl Work<'_> {
             calls,
             mains,
             runs: runs(&insns),
+            invalid,
+            unresolved,
         }
+    }
+
+    /// The first instruction from `cursor` up to `end` that no path of the
+    /// function at `entry` decoded, past padding. `None` at `end`, at
+    /// another function's start, and at bytes that do not decode: the
+    /// unwind table was wrong, or the bytes are data.
+    fn unreached(
+        &mut self,
+        entry: u64,
+        end: u64,
+        cursor: &mut u64,
+        insns: &BTreeMap<u64, Insn>,
+    ) -> Option<u64> {
+        self.decoder.reset();
+        while *cursor < end {
+            let at = *cursor;
+            if let Some((&addr, insn)) = insns.range(..=at).next_back() {
+                let past = addr.saturating_add(u64::from(insn.len));
+                if past > at {
+                    *cursor = past;
+                    continue;
+                }
+            }
+            if at != entry && self.entries.contains_key(&at) {
+                return None;
+            }
+            let insn = self.decode(self.memory.code(at)?, at)?;
+            if insn.flow == Flow::Invalid {
+                return None;
+            }
+            if !insn.pad {
+                return Some(at);
+            }
+            *cursor = at.saturating_add(u64::from(insn.len));
+        }
+        None
     }
 
     /// Count blocks, edges and exit blocks: a block starts at each leader
@@ -562,7 +654,11 @@ impl Work<'_> {
                     Flow::JumpMemory(_) | Flow::JumpRegister(_) => {
                         (cases.get(&addr).copied().unwrap_or(0), true)
                     }
-                    Flow::JumpSlot(_) | Flow::JumpIndirect | Flow::Return | Flow::Stop => (0, true),
+                    Flow::JumpSlot(_)
+                    | Flow::JumpIndirect
+                    | Flow::Return
+                    | Flow::Stop
+                    | Flow::Invalid => (0, true),
                     _ => {
                         let next = addr.wrapping_add(u64::from(insn.len));
                         if leaders.contains(&next) && insns.contains_key(&next) {
@@ -587,10 +683,11 @@ impl Work<'_> {
     }
 }
 
-/// The contiguous address ranges a function's instructions occupy.
+/// The contiguous address ranges a function's instructions occupy. Bytes
+/// that do not decode are no instruction.
 fn runs(insns: &BTreeMap<u64, Insn>) -> Vec<(u64, u64)> {
     let mut runs: Vec<(u64, u64)> = Vec::new();
-    for (&addr, insn) in insns {
+    for (&addr, insn) in insns.iter().filter(|(_, insn)| insn.flow != Flow::Invalid) {
         let end = addr.saturating_add(u64::from(insn.len));
         match runs.last_mut() {
             Some(last) if last.1 >= addr => last.1 = last.1.max(end),

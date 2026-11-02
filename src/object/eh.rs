@@ -6,6 +6,8 @@
 //! the unwinder enters it to run a destructor or a `catch`. Without it, a
 //! function's graph misses its cleanup code.
 
+use std::ops::Range;
+
 use crate::Handler;
 use crate::decode::Memory;
 
@@ -15,14 +17,14 @@ const MOST_PADS: usize = 1 << 14;
 /// `DW_EH_PE_omit`: the field is absent.
 const OMIT: u8 = 0xff;
 
-/// The start of every range the `.eh_frame` at `addr` describes, and the
+/// Every function's code the `.eh_frame` at `addr` describes, and the
 /// landing pads its LSDAs name.
 pub(super) fn eh_frame(
     memory: &Memory<'_>,
     addr: u64,
     size: u64,
     is_64: bool,
-) -> (Vec<u64>, Vec<Handler>) {
+) -> (Vec<Range<u64>>, Vec<Handler>) {
     use gimli::{BaseAddresses, CieOrFde, EhFrame, LittleEndian, Pointer, UnwindSection};
     let Some((data, _)) = memory.at(addr) else {
         return (Vec::new(), Vec::new());
@@ -35,7 +37,7 @@ pub(super) fn eh_frame(
     eh_frame.set_address_size(width);
     let bases = BaseAddresses::default().set_eh_frame(addr);
     let mut entries = eh_frame.entries(&bases);
-    let (mut starts, mut handlers) = (Vec::new(), Vec::new());
+    let (mut extents, mut handlers) = (Vec::new(), Vec::new());
     while let Ok(Some(entry)) = entries.next() {
         let CieOrFde::Fde(partial) = entry else {
             continue;
@@ -44,7 +46,7 @@ pub(super) fn eh_frame(
             continue;
         };
         let function = fde.initial_address();
-        starts.push(function);
+        extents.push(function..function.saturating_add(fde.len()));
         let lsda = match fde.lsda() {
             Some(Pointer::Direct(lsda)) => Some(lsda),
             Some(Pointer::Indirect(slot)) => memory.read(slot, width),
@@ -58,7 +60,7 @@ pub(super) fn eh_frame(
             );
         }
     }
-    (starts, handlers)
+    (extents, handlers)
 }
 
 /// The landing pads the LSDA at `addr` names for the function at
@@ -264,8 +266,9 @@ mod tests {
             },
         ];
         let memory = Memory::new(&segments);
-        let (starts, handlers) = eh_frame(&memory, 0x3000, section.len() as u64, true);
-        assert_eq!(starts, [0x1000]);
+        let (extents, handlers) = eh_frame(&memory, 0x3000, section.len() as u64, true);
+        assert_eq!(extents.len(), 1);
+        assert_eq!(extents.first(), Some(&(0x1000..0x1020)));
         assert_eq!(
             handlers,
             [Handler {
