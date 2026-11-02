@@ -358,6 +358,24 @@ impl Pe<'_> {
             .collect()
     }
 
+    /// The 32-bit Arm (`ARMNT`) `.pdata` entries that start functions, as
+    /// RVAs (Thumb, so odd): all but fragments, whose packed flag or
+    /// `.xdata` `F` bit says they have no prologue of their own.
+    pub(super) fn arm_functions(&self) -> Vec<u32> {
+        let r = &self.r;
+        self.runtime_functions(8)
+            .map_while(|at| Some((r.u32(at)?, r.u32(at + 4)?)))
+            .filter(|&(_, unwind)| match unwind & 3 {
+                0 => self
+                    .offset(unwind)
+                    .and_then(|at| r.u32(at))
+                    .is_some_and(|header| header >> 22 & 1 == 0),
+                flag => flag == 1,
+            })
+            .map(|(begin, _)| begin | 1)
+            .collect()
+    }
+
     /// Whether an A64 entry's unwind data describes a fragment: packed data
     /// that says so, or `.xdata` whose unwind codes begin with `end_c`,
     /// which stands for the prologue a fragment does not have.

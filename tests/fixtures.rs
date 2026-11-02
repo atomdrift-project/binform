@@ -616,6 +616,17 @@ fn sparc_objects() {
     check("calls-sparc64.o", links_calls);
 }
 
+/// Jump-table cases across all functions.
+fn cases(outcome: &Outcome<'_>) -> usize {
+    outcome
+        .recovery
+        .functions
+        .iter()
+        .flat_map(|f| &f.refs)
+        .filter(|r| r.kind == RefKind::Case)
+        .count()
+}
+
 /// The functions funktion and rizin share, and on how many of them, as a
 /// percentage, they agree on blocks (landing pads aside).
 fn agreement(outcome: &Outcome<'_>) -> (usize, usize) {
@@ -720,9 +731,42 @@ fn c_mips64_and_s390x() {
     check("libe_sqlite3-linux-mips64.so", |outcome| {
         finds_all_of_rizin(outcome);
         assert!(agreement(outcome).0 > 2450);
+        // GCC's PIC tables: `sltiu` bounds the case, a GOT page entry plus
+        // `daddiu` is the table, `dsll; daddu; ld` reads an offset from
+        // `_gp`, which `$gp` or a register holding it adds back.
+        assert!(cases(outcome) > 2600, "only {} cases", cases(outcome));
     });
     check("libe_sqlite3-linux-s390x.so", |outcome| {
         finds_all_of_rizin(outcome);
         assert_eq!(agreement(outcome).0, outcome.rizin.len());
+        // GCC's tables: `clijh` bounds the case, `lg` reads an 8-byte
+        // offset from the table, `b 0(%rE,%rT)` adds the two.
+        assert!(cases(outcome) > 2400, "only {} cases", cases(outcome));
+    });
+}
+
+/// MSVC's Windows on 32-bit Arm: Thumb-2 entries from `.pdata`, and calls
+/// to imports through slots loaded from literal pools.
+#[test]
+fn pe_armnt() {
+    check("e_sqlite3-win-arm.dll", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::Arm);
+        // A case target rizin takes for a function.
+        finds_rizin_except(outcome, &[(0x100c_745e, "a case of 0x100a813a")]);
+        let (same, shared) = outcome.same_blocks_without_pads();
+        assert!(
+            shared > 2300 && same * 100 >= shared * 95,
+            "{same} of {shared}"
+        );
+        let slots: std::collections::HashSet<u64> =
+            outcome.image.imports.iter().map(|i| i.slot).collect();
+        let imported = outcome
+            .recovery
+            .functions
+            .iter()
+            .flat_map(|f| &f.refs)
+            .filter(|r| r.kind == RefKind::Call && slots.contains(&r.to))
+            .count();
+        assert!(imported > 140, "only {imported} calls to imports");
     });
 }

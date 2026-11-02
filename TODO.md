@@ -6,13 +6,15 @@
 
 - **Jump tables:** Arm reads `tbb`/`tbh`, `addls pc, pc, rN, lsl #2` and
   `ldrls pc, [pc, rN, lsl #2]` when the `cmp` that bounds them sits right
-  before (every other Arm instruction forgets all registers). MIPS
-  (`sltiu; lui/addiu; sll; addu; lw; jr`), s390x (`clgfi; sllg; lgf; agr;
-  br`) and SPARC tables are still unresolved. `libe_sqlite3-linux-mips64.so`
-  and `libe_sqlite3-linux-s390x.so` (GCC) have them; on SPARC they hold
-  coverage of the sqlite builds to 71-87%.
-  Thumb-1's `add pc, rm` tables (GCC's `__gnu_thumb1_case_*` helpers) are
-  not read either.
+  before (every other Arm instruction forgets all registers). s390x reads
+  GCC's `clijh; risbgn; larl; lg; b 0(%rX,%rT)`, and MIPS GCC's PIC form
+  (`sltiu; ld page(gp); daddiu; dsll; daddu; ld; daddu gp; jr`, with `_gp`
+  in `$gp` or a register computed from `$t9`); 70 of the 75 in
+  `libe_sqlite3-linux-mips64.so` resolve. Left: MIPS tables bounded on a
+  value reloaded from memory, non-PIC MIPS (`lui; addiu` tables, written
+  but untested on a sample), SPARC tables (they hold coverage of the sqlite
+  builds to 71-87%), and Thumb-1's `add pc, rm` tables (GCC's
+  `__gnu_thumb1_case_*` helpers).
 - **Objects:** `relocate` links calls on every set but SuperH. MIPS
   position-independent objects call through `$t9`; their `R_MIPS_JALR`
   hints turn the `jalr`/`jr` into a direct `jal`/`j`, but the `$gp`
@@ -23,8 +25,7 @@
   MIPS GOT calls (`lw $t9, n(rX); jalr $t9`) are read when the load is
   right before the call; GCC's local form (`lw $t9, %got(f)($gp); addiu
   $t9, $t9, %lo(f)`) is not.
-- **Not read:** big-endian Arm and SuperH, 31-bit s390, PE `ARMNT`
-  (Thumb-2 Windows: SQLitePCLRaw's `runtimes/win-arm` DLL is a sample),
+- **Not read:** big-endian Arm and SuperH, 31-bit s390,
   `.ARM.exidx` unwind entries, and LSDAs on big-endian sets
   (`eh::landing_pads` reads little-endian).
 - **MIPS16e:** OpenWrt builds its MIPS packages as MIPS16e (`e_flags` has

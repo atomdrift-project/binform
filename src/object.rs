@@ -505,8 +505,12 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &Pe<'_>) -> Result<Image<'a>, Error> {
         0x014c => Arch::X86,
         0x8664 => Arch::X86_64,
         0xaa64 => Arch::Arm64,
+        // ARMNT: Windows on 32-bit Arm runs Thumb-2 only.
+        0x01c4 => Arch::Arm,
         _ => return Err(Error::Arch(format!("PE machine {machine:#06x}"))),
     };
+    // Code addresses carry Thumb's bit 0, as `.pdata` writes them.
+    let code = |addr: u64| if arch == Arch::Arm { addr | 1 } else { addr };
     let base = pe.image_base;
     let at = |rva: u32| base.wrapping_add(u64::from(rva));
     let segments: Vec<Segment<'a>> = pe
@@ -533,17 +537,17 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &Pe<'_>) -> Result<Image<'a>, Error> {
 
     let mut seeds = Vec::new();
     if pe.entry != 0 {
-        seeds.push(seed(at(pe.entry), Origin::Entry));
+        seeds.push(seed(code(at(pe.entry)), Origin::Entry));
     }
     for (rva, name) in pe.exports() {
         if rva != 0 {
-            seeds.push(seed(at(rva), Origin::Export(name)));
+            seeds.push(seed(code(at(rva)), Origin::Export(name)));
         }
     }
     seeds.extend(
         (0..)
             .zip(pe.tls_callbacks())
-            .map(|(i, addr)| seed(addr, Origin::Tls(i))),
+            .map(|(i, addr)| seed(code(addr), Origin::Tls(i))),
     );
     seeds.extend(
         pe_gopclntab(&segments)
@@ -554,6 +558,11 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &Pe<'_>) -> Result<Image<'a>, Error> {
     match arch {
         Arch::Arm64 => seeds.extend(
             pe.arm64_functions()
+                .into_iter()
+                .map(|begin| seed(at(begin), Origin::Unwind)),
+        ),
+        Arch::Arm => seeds.extend(
+            pe.arm_functions()
                 .into_iter()
                 .map(|begin| seed(at(begin), Origin::Unwind)),
         ),

@@ -26,7 +26,36 @@ pub(crate) struct State {
     it: u8,
     /// The address in `ip` (r12), from the arithmetic a PLT stub does.
     ip: Option<u64>,
+    /// What Thumb code left in each register, as far as calls through
+    /// import slots need: MSVC loads a slot's address from a literal pool,
+    /// the pointer from the slot, and calls it (`ldr r4, [pc, #n]; ldr r4,
+    /// [r4]; blx r4`).
+    regs: [Held; 16],
 }
+
+/// What a register holds.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Held {
+    #[default]
+    Unknown,
+    /// A fixed address.
+    Address(u32),
+    /// The word stored at a fixed address: a slot's pointer.
+    Loaded(u32),
+}
+
+/// The registers an instruction writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Writes {
+    None,
+    /// Each register whose bit is set.
+    Regs(u32),
+    /// Some it does not say, or too many to tell: every register.
+    All,
+}
+
+/// The registers a call may change: r0-r3, ip, lr.
+const CALLER_SAVED: u32 = 0x500f;
 
 pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
     if addr & 1 != 0 {
@@ -273,7 +302,18 @@ fn thumb(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
             return Insn::new(2, Flow::Invalid);
         };
         let (first, second) = (u32::from(first), u32::from(second));
-        let flow = t32(first, second, pc, conditional);
+        let flow = through_slot(state, t32(first, second, pc, conditional, state.ip), None);
+        track_t32(state, bytes, addr, first, second, flow);
+        // MOVW, MOVT into ip: the address a Windows import thunk jumps
+        // through (`movw ip, #lo; movt ip, #hi; ldr.w pc, [ip]`).
+        let imm16 =
+            (first & 0xf) << 12 | (first >> 10 & 1) << 11 | (second >> 12 & 7) << 8 | second & 0xff;
+        let to_ip = second & 0x8000 == 0 && second >> 8 & 0xf == 12;
+        state.ip = match first & 0xfbf0 {
+            0xf240 if to_ip => Some(u64::from(imm16)),
+            0xf2c0 if to_ip => state.ip.map(|ip| ip & 0xffff | u64::from(imm16) << 16),
+            _ => None,
+        };
         let mut decoded = insn(4, flow, conditional);
         if flow == Flow::Next {
             // CMP.W rn, #imm
@@ -339,6 +379,8 @@ fn thumb(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
     } else {
         Flow::Next
     };
+    let flow = through_slot(state, flow, Some(word));
+    track_t16(state, bytes, addr, word, flow);
     let mut decoded = insn(2, flow, conditional);
     // NOP and the other hints, `mov r8, r8`
     decoded.pad = word == 0xbf00 || word == 0x46c0;
@@ -351,8 +393,186 @@ fn thumb(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
     decoded
 }
 
+/// `flow`, a call or jump through a register (`blx rm`, `bx rm`, from the
+/// 16-bit `word` that does it), as one through the slot that register was
+/// loaded from.
+fn through_slot(state: &State, flow: Flow, word: Option<u32>) -> Flow {
+    let Some(word) = word else {
+        return flow;
+    };
+    let rm = (word >> 3) & 0xf;
+    match (flow, state.regs.get(rm as usize)) {
+        (Flow::CallIndirect, Some(&Held::Loaded(slot))) if word & 0xff87 == 0x4780 => {
+            Flow::CallSlot(u64::from(slot))
+        }
+        (Flow::JumpRegister(_), Some(&Held::Loaded(slot))) => Flow::JumpSlot(u64::from(slot)),
+        _ => flow,
+    }
+}
+
+/// The little-endian word at `at` in `bytes`, which start at `addr`.
+fn literal(bytes: &[u8], addr: u64, at: u64) -> Option<u32> {
+    let offset = usize::try_from(at.checked_sub(addr)?).ok()?;
+    word(bytes.get(offset..)?)
+}
+
+/// Apply `writes` to the registers.
+fn forget(state: &mut State, writes: Writes) {
+    let mask = match writes {
+        Writes::None => return,
+        Writes::Regs(mask) => mask,
+        Writes::All => u32::MAX,
+    };
+    for (i, held) in state.regs.iter_mut().enumerate() {
+        if mask >> i & 1 != 0 {
+            *held = Held::Unknown;
+        }
+    }
+}
+
+fn set(state: &mut State, reg: u32, held: Held) {
+    if let Some(slot) = state.regs.get_mut(reg as usize) {
+        *slot = held;
+    }
+}
+
+/// `held`, an address `offset` on, loaded from.
+fn load(held: Held, offset: u32) -> Held {
+    match held {
+        Held::Address(addr) => Held::Loaded(addr.wrapping_add(offset)),
+        _ => Held::Unknown,
+    }
+}
+
+/// What the 16-bit Thumb `word` at `addr` leaves in the registers.
+fn track_t16(state: &mut State, bytes: &[u8], addr: u64, word: u32, flow: Flow) {
+    let low = word & 7;
+    let high = (word >> 8) & 7;
+    let held = |reg: u32| state.regs.get(reg as usize).copied().unwrap_or_default();
+    // LDR rt, [pc, #imm8 * 4]: a literal.
+    if word & 0xf800 == 0x4800 {
+        let at = (addr.wrapping_add(4) & !3).wrapping_add(u64::from(word & 0xff) * 4);
+        let value = literal(bytes, addr, at).map_or(Held::Unknown, Held::Address);
+        return set(state, high, value);
+    }
+    // LDR rt, [rn, #imm5 * 4]
+    if word & 0xf800 == 0x6800 {
+        let value = load(held((word >> 3) & 7), ((word >> 6) & 0x1f) * 4);
+        return set(state, low, value);
+    }
+    // MOV rd, rm (high registers too)
+    if word & 0xff00 == 0x4600 {
+        let rd = (word >> 4) & 8 | low;
+        return set(state, rd, held((word >> 3) & 0xf));
+    }
+    let writes = match word >> 11 {
+        // Shifts, ADD/SUB (register, 3-bit immediate)
+        0x00..=0x03 => Writes::Regs(1 << low),
+        // MOV, CMP, ADD, SUB (8-bit immediate)
+        0x04 | 0x06 | 0x07 => Writes::Regs(1 << high),
+        0x05 => Writes::None,
+        0x08 if word < 0x4400 => match (word >> 6) & 0xf {
+            // TST, CMP, CMN
+            8 | 10 | 11 => Writes::None,
+            _ => Writes::Regs(1 << low),
+        },
+        // ADD (high registers); CMP; BX and BLX.
+        0x08 => match (word >> 8) & 3 {
+            0 => Writes::Regs(1 << ((word >> 4) & 8 | low)),
+            _ => Writes::None,
+        },
+        // Loads with a register offset: LDRSB, LDR, LDRH, LDRB, LDRSH.
+        0x0a | 0x0b if (word >> 9) & 7 >= 3 => Writes::Regs(1 << low),
+        0x0a | 0x0b => Writes::None,
+        // Loads and stores with an immediate offset: bit 11 loads.
+        0x0c..=0x11 if word & 0x0800 != 0 => Writes::Regs(1 << low),
+        0x0c..=0x12 => Writes::None,
+        // LDR (SP-relative), ADR, ADD rd, sp
+        0x13..=0x15 => Writes::Regs(1 << high),
+        // POP
+        0x17 if word & 0x0600 == 0x0400 => Writes::Regs(word & 0x1ff),
+        // SXTH and the like, REV and the like.
+        0x16 | 0x17 if word & 0x0f00 == 0x0200 || word & 0x0f00 == 0x0a00 => Writes::Regs(1 << low),
+        // PUSH, CBZ, IT, hints, ADD/SUB sp
+        0x16 | 0x17 => Writes::None,
+        // STM writes back its base; LDM loads its list.
+        0x18 => Writes::Regs(1 << high),
+        0x19 => Writes::Regs(word & 0xff | 1 << high),
+        // Branches.
+        0x1a..=0x1c => Writes::None,
+        _ => Writes::All,
+    };
+    forget(state, writes);
+    if matches!(flow, Flow::Call(_) | Flow::CallSlot(_) | Flow::CallIndirect) {
+        forget(state, Writes::Regs(CALLER_SAVED));
+    }
+}
+
+/// What the 32-bit Thumb instruction at `addr` leaves in the registers.
+fn track_t32(state: &mut State, bytes: &[u8], addr: u64, first: u32, second: u32, flow: Flow) {
+    let rt = second >> 12;
+    let rd = (second >> 8) & 0xf;
+    let rn = first & 0xf;
+    let held = |reg: u32| state.regs.get(reg as usize).copied().unwrap_or_default();
+    let imm16 =
+        (first & 0xf) << 12 | (first >> 10 & 1) << 11 | (second >> 12 & 7) << 8 | second & 0xff;
+    match first & 0xfbf0 {
+        // MOVW, MOVT
+        0xf240 if second & 0x8000 == 0 => return set(state, rd, Held::Address(imm16)),
+        0xf2c0 if second & 0x8000 == 0 => {
+            let value = match held(rd) {
+                Held::Address(low) => Held::Address(low & 0xffff | imm16 << 16),
+                _ => Held::Unknown,
+            };
+            return set(state, rd, value);
+        }
+        _ => {}
+    }
+    // LDR.W rt, [pc, #+/-imm12]
+    if first & 0xff7f == 0xf85f {
+        let base = addr.wrapping_add(4) & !3;
+        let offset = u64::from(second & 0xfff);
+        let at = if first & 0x80 != 0 {
+            base.wrapping_add(offset)
+        } else {
+            base.wrapping_sub(offset)
+        };
+        let value = literal(bytes, addr, at).map_or(Held::Unknown, Held::Address);
+        return set(state, rt, value);
+    }
+    // LDR.W rt, [rn, #imm12]
+    if first & 0xfff0 == 0xf8d0 {
+        let value = load(held(rn), second & 0xfff);
+        return set(state, rt, value);
+    }
+    let writes = if first & 0xf800 == 0xf000 && second & 0x8000 == 0 {
+        // Data processing with an immediate.
+        Writes::Regs(1 << rd)
+    } else if first & 0xfe00 == 0xea00 || first & 0xff00 == 0xfa00 || first & 0xff80 == 0xfb00 {
+        // Data processing with registers, shifts, multiplies.
+        Writes::Regs(1 << rd)
+    } else if first & 0xfe00 == 0xf800 {
+        // Single loads (bit 4) and stores.
+        if first & 0x10 != 0 {
+            Writes::Regs(1 << rt)
+        } else {
+            Writes::None
+        }
+    } else if first & 0xf800 == 0xf000 {
+        // Branches and calls.
+        Writes::None
+    } else {
+        // LDM, LDRD, coprocessor moves and the rest.
+        Writes::All
+    };
+    forget(state, writes);
+    if matches!(flow, Flow::Call(_) | Flow::CallSlot(_) | Flow::CallIndirect) {
+        forget(state, Writes::Regs(CALLER_SAVED));
+    }
+}
+
 /// A 32-bit Thumb instruction's flow, from its halfwords.
-fn t32(first: u32, second: u32, pc: u64, conditional: bool) -> Flow {
+fn t32(first: u32, second: u32, pc: u64, conditional: bool, ip: Option<u64>) -> Flow {
     if first & 0xf800 == 0xf000 && second & 0x8000 != 0 {
         let s = (first >> 10) & 1;
         let (j1, j2) = ((second >> 13) & 1, (second >> 11) & 1);
@@ -432,6 +652,10 @@ fn t32(first: u32, second: u32, pc: u64, conditional: bool) -> Flow {
             }
             // `pop.w {pc}`: post-indexed from the stack.
             SP if first & 0xfff0 == 0xf850 && second & 0x0f00 == 0x0b00 => Flow::Return,
+            // An import thunk's `ldr.w pc, [ip, #n]`.
+            12 if first & 0xfff0 == 0xf8d0 => ip.map_or(Flow::JumpIndirect, |ip| {
+                Flow::JumpSlot(wrap(ip.wrapping_add(u64::from(second & 0xfff))))
+            }),
             _ => Flow::JumpIndirect,
         };
     }
@@ -588,6 +812,30 @@ mod tests {
                 Flow::JumpSlot(0x2018),
             ]
         );
+    }
+
+    #[test]
+    fn calls_through_a_literal_slot() {
+        // 0x1000: ldr r4, [pc, #4] (the literal at 0x1008); ldr r3, [r4];
+        // blx r3; bx lr; the literal 0x2000.
+        let insns = t(&[0x4c01, 0x6823, 0x4798, 0x4770, 0x2000, 0], 0x1000);
+        assert_eq!(insns[2].flow, Flow::CallSlot(0x2000));
+        // ldr r4, [pc, #4]; ldr r3, [r4]; adds r3, #1; blx r3
+        let insns = t(&[0x4c01, 0x6823, 0x3301, 0x4798, 0x2000, 0], 0x1000);
+        assert_eq!(insns[3].flow, Flow::CallIndirect);
+        // movw r3, #0x2000; ldr.w r2, [r3, #8]; bx r2
+        let insns = t(&[0xf242, 0x0300, 0xf8d3, 0x2008, 0x4710], 0x1000);
+        assert_eq!(insns[2].flow, Flow::JumpSlot(0x2008));
+    }
+
+    #[test]
+    fn windows_import_thunk() {
+        // movw ip, #0xd098; movt ip, #0x100f; ldr.w pc, [ip]
+        let insns = t(&[0xf24d, 0x0c98, 0xf2c1, 0x0c0f, 0xf8dc, 0xf000], 0x1000);
+        assert_eq!(insns[2].flow, Flow::JumpSlot(0x100f_d098));
+        // Without the movw, ip is not known.
+        let insns = t(&[0xf2c1, 0x0c0f, 0xf8dc, 0xf000], 0x1000);
+        assert_eq!(insns[1].flow, Flow::JumpIndirect);
     }
 
     #[test]

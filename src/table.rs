@@ -154,10 +154,22 @@ impl Tracker {
                 signed,
             } => (reg, self.load(mem, size, signed).map(Value::Entry)),
             Note::Copy { reg, src } => (reg, Some(self.copy(src))),
+            // A constant added to an entry of absolute offsets makes them
+            // relative to it (MIPS adds `$gp`).
             Note::Offset { reg, src, imm } => (
                 reg,
-                self.held(src)
-                    .map(|addr| Value::Address(addr.wrapping_add(imm) & self.mask())),
+                match self.get(src) {
+                    Some(Value::Address(addr)) => {
+                        Some(Value::Address(addr.wrapping_add(imm) & self.mask()))
+                    }
+                    Some(Value::Entry(table)) if table.base.is_none() && table.size >= 4 => {
+                        Some(Value::Entry(Table {
+                            base: Some(imm & self.mask()),
+                            ..table
+                        }))
+                    }
+                    _ => None,
+                },
             ),
             Note::Add {
                 reg,
@@ -210,7 +222,7 @@ impl Tracker {
             }
             _ => return None,
         };
-        if table.base.is_some() || !matches!(table.size, 1 | 2 | 4) || shift > 4 {
+        if table.base.is_some() || !matches!(table.size, 1 | 2 | 4 | 8) || shift > 4 {
             return None;
         }
         Some(Value::Entry(Table {
@@ -262,6 +274,10 @@ impl Tracker {
     pub(crate) fn jump(&self, flow: Flow) -> Option<Table> {
         match flow {
             Flow::JumpMemory(mem) => self.load(mem, self.width, false),
+            Flow::JumpAdd { base, index } => match self.add(base, index, 0, Extend::None)? {
+                Value::Entry(table) => Some(table),
+                _ => None,
+            },
             Flow::JumpTable {
                 mem,
                 size,

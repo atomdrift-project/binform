@@ -464,7 +464,8 @@ impl Work<'_> {
                         };
                     // Branches and calls only read registers; what a call
                     // changes, `call` forgets below.
-                    if insn.flow == Flow::Next {
+                    // A compare-and-branch bounds a case value too.
+                    if matches!(insn.flow, Flow::Next | Flow::Branch(_)) {
                         tracker.note(insn.note);
                     }
                     match insn.flow {
@@ -534,7 +535,10 @@ impl Work<'_> {
                                 break;
                             }
                         }
-                        Flow::JumpMemory(_) | Flow::JumpRegister(_) | Flow::JumpTable { .. } => {
+                        Flow::JumpMemory(_)
+                        | Flow::JumpRegister(_)
+                        | Flow::JumpAdd { .. }
+                        | Flow::JumpTable { .. } => {
                             let table = tracker.jump(insn.flow);
                             let targets = table
                                 .map(|table| table.targets(&self.memory, self.table_entries))
@@ -680,7 +684,10 @@ impl Work<'_> {
                     _ if ends.contains(&addr) => (0, true),
                     Flow::Jump(_) => (1, false),
                     Flow::Branch(_) => (2, false),
-                    Flow::JumpMemory(_) | Flow::JumpRegister(_) | Flow::JumpTable { .. } => (
+                    Flow::JumpMemory(_)
+                    | Flow::JumpRegister(_)
+                    | Flow::JumpAdd { .. }
+                    | Flow::JumpTable { .. } => (
                         cases.get(&addr).copied().unwrap_or(0).saturating_add(falls),
                         true,
                     ),

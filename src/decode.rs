@@ -67,6 +67,8 @@ pub(crate) enum Flow {
         base: u64,
         shift: u8,
     },
+    /// Jump to the sum of two registers: a table's base and its entry.
+    JumpAdd { base: u32, index: u32 },
     /// Jump somewhere that cannot be followed.
     JumpIndirect,
     /// Return.
@@ -158,11 +160,11 @@ pub(crate) enum Decoder {
     Mips {
         big: bool,
         wide: bool,
-        /// The address `_gp` stands for, which GOT slots are offsets from.
-        gp: Option<u64>,
+        /// The GOT, around the address `_gp` stands for.
+        got: crate::mips::Got,
         state: crate::mips::State,
     },
-    S390x,
+    S390x(crate::s390x::State),
     Sparc {
         wide: bool,
     },
@@ -192,10 +194,10 @@ impl Decoder {
             Arch::Mips | Arch::MipsEl | Arch::Mips64 | Arch::Mips64El => Self::Mips {
                 big: image.arch.big_endian(),
                 wide: image.arch.address_width() == 8,
-                gp: image.got,
+                got: crate::mips::Got::new(image.got, &image.segments),
                 state: crate::mips::State::default(),
             },
-            Arch::S390x => Self::S390x,
+            Arch::S390x => Self::S390x(crate::s390x::State::default()),
             Arch::Sparc => Self::Sparc { wide: false },
             Arch::Sparc64 => Self::Sparc { wide: true },
             Arch::SuperH => Self::SuperH,
@@ -209,6 +211,7 @@ impl Decoder {
             Self::Arm64(state) => **state = crate::arm64::State::default(),
             Self::Arm { state, .. } => *state = crate::arm::State::default(),
             Self::Mips { state, .. } => *state = crate::mips::State::default(),
+            Self::S390x(state) => *state = crate::s390x::State::default(),
             _ => {}
         }
     }
@@ -222,10 +225,10 @@ impl Decoder {
             Self::Mips {
                 big,
                 wide,
-                gp,
+                got,
                 state,
-            } => crate::mips::decode(state, *gp, (*big, *wide), bytes, addr),
-            Self::S390x => crate::s390x::decode(bytes, addr),
+            } => crate::mips::decode(state, got, (*big, *wide), bytes, addr),
+            Self::S390x(state) => crate::s390x::decode(state, bytes, addr),
             Self::Sparc { wide } => crate::sparc::decode(*wide, bytes, addr),
             Self::SuperH => crate::superh::decode(bytes, addr),
         }
@@ -248,7 +251,7 @@ impl Decoder {
             Self::X86 { .. }
             | Self::Arm64(_)
             | Self::Mips { .. }
-            | Self::S390x
+            | Self::S390x(_)
             | Self::Sparc { .. } => 8,
         }
     }
@@ -258,7 +261,7 @@ impl Decoder {
     pub(crate) fn alignment(&self) -> u64 {
         match self {
             Self::X86 { .. } => 1,
-            Self::S390x | Self::SuperH | Self::Arm { thumb: true, .. } => 2,
+            Self::S390x(_) | Self::SuperH | Self::Arm { thumb: true, .. } => 2,
             Self::Arm64(_) | Self::Arm { .. } | Self::Mips { .. } | Self::Sparc { .. } => 4,
         }
     }

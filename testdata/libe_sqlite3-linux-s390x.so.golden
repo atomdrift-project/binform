@@ -1,4 +1,4 @@
-# funktion: 2674 functions, 1017676 bytes of code covered, 0 landing pads, 0 cases
+# funktion: 2674 functions, 1016686 bytes of code covered, 0 landing pads, 2499 cases
 # rizin: 2466 functions; 2466 shared, 630 with the same blocks (630 of 2466 without landing pads)
 0x10a48 size=74 blocks=3 edges=3 cc=2 cases=0 found=LOADER | SYMBOL rizin=3/3
 0x10a94 size=26 blocks=1 edges=0 cc=1 cases=0 found=STUB rizin=-
@@ -297,7 +297,7 @@
 0x149a8 size=78 blocks=4 edges=4 cc=2 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x149f8 size=32 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x14a18 size=32 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
-0x14a38 size=78 blocks=8 edges=9 cc=5 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=2/1
+0x14a38 size=78 blocks=8 edges=46 cc=42 cases=37 found=SYMBOL | UNWIND | CALL | SWEEP rizin=2/1
 0x14a88 size=160 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/4
 0x14b28 size=216 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/3
 0x14c00 size=12 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
@@ -514,7 +514,7 @@
 0x19448 size=352 blocks=21 edges=32 cc=13 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=19/12
 0x195a8 size=232 blocks=13 edges=18 cc=7 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/3
 0x19690 size=272 blocks=22 edges=32 cc=12 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=10/5
-0x197a0 size=322 blocks=24 edges=30 cc=12 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=2/0
+0x197a0 size=322 blocks=24 edges=45 cc=27 cases=15 found=SYMBOL | UNWIND | CALL | SWEEP rizin=2/0
 0x198e8 size=110 blocks=6 edges=7 cc=3 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x19958 size=432 blocks=30 edges=49 cc=21 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=2/1
 0x19b08 size=54 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
@@ -570,7 +570,7 @@
 0x1b448 size=62 blocks=4 edges=5 cc=3 cases=0 found=SYMBOL | UNWIND rizin=3/2
 0x1b488 size=66 blocks=6 edges=8 cc=4 cases=0 found=SYMBOL | UNWIND rizin=4/3
 0x1b4d0 size=192 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL | UNWIND rizin=6/3
-0x1b590 size=72 blocks=7 edges=2 cc=7 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
+0x1b590 size=72 blocks=7 edges=6 cc=11 cases=4 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x1b5d8 size=180 blocks=11 edges=14 cc=5 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/0
 0x1b690 size=392 blocks=18 edges=26 cc=10 cases=0 found=SYMBOL | UNWIND rizin=10/5
 0x1b818 size=22 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
@@ -633,9 +633,9 @@
 0x1d660 size=456 blocks=28 edges=43 cc=17 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=9/2
 0x1d828 size=76 blocks=4 edges=4 cc=2 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x1d878 size=6 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
-0x1d880 size=2424 blocks=175 edges=255 cc=86 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/1
+0x1d880 size=2424 blocks=175 edges=286 cc=117 cases=31 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/1
 0x1e1f8 size=200 blocks=10 edges=15 cc=7 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=5/3
-0x1e2c0 size=1082 blocks=80 edges=114 cc=40 cases=0 found=SYMBOL | UNWIND rizin=10/3
+0x1e2c0 size=1082 blocks=80 edges=237 cc=163 cases=123 found=SYMBOL | UNWIND rizin=10/3
 0x1e700 size=30 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x1e720 size=8 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x1e728 size=8 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
@@ -690,7 +690,7 @@
 0x1f540 size=214 blocks=14 edges=20 cc=8 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/2
 0x1f618 size=128 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
 0x1f698 size=132 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=2/1
-0x1f720 size=790 blocks=48 edges=72 cc=28 cases=0 found=SYMBOL | UNWIND rizin=11/5
+0x1f720 size=790 blocks=48 edges=101 cc=57 cases=29 found=SYMBOL | UNWIND rizin=11/5
 0x1fa38 size=184 blocks=9 edges=11 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=9/4
 0x1faf0 size=82 blocks=3 edges=2 cc=3 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x1fb48 size=168 blocks=9 edges=11 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
@@ -737,7 +737,7 @@
 0x20ed8 size=208 blocks=11 edges=15 cc=6 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=8/4
 0x20fa8 size=96 blocks=7 edges=9 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/3
 0x21008 size=544 blocks=33 edges=48 cc=17 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=18/9
-0x21228 size=124 blocks=9 edges=5 cc=8 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
+0x21228 size=124 blocks=9 edges=30 cc=33 cases=25 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x212a8 size=18 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x212c0 size=128 blocks=11 edges=13 cc=6 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=5/2
 0x21340 size=238 blocks=11 edges=13 cc=6 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
@@ -749,10 +749,10 @@
 0x21678 size=102 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x216e0 size=58 blocks=4 edges=4 cc=2 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=4/2
 0x21720 size=60 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
-0x21760 size=688 blocks=56 edges=91 cc=41 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=4/1
+0x21760 size=688 blocks=56 edges=106 cc=56 cases=15 found=SYMBOL | UNWIND | CALL | SWEEP rizin=4/1
 0x21a10 size=574 blocks=27 edges=39 cc=16 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x21c50 size=176 blocks=9 edges=13 cc=6 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
-0x21d00 size=800 blocks=54 edges=77 cc=27 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
+0x21d00 size=800 blocks=54 edges=188 cc=138 cases=111 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x22020 size=408 blocks=24 edges=34 cc=12 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=7/3
 0x221b8 size=20 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x221d0 size=136 blocks=6 edges=7 cc=3 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/3
@@ -762,7 +762,7 @@
 0x224c0 size=8 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x224c8 size=98 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/3
 0x22530 size=42 blocks=5 edges=4 cc=5 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=5/5
-0x22560 size=340 blocks=23 edges=22 cc=7 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=5/3
+0x22560 size=340 blocks=23 edges=30 cc=15 cases=8 found=SYMBOL | UNWIND | CALL | SWEEP rizin=5/3
 0x226b8 size=158 blocks=7 edges=8 cc=3 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/1
 0x22758 size=204 blocks=11 edges=14 cc=7 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=8/4
 0x22828 size=218 blocks=20 edges=28 cc=10 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=12/8
@@ -791,7 +791,7 @@
 0x235d0 size=92 blocks=5 edges=6 cc=3 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x23630 size=86 blocks=5 edges=6 cc=3 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=5/3
 0x23688 size=108 blocks=8 edges=11 cc=5 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=5/3
-0x236f8 size=338 blocks=18 edges=24 cc=10 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=4/3
+0x236f8 size=338 blocks=18 edges=33 cc=19 cases=9 found=SYMBOL | UNWIND | CALL | SWEEP rizin=4/3
 0x23850 size=120 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x238c8 size=48 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x238f8 size=68 blocks=5 edges=4 cc=5 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=5/5
@@ -882,7 +882,7 @@
 0x26d70 size=324 blocks=20 edges=31 cc=13 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x26eb8 size=100 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x26f20 size=140 blocks=10 edges=12 cc=6 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/1
-0x26fb0 size=342 blocks=26 edges=33 cc=11 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=2/1
+0x26fb0 size=342 blocks=26 edges=102 cc=80 cases=69 found=SYMBOL | UNWIND | CALL | SWEEP rizin=2/1
 0x27108 size=182 blocks=12 edges=16 cc=6 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=7/3
 0x271c0 size=178 blocks=12 edges=16 cc=8 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=12/7
 0x27278 size=222 blocks=11 edges=15 cc=6 cases=0 found=SYMBOL | UNWIND rizin=3/3
@@ -949,7 +949,7 @@
 0x2a140 size=68 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x2a188 size=106 blocks=9 edges=14 cc=7 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x2a1f8 size=104 blocks=7 edges=9 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=2/1
-0x2a260 size=4468 blocks=264 edges=443 cc=197 cases=0 found=SYMBOL | UNWIND rizin=1/1
+0x2a260 size=4468 blocks=273 edges=654 cc=399 cases=202 found=SYMBOL | UNWIND rizin=1/1
 0x2b3d8 size=80 blocks=4 edges=5 cc=3 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x2b428 size=296 blocks=12 edges=16 cc=6 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=5/3
 0x2b550 size=146 blocks=6 edges=9 cc=5 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
@@ -982,7 +982,7 @@
 0x2d270 size=360 blocks=16 edges=24 cc=10 cases=0 found=SYMBOL | UNWIND rizin=9/6
 0x2d3d8 size=76 blocks=6 edges=6 cc=4 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x2d428 size=30 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
-0x2d448 size=2016 blocks=150 edges=229 cc=83 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
+0x2d448 size=2016 blocks=150 edges=242 cc=96 cases=13 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
 0x2dc28 size=6 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x2dc30 size=6 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x2dc38 size=312 blocks=21 edges=31 cc=12 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=11/6
@@ -1008,7 +1008,7 @@
 0x2f6f0 size=320 blocks=18 edges=26 cc=10 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/3
 0x2f830 size=648 blocks=40 edges=60 cc=22 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/5
 0x2fab8 size=120 blocks=5 edges=6 cc=3 cases=0 found=SYMBOL | UNWIND rizin=3/2
-0x2fb30 size=658 blocks=46 edges=62 cc=24 cases=0 found=SYMBOL | UNWIND rizin=5/4
+0x2fb30 size=658 blocks=46 edges=98 cc=60 cases=36 found=SYMBOL | UNWIND rizin=5/4
 0x2fdc8 size=92 blocks=6 edges=6 cc=4 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x2fe28 size=252 blocks=19 edges=28 cc=11 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=8/6
 0x2ff28 size=54 blocks=4 edges=4 cc=2 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
@@ -1117,7 +1117,7 @@
 0x330d8 size=26 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x330f8 size=70 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x33140 size=120 blocks=9 edges=10 cc=7 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=9/7
-0x331b8 size=308 blocks=16 edges=19 cc=7 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/0
+0x331b8 size=308 blocks=16 edges=28 cc=16 cases=9 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/0
 0x332f0 size=32 blocks=2 edges=1 cc=3 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x33310 size=68 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
 0x33358 size=54 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
@@ -1235,9 +1235,9 @@
 0x36c90 size=38 blocks=3 edges=2 cc=3 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x36cb8 size=184 blocks=6 edges=8 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x36d70 size=142 blocks=5 edges=5 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
-0x36e00 size=322 blocks=17 edges=17 cc=6 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
+0x36e00 size=322 blocks=17 edges=132 cc=121 cases=115 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x36f48 size=112 blocks=8 edges=11 cc=5 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
-0x36fb8 size=196 blocks=17 edges=20 cc=9 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
+0x36fb8 size=196 blocks=17 edges=31 cc=20 cases=11 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x37080 size=128 blocks=9 edges=10 cc=5 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/0
 0x37100 size=322 blocks=15 edges=23 cc=10 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=9/5
 0x37248 size=208 blocks=7 edges=9 cc=4 cases=0 found=SYMBOL | UNWIND rizin=3/2
@@ -1327,7 +1327,7 @@
 0x3c618 size=98 blocks=8 edges=8 cc=8 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/3
 0x3c680 size=30 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x3c6a0 size=76 blocks=3 edges=2 cc=3 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/3
-0x3c6f0 size=9512 blocks=554 edges=813 cc=265 cases=0 found=SYMBOL | UNWIND rizin=4/0
+0x3c6f0 size=9512 blocks=554 edges=907 cc=359 cases=94 found=SYMBOL | UNWIND rizin=4/0
 0x3ec18 size=136 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | UNWIND rizin=3/2
 0x3eca0 size=184 blocks=5 edges=6 cc=3 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
 0x3ed58 size=272 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/3
@@ -1510,7 +1510,7 @@
 0x49148 size=788 blocks=23 edges=33 cc=12 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=12/6
 0x49460 size=584 blocks=28 edges=39 cc=13 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=19/9
 0x496a8 size=100 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
-0x49710 size=952 blocks=19 edges=23 cc=8 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
+0x49710 size=952 blocks=19 edges=27 cc=12 cases=4 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x49ac8 size=248 blocks=12 edges=17 cc=7 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=7/4
 0x49bc0 size=278 blocks=10 edges=14 cc=6 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=8/4
 0x49cd8 size=74 blocks=5 edges=5 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
@@ -1519,7 +1519,7 @@
 0x49f20 size=64 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x49f60 size=676 blocks=30 edges=48 cc=20 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=11/6
 0x4a208 size=184 blocks=13 edges=19 cc=8 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=11/6
-0x4a2c0 size=534 blocks=47 edges=69 cc=28 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=4/2
+0x4a2c0 size=534 blocks=47 edges=147 cc=106 cases=78 found=SYMBOL | UNWIND | CALL | SWEEP rizin=4/2
 0x4a4d8 size=142 blocks=10 edges=12 cc=6 cases=0 found=SYMBOL | UNWIND rizin=9/5
 0x4a568 size=454 blocks=25 edges=36 cc=13 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=13/8
 0x4a730 size=168 blocks=8 edges=11 cc=5 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=5/4
@@ -1589,7 +1589,7 @@
 0x4ec80 size=864 blocks=30 edges=45 cc=17 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=19/10
 0x4efe0 size=156 blocks=4 edges=4 cc=2 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x4f080 size=232 blocks=7 edges=9 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/3
-0x4f168 size=1874 blocks=60 edges=83 cc=27 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=16/5
+0x4f168 size=1874 blocks=60 edges=89 cc=33 cases=6 found=SYMBOL | UNWIND | CALL | SWEEP rizin=16/5
 0x4f8c0 size=152 blocks=5 edges=6 cc=3 cases=0 found=SYMBOL | UNWIND rizin=3/2
 0x4f958 size=248 blocks=5 edges=6 cc=3 cases=0 found=SYMBOL | UNWIND rizin=5/4
 0x4fa50 size=72 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
@@ -1604,7 +1604,7 @@
 0x502b0 size=116 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x50328 size=32 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x50348 size=166 blocks=4 edges=4 cc=2 cases=0 found=SYMBOL | UNWIND rizin=1/1
-0x503f0 size=368 blocks=17 edges=20 cc=7 cases=0 found=SYMBOL | UNWIND rizin=5/3
+0x503f0 size=368 blocks=17 edges=24 cc=11 cases=4 found=SYMBOL | UNWIND rizin=5/3
 0x50560 size=40 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x50588 size=40 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x505b0 size=398 blocks=12 edges=16 cc=6 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
@@ -1750,11 +1750,11 @@
 0x59e90 size=112 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x59f00 size=256 blocks=12 edges=18 cc=8 cases=0 found=SYMBOL | UNWIND rizin=2/1
 0x5a000 size=244 blocks=8 edges=11 cc=5 cases=0 found=SYMBOL | UNWIND rizin=1/1
-0x5a0f8 size=1848 blocks=103 edges=152 cc=53 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=29/14
+0x5a0f8 size=1848 blocks=103 edges=159 cc=60 cases=7 found=SYMBOL | UNWIND | CALL | SWEEP rizin=29/14
 0x5a830 size=30 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x5a850 size=108 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | UNWIND rizin=3/2
 0x5a8c0 size=418 blocks=28 edges=42 cc=16 cases=0 found=SYMBOL | UNWIND rizin=2/1
-0x5aa68 size=476 blocks=20 edges=22 cc=6 cases=0 found=SYMBOL | UNWIND rizin=1/1
+0x5aa68 size=476 blocks=20 edges=32 cc=16 cases=10 found=SYMBOL | UNWIND rizin=1/1
 0x5ac48 size=384 blocks=23 edges=33 cc=12 cases=0 found=SYMBOL | UNWIND rizin=5/3
 0x5adc8 size=416 blocks=15 edges=22 cc=9 cases=0 found=SYMBOL | UNWIND rizin=6/3
 0x5af68 size=148 blocks=13 edges=20 cc=9 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/4
@@ -1771,8 +1771,8 @@
 0x5b3d0 size=52 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x5b408 size=40 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x5b430 size=402 blocks=28 edges=42 cc=16 cases=0 found=SYMBOL | UNWIND rizin=4/2
-0x5b5c8 size=218 blocks=10 edges=10 cc=4 cases=0 found=SYMBOL | UNWIND rizin=1/1
-0x5b6a8 size=154 blocks=8 edges=7 cc=3 cases=0 found=SYMBOL | UNWIND rizin=1/1
+0x5b5c8 size=218 blocks=10 edges=14 cc=8 cases=4 found=SYMBOL | UNWIND rizin=1/1
+0x5b6a8 size=154 blocks=8 edges=11 cc=7 cases=4 found=SYMBOL | UNWIND rizin=1/1
 0x5b748 size=256 blocks=6 edges=8 cc=4 cases=0 found=SYMBOL | UNWIND rizin=3/2
 0x5b848 size=182 blocks=10 edges=14 cc=6 cases=0 found=SYMBOL | UNWIND rizin=5/3
 0x5b900 size=966 blocks=33 edges=47 cc=16 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=2/1
@@ -1786,15 +1786,15 @@
 0x5c208 size=70 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x5c250 size=368 blocks=11 edges=15 cc=6 cases=0 found=SYMBOL | UNWIND rizin=7/4
 0x5c3c0 size=82 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | UNWIND rizin=1/1
-0x5c418 size=688 blocks=18 edges=24 cc=10 cases=0 found=SYMBOL | UNWIND rizin=5/3
+0x5c418 size=688 blocks=18 edges=28 cc=14 cases=4 found=SYMBOL | UNWIND rizin=5/3
 0x5c6c8 size=268 blocks=10 edges=15 cc=7 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x5c7d8 size=32 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x5c7f8 size=32 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x5c818 size=32 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x5c838 size=64 blocks=5 edges=6 cc=3 cases=0 found=SYMBOL | UNWIND rizin=3/2
 0x5c878 size=40 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
-0x5c8a0 size=274 blocks=13 edges=14 cc=5 cases=0 found=SYMBOL | UNWIND rizin=1/1
-0x5c9b8 size=328 blocks=17 edges=21 cc=8 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=8/4
+0x5c8a0 size=274 blocks=13 edges=18 cc=9 cases=4 found=SYMBOL | UNWIND rizin=1/1
+0x5c9b8 size=328 blocks=17 edges=26 cc=13 cases=5 found=SYMBOL | UNWIND | CALL | SWEEP rizin=8/4
 0x5cb00 size=1352 blocks=65 edges=98 cc=35 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=5/2
 0x5d048 size=52 blocks=3 edges=2 cc=3 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x5d080 size=1216 blocks=83 edges=133 cc=52 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=24/13
@@ -1802,13 +1802,13 @@
 0x5d600 size=342 blocks=21 edges=30 cc=13 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=2/1
 0x5d758 size=170 blocks=11 edges=14 cc=7 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=4/2
 0x5d808 size=70 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | UNWIND rizin=1/1
-0x5d850 size=572 blocks=36 edges=47 cc=17 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=2/1
+0x5d850 size=572 blocks=36 edges=166 cc=136 cases=119 found=SYMBOL | UNWIND | CALL | SWEEP rizin=2/1
 0x5da90 size=202 blocks=11 edges=15 cc=6 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x5db60 size=280 blocks=18 edges=27 cc=13 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=14/8
 0x5dc78 size=248 blocks=11 edges=15 cc=6 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=7/4
 0x5dd70 size=690 blocks=45 edges=69 cc=26 cases=0 found=SYMBOL | UNWIND rizin=21/11
 0x5e028 size=192 blocks=10 edges=14 cc=6 cases=0 found=SYMBOL | UNWIND rizin=7/3
-0x5e0e8 size=1032 blocks=60 edges=94 cc=38 cases=0 found=SYMBOL | UNWIND rizin=10/9
+0x5e0e8 size=1032 blocks=60 edges=107 cc=51 cases=13 found=SYMBOL | UNWIND rizin=10/9
 0x5e4f0 size=70 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x5e538 size=358 blocks=15 edges=23 cc=10 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=12/6
 0x5e6a0 size=202 blocks=15 edges=22 cc=9 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=10/7
@@ -1892,7 +1892,7 @@
 0x67e00 size=18 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x67e18 size=74 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL | UNWIND rizin=2/1
 0x67e68 size=92 blocks=4 edges=4 cc=2 cases=0 found=SYMBOL | UNWIND rizin=1/1
-0x67ec8 size=2360 blocks=107 edges=137 cc=34 cases=0 found=SYMBOL | UNWIND rizin=6/4
+0x67ec8 size=2360 blocks=107 edges=167 cc=64 cases=30 found=SYMBOL | UNWIND rizin=6/4
 0x68800 size=1184 blocks=45 edges=69 cc=26 cases=0 found=SYMBOL | UNWIND rizin=27/19
 0x68ca0 size=136 blocks=10 edges=15 cc=7 cases=0 found=SYMBOL | UNWIND rizin=7/5
 0x68d28 size=136 blocks=7 edges=8 cc=3 cases=0 found=SYMBOL | UNWIND rizin=1/1
@@ -1912,7 +1912,7 @@
 0x69860 size=104 blocks=5 edges=6 cc=3 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x698c8 size=640 blocks=37 edges=53 cc=18 cases=0 found=SYMBOL | UNWIND rizin=5/1
 0x69b48 size=78 blocks=4 edges=4 cc=2 cases=0 found=SYMBOL | UNWIND rizin=1/1
-0x69b98 size=928 blocks=44 edges=63 cc=23 cases=0 found=SYMBOL | UNWIND rizin=14/5
+0x69b98 size=928 blocks=44 edges=94 cc=54 cases=31 found=SYMBOL | UNWIND rizin=14/5
 0x69f38 size=504 blocks=15 edges=23 cc=10 cases=0 found=SYMBOL | UNWIND rizin=3/2
 0x6a130 size=370 blocks=24 edges=37 cc=15 cases=0 found=SYMBOL | UNWIND rizin=8/4
 0x6a2a8 size=272 blocks=14 edges=19 cc=7 cases=0 found=SYMBOL | UNWIND rizin=1/1
@@ -1963,7 +1963,7 @@
 0x6e690 size=728 blocks=24 edges=34 cc=12 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=11/5
 0x6e968 size=1016 blocks=39 edges=58 cc=21 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=17/8
 0x6ed60 size=178 blocks=10 edges=14 cc=6 cases=0 found=SYMBOL | UNWIND rizin=4/3
-0x6ee18 size=2080 blocks=97 edges=148 cc=55 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=14/10
+0x6ee18 size=2080 blocks=97 edges=152 cc=59 cases=4 found=SYMBOL | UNWIND | CALL | SWEEP rizin=14/10
 0x6f638 size=170 blocks=10 edges=14 cc=6 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
 0x6f6e8 size=96 blocks=7 edges=10 cc=5 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x6f750 size=202 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
@@ -1999,8 +1999,8 @@
 0x715a8 size=256 blocks=8 edges=11 cc=5 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=7/4
 0x716a8 size=344 blocks=12 edges=17 cc=7 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=10/7
 0x71800 size=720 blocks=30 edges=44 cc=16 cases=0 found=SYMBOL | UNWIND rizin=9/6
-0x71ad0 size=1920 blocks=113 edges=168 cc=59 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=4/2
-0x72250 size=448 blocks=15 edges=18 cc=7 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
+0x71ad0 size=1920 blocks=113 edges=181 cc=72 cases=13 found=SYMBOL | UNWIND | CALL | SWEEP rizin=4/2
+0x72250 size=448 blocks=15 edges=23 cc=12 cases=5 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
 0x72410 size=210 blocks=7 edges=9 cc=4 cases=0 found=SYMBOL | UNWIND rizin=5/3
 0x724e8 size=156 blocks=7 edges=9 cc=4 cases=0 found=SYMBOL | UNWIND rizin=5/3
 0x72588 size=168 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | UNWIND rizin=3/2
@@ -2010,8 +2010,8 @@
 0x729f0 size=190 blocks=10 edges=13 cc=5 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x72ab0 size=608 blocks=23 edges=35 cc=14 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=4/2
 0x72d10 size=296 blocks=11 edges=15 cc=6 cases=0 found=SYMBOL | UNWIND rizin=3/2
-0x72e38 size=1432 blocks=61 edges=89 cc=32 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=4/2
-0x733d0 size=920 blocks=33 edges=45 cc=16 cases=0 found=SYMBOL | UNWIND rizin=10/6
+0x72e38 size=1432 blocks=61 edges=102 cc=45 cases=13 found=SYMBOL | UNWIND | CALL | SWEEP rizin=4/2
+0x733d0 size=920 blocks=33 edges=54 cc=25 cases=9 found=SYMBOL | UNWIND rizin=10/6
 0x73768 size=480 blocks=28 edges=42 cc=16 cases=0 found=SYMBOL | UNWIND rizin=10/5
 0x73948 size=152 blocks=9 edges=11 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
 0x739e0 size=232 blocks=16 edges=24 cc=10 cases=0 found=SYMBOL | UNWIND rizin=11/6
@@ -2059,7 +2059,7 @@
 0x78740 size=392 blocks=26 edges=37 cc=13 cases=0 found=SYMBOL | UNWIND rizin=5/2
 0x788c8 size=190 blocks=11 edges=14 cc=7 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/3
 0x78990 size=500 blocks=26 edges=38 cc=14 cases=0 found=SYMBOL | UNWIND rizin=8/3
-0x78b88 size=3424 blocks=160 edges=257 cc=107 cases=0 found=SYMBOL | UNWIND rizin=10/6
+0x78b88 size=3424 blocks=160 edges=338 cc=188 cases=81 found=SYMBOL | UNWIND rizin=10/6
 0x798e8 size=184 blocks=6 edges=7 cc=3 cases=0 found=SYMBOL | UNWIND rizin=3/2
 0x799a0 size=184 blocks=7 edges=9 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/3
 0x79a58 size=152 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
@@ -2071,15 +2071,15 @@
 0x79f90 size=160 blocks=6 edges=7 cc=3 cases=0 found=SYMBOL | UNWIND rizin=3/2
 0x7a030 size=170 blocks=10 edges=13 cc=5 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x7a0e0 size=250 blocks=11 edges=16 cc=7 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
-0x7a1e0 size=8256 blocks=434 edges=680 cc=252 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
+0x7a1e0 size=8256 blocks=434 edges=771 cc=343 cases=91 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
 0x7c220 size=1720 blocks=95 edges=155 cc=62 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/4
 0x7c8d8 size=1376 blocks=60 edges=91 cc=33 cases=0 found=SYMBOL | UNWIND rizin=8/5
 0x7ce38 size=248 blocks=11 edges=15 cc=6 cases=0 found=SYMBOL | UNWIND rizin=6/3
 0x7cf30 size=518 blocks=31 edges=47 cc=18 cases=0 found=SYMBOL | UNWIND rizin=9/5
 0x7d138 size=184 blocks=7 edges=8 cc=3 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
-0x7d1f0 size=4536 blocks=201 edges=312 cc=115 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
+0x7d1f0 size=4536 blocks=201 edges=389 cc=192 cases=77 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
 0x7e3a8 size=800 blocks=37 edges=54 cc=19 cases=0 found=SYMBOL | UNWIND rizin=3/2
-0x7e6c8 size=2456 blocks=54 edges=69 cc=19 cases=0 found=SYMBOL | UNWIND rizin=3/2
+0x7e6c8 size=2456 blocks=54 edges=152 cc=102 cases=83 found=SYMBOL | UNWIND rizin=3/2
 0x7f060 size=1888 blocks=10 edges=13 cc=5 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
 0x7f7c0 size=34 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x7f7e8 size=1160 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
@@ -2090,7 +2090,7 @@
 0x80110 size=144 blocks=5 edges=6 cc=3 cases=0 found=SYMBOL | UNWIND rizin=3/2
 0x801a0 size=102 blocks=5 edges=6 cc=3 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x80208 size=270 blocks=14 edges=20 cc=8 cases=0 found=SYMBOL | UNWIND rizin=1/1
-0x80318 size=1160 blocks=47 edges=70 cc=27 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=5/2
+0x80318 size=1160 blocks=29 edges=44 cc=19 cases=1 found=SYMBOL | UNWIND | CALL | SWEEP rizin=5/2
 0x807a0 size=1216 blocks=49 edges=75 cc=28 cases=0 found=SYMBOL | UNWIND rizin=8/3
 0x80c60 size=328 blocks=21 edges=29 cc=10 cases=0 found=SYMBOL | UNWIND rizin=2/1
 0x80da8 size=318 blocks=18 edges=26 cc=12 cases=0 found=SYMBOL | UNWIND rizin=2/1
@@ -2117,7 +2117,7 @@
 0x83268 size=472 blocks=19 edges=29 cc=12 cases=0 found=SYMBOL | UNWIND rizin=6/3
 0x83440 size=1184 blocks=26 edges=37 cc=13 cases=0 found=SYMBOL | UNWIND rizin=3/2
 0x838e0 size=400 blocks=19 edges=27 cc=10 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=2/1
-0x83a70 size=1072 blocks=57 edges=79 cc=26 cases=0 found=SYMBOL | UNWIND rizin=4/2
+0x83a70 size=1072 blocks=57 edges=119 cc=66 cases=40 found=SYMBOL | UNWIND rizin=4/2
 0x83ea0 size=2200 blocks=126 edges=188 cc=64 cases=0 found=SYMBOL | UNWIND rizin=8/4
 0x84738 size=472 blocks=23 edges=34 cc=13 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/4
 0x84918 size=478 blocks=33 edges=50 cc=19 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=10/5
@@ -2244,12 +2244,12 @@
 0x97a38 size=100 blocks=6 edges=7 cc=5 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=4/3
 0x97aa0 size=100 blocks=6 edges=7 cc=5 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=4/3
 0x97b08 size=66 blocks=3 edges=2 cc=3 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
-0x97b50 size=114 blocks=8 edges=6 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
+0x97b50 size=114 blocks=8 edges=14 cc=12 cases=8 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x97bc8 size=464 blocks=20 edges=28 cc=10 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=14/7
 0x97d98 size=356 blocks=19 edges=27 cc=10 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=11/6
 0x97f00 size=1210 blocks=62 edges=95 cc=35 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=19/10
 0x983c0 size=344 blocks=15 edges=22 cc=9 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=11/6
-0x98518 size=3280 blocks=153 edges=209 cc=62 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=32/15
+0x98518 size=3280 blocks=153 edges=298 cc=151 cases=89 found=SYMBOL | UNWIND | CALL | SWEEP rizin=32/15
 0x991e8 size=84 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
 0x99240 size=92 blocks=4 edges=4 cc=2 cases=0 found=SYMBOL | UNWIND rizin=4/2
 0x992a0 size=44 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
@@ -2286,7 +2286,7 @@
 0x9b2e0 size=592 blocks=30 edges=45 cc=17 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=10/6
 0x9b530 size=688 blocks=32 edges=48 cc=18 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=22/14
 0x9b7e0 size=166 blocks=7 edges=9 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=7/4
-0x9b888 size=2824 blocks=143 edges=230 cc=91 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=5/3
+0x9b888 size=2824 blocks=143 edges=234 cc=95 cases=4 found=SYMBOL | UNWIND | CALL | SWEEP rizin=5/3
 0x9c390 size=32 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x9c3b0 size=162 blocks=5 edges=7 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=5/4
 0x9c458 size=1312 blocks=61 edges=94 cc=35 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=19/9
@@ -2296,9 +2296,9 @@
 0xa13a0 size=1544 blocks=43 edges=64 cc=23 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=23/11
 0xa19a8 size=2070 blocks=96 edges=159 cc=65 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=26/17
 0xa21c0 size=2344 blocks=79 edges=120 cc=43 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
-0xa2ae8 size=1040 blocks=37 edges=51 cc=18 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/3
-0xa2ef8 size=1048 blocks=34 edges=47 cc=17 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/3
-0xa3310 size=6984 blocks=252 edges=362 cc=116 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=7/4
+0xa2ae8 size=1040 blocks=37 edges=90 cc=57 cases=39 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/3
+0xa2ef8 size=1048 blocks=34 edges=86 cc=56 cases=39 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/3
+0xa3310 size=6984 blocks=242 edges=514 cc=278 cases=164 found=SYMBOL | UNWIND | CALL | SWEEP rizin=7/4
 0xa4e58 size=148 blocks=9 edges=11 cc=6 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0xa4ef0 size=382 blocks=20 edges=31 cc=13 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=10/5
 0xa5070 size=100 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
@@ -2320,7 +2320,7 @@
 0xa6a40 size=1952 blocks=41 edges=60 cc=21 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=15/6
 0xa71e0 size=1364 blocks=56 edges=83 cc=29 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=12/5
 0xa7738 size=1506 blocks=38 edges=55 cc=19 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/3
-0xa7d20 size=3304 blocks=101 edges=145 cc=52 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=11/5
+0xa7d20 size=3304 blocks=101 edges=190 cc=97 cases=45 found=SYMBOL | UNWIND | CALL | SWEEP rizin=11/5
 0xa8a08 size=368 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
 0xa8b78 size=8056 blocks=358 edges=574 cc=218 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
 0xaaaf0 size=74 blocks=4 edges=5 cc=3 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/3
@@ -2346,8 +2346,8 @@
 0xb52c0 size=776 blocks=31 edges=43 cc=14 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=14/7
 0xb55c8 size=66 blocks=4 edges=4 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
 0xb5610 size=1160 blocks=63 edges=100 cc=39 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=27/15
-0xb5a98 size=44048 blocks=1875 edges=2829 cc=966 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=21/9
-0xc06a8 size=3280 blocks=159 edges=233 cc=78 cases=0 found=SYMBOL | UNWIND rizin=38/16
+0xb5a98 size=44048 blocks=1868 edges=3012 cc=1156 cases=195 found=SYMBOL | UNWIND | CALL | SWEEP rizin=21/9
+0xc06a8 size=3280 blocks=159 edges=247 cc=92 cases=14 found=SYMBOL | UNWIND rizin=38/16
 0xc1378 size=90 blocks=4 edges=4 cc=2 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0xc13d8 size=1120 blocks=58 edges=91 cc=35 cases=0 found=SYMBOL | UNWIND rizin=7/3
 0xc1838 size=392 blocks=20 edges=33 cc=15 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=14/9
@@ -2370,7 +2370,7 @@
 0xc70b0 size=264 blocks=14 edges=23 cc=11 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0xc71b8 size=10504 blocks=418 edges=637 cc=221 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=10/5
 0xc9ac0 size=718 blocks=16 edges=23 cc=9 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=8/5
-0xc9d90 size=6880 blocks=292 edges=437 cc=151 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=65/27
+0xc9d90 size=6880 blocks=295 edges=447 cc=158 cases=7 found=SYMBOL | UNWIND | CALL | SWEEP rizin=65/27
 0xcb870 size=10072 blocks=400 edges=632 cc=234 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=80/42
 0xcdfc8 size=544 blocks=15 edges=24 cc=11 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=5/3
 0xce1e8 size=30856 blocks=1100 edges=1574 cc=478 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=24/11
@@ -2379,7 +2379,7 @@
 0xd60e0 size=216 blocks=7 edges=9 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=4/2
 0xd61b8 size=298 blocks=17 edges=24 cc=9 cases=0 found=SYMBOL | UNWIND rizin=7/3
 0xd62e8 size=46 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
-0xd6318 size=17328 blocks=703 edges=1079 cc=382 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/3
+0xd6318 size=17328 blocks=703 edges=1165 cc=468 cases=86 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/3
 0xda6c8 size=46 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0xda6f8 size=496 blocks=19 edges=27 cc=10 cases=0 found=SYMBOL | UNWIND rizin=5/2
 0xda8e8 size=224 blocks=7 edges=9 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=5/3
@@ -2511,7 +2511,7 @@
 0xea368 size=206 blocks=11 edges=16 cc=7 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=4/2
 0xea438 size=848 blocks=46 edges=75 cc=31 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=7/5
 0xea788 size=1480 blocks=54 edges=80 cc=28 cases=0 found=SYMBOL | UNWIND rizin=3/2
-0xead50 size=3680 blocks=171 edges=259 cc=92 cases=0 found=SYMBOL | UNWIND rizin=3/2
+0xead50 size=3680 blocks=171 edges=264 cc=97 cases=5 found=SYMBOL | UNWIND rizin=3/2
 0xebbb0 size=274 blocks=14 edges=20 cc=8 cases=0 found=SYMBOL | UNWIND rizin=2/1
 0xebcc8 size=152 blocks=7 edges=9 cc=4 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=5/3
 0xebd60 size=256 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
@@ -2537,7 +2537,7 @@
 0xf0028 size=132 blocks=6 edges=7 cc=3 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
 0xf00b0 size=216 blocks=8 edges=11 cc=5 cases=0 found=SYMBOL | UNWIND rizin=5/3
 0xf0188 size=584 blocks=23 edges=34 cc=13 cases=0 found=SYMBOL | UNWIND rizin=7/4
-0xf03d0 size=1800 blocks=94 edges=132 cc=48 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=8/3
+0xf03d0 size=1800 blocks=100 edges=164 cc=74 cases=26 found=SYMBOL | UNWIND | CALL | SWEEP rizin=8/3
 0xf0ad8 size=72 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | UNWIND rizin=3/2
 0xf0b20 size=1272 blocks=54 edges=82 cc=30 cases=0 found=SYMBOL | UNWIND rizin=4/2
 0xf1018 size=402 blocks=19 edges=29 cc=12 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=7/3
@@ -2590,13 +2590,13 @@
 0xf89d0 size=298 blocks=18 edges=26 cc=10 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=5/4
 0xf8b00 size=4696 blocks=194 edges=303 cc=111 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=80/44
 0xf9d58 size=582 blocks=30 edges=43 cc=15 cases=0 found=SYMBOL | UNWIND rizin=14/6
-0xf9fa0 size=824 blocks=51 edges=74 cc=27 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=10/4
+0xf9fa0 size=824 blocks=51 edges=83 cc=36 cases=9 found=SYMBOL | UNWIND | CALL | SWEEP rizin=10/4
 0xfa2d8 size=200 blocks=10 edges=17 cc=9 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=6/4
 0xfa3a0 size=80 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
 0xfa3f0 size=644 blocks=33 edges=51 cc=20 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=17/11
 0xfa678 size=1320 blocks=46 edges=73 cc=29 cases=0 found=SYMBOL | UNWIND rizin=3/2
 0xfaba0 size=50 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
-0xfabd8 size=3360 blocks=139 edges=210 cc=75 cases=0 found=SYMBOL | UNWIND rizin=9/4
+0xfabd8 size=3360 blocks=139 edges=228 cc=93 cases=18 found=SYMBOL | UNWIND rizin=9/4
 0xfb8f8 size=4688 blocks=220 edges=345 cc=127 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=50/27
 0xfcb48 size=64 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0xfcb88 size=64 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
@@ -2633,7 +2633,7 @@
 0x1036e8 size=324 blocks=17 edges=24 cc=11 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=15/9
 0x103830 size=1904 blocks=120 edges=180 cc=62 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=48/21
 0x103fa0 size=248 blocks=11 edges=15 cc=6 cases=0 found=SYMBOL | UNWIND rizin=9/4
-0x104098 size=3056 blocks=135 edges=206 cc=75 cases=0 found=SYMBOL | UNWIND rizin=24/10
+0x104098 size=3056 blocks=135 edges=231 cc=100 cases=25 found=SYMBOL | UNWIND rizin=24/10
 0x104c88 size=264 blocks=8 edges=11 cc=5 cases=0 found=SYMBOL | UNWIND rizin=3/2
 0x104d90 size=232 blocks=7 edges=9 cc=4 cases=0 found=SYMBOL | UNWIND rizin=7/4
 0x104e78 size=880 blocks=54 edges=83 cc=31 cases=0 found=SYMBOL | UNWIND rizin=28/14
@@ -2648,7 +2648,7 @@
 0x108e20 size=1680 blocks=78 edges=119 cc=43 cases=0 found=SYMBOL | UNWIND rizin=21/8
 0x1094b0 size=114 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x109528 size=136 blocks=5 edges=6 cc=3 cases=0 found=SYMBOL | UNWIND rizin=5/3
-0x1095b0 size=4032 blocks=176 edges=237 cc=67 cases=0 found=SYMBOL | UNWIND rizin=4/2
+0x1095b0 size=4032 blocks=176 edges=267 cc=97 cases=30 found=SYMBOL | UNWIND rizin=4/2
 0x10a570 size=220 blocks=12 edges=17 cc=7 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x10a650 size=96 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | UNWIND rizin=1/1
 0x10a6b0 size=266 blocks=15 edges=21 cc=8 cases=0 found=SYMBOL | UNWIND rizin=15/11
