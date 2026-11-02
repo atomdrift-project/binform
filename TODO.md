@@ -55,9 +55,10 @@ only. Next:
   cost `s390x/pkg-esbuild` and `mips/pkg-turbo` a fifth of their code).
   Power10's eight-byte prefixed instructions decode, with `pla` addresses
   and `pld` GOT slots PC-relative (`ppc64le-power10-pie`). Left: 32-bit
-  little-endian PowerPC (no sample), and `_start_c` not known to never
-  return, so the data word after the call to it reads as an invalid
-  instruction.
+  little-endian PowerPC (no sample), and the data word after the 64-bit
+  call to musl's `_start_c`, which reads as an invalid instruction: its
+  `__libc_start_main` reaches the second stage through an opaque register
+  (`stage2(main, argc, argv)`), so the walk cannot tell it never returns.
 - **Register jumps and calls to known addresses** (every set): a jump
   through a register the tracker holds a code address in is a tail call
   (s390x `larl; br`, MIPS `lui; addiu; jr`, SuperH literal-pool `jmp`,
@@ -93,6 +94,14 @@ only. Next:
     35%; unpacking is out of scope.
 
 ## Other open items
+
+- **Calls that never return** are known by name, and, where what follows
+  a call fails to decode within two instructions, by a walk of the callee
+  that finds no way back (traps, loops, calls that never return; anything
+  indirect may return). rizin infers nothing more, so funktion applies the
+  walk only there: inferring every stripped `abort` wrapper would end its
+  callers' blocks early and cost 72 of `classic-level-darwin.node`'s 1264
+  functions their match with rizin.
 
 - **.NET:** `funktion::cil::body` measures CIL method bodies but filefacts
   does not call it yet; wiring it in adds .NET CFG metrics (possible new

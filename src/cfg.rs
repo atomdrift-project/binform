@@ -71,6 +71,13 @@ const NORETURN: &[&str] = &[
 ];
 
 /// C runtime start routines, and which of their arguments is `main`.
+/// How deep a call chain the walk that decides whether a call returns
+/// follows (`_start_c` -> `__libc_start_main` -> `exit` -> `_Exit`).
+const RETURN_DEPTH: u8 = 6;
+
+/// The most instructions that walk decodes in one function.
+const RETURN_WALK: usize = 1 << 12;
+
 const STARTS: [(&str, usize); 3] = [
     ("__libc_start_main", 0),
     ("__uClibc_main", 0),
@@ -110,6 +117,8 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
         imports: image.imports.iter().map(|import| import.slot).collect(),
         rebased: image.rebased.iter().copied().collect(),
         noreturn: HashSet::new(),
+        returns: HashMap::new(),
+        return_budget: limits.instructions / 4,
         thunks: HashMap::new(),
         handlers: HashMap::new(),
         starts: HashMap::new(),
@@ -247,6 +256,11 @@ struct Work<'a> {
     rebased: HashMap<u64, u64>,
     /// Slots and functions whose callers never resume.
     noreturn: HashSet<u64>,
+    /// Whether a call to each function may return, as far as a walk of it
+    /// found.
+    returns: HashMap<u64, bool>,
+    /// Instructions left for those walks.
+    return_budget: usize,
     /// Address -> the import slot the code there only jumps through.
     thunks: HashMap<u64, Option<u64>>,
     /// Function start -> its landing pads.
@@ -457,11 +471,122 @@ impl Work<'_> {
         self.memory.is_code(main).then_some(main)
     }
 
-    fn never_returns(&mut self, target: u64) -> bool {
+    /// Whether a call to `target`, which would resume at `next`, never
+    /// returns: by name, or, when what follows the call soon fails to
+    /// decode (the data word after musl's call to `_start_c`, past the TOC
+    /// restore a 64-bit PowerPC call leaves), by a walk of the callee.
+    /// rizin infers no more (a stripped `abort` wrapper's callers run on
+    /// into their padding), and funktion matches it there.
+    fn never_returns(&mut self, target: u64, next: u64) -> bool {
+        if self.named_noreturn(target) {
+            return true;
+        }
+        // The delay slot, then two instructions.
+        let mut decoder = self.decoder.clone();
+        let mut at = next;
+        let mut nothing = false;
+        for i in 0..2 + u8::from(self.decoder.delay_slots()) {
+            let Some(bytes) = self.memory.code(at) else {
+                nothing = true;
+                break;
+            };
+            let insn = decoder.decode(bytes, at);
+            if insn.flow == Flow::Invalid {
+                nothing = true;
+                break;
+            }
+            if insn.flow != Flow::Next && !(i == 0 && self.decoder.delay_slots()) {
+                break;
+            }
+            at = at.wrapping_add(u64::from(insn.len));
+        }
+        nothing && !self.may_return(target, RETURN_DEPTH)
+    }
+
+    /// Whether `target` is a function, or a stub of an import, known by
+    /// name never to return.
+    fn named_noreturn(&mut self, target: u64) -> bool {
         self.noreturn.contains(&target)
             || self
                 .thunk(target)
                 .is_some_and(|slot| self.noreturn.contains(&slot))
+    }
+
+    /// Whether a call to `target` may return: false only when no path
+    /// through the code it reaches does, as in a stripped binary's `exit`,
+    /// `abort` and `_start_c` (each path ends in a trap, a loop, or a call
+    /// that never returns). Anything not followed (an indirect jump, an
+    /// instruction that does not decode, a long walk) may return. A call
+    /// chain back into a function still being walked counts as returning.
+    fn may_return(&mut self, target: u64, depth: u8) -> bool {
+        if let Some(&known) = self.returns.get(&target) {
+            return known;
+        }
+        if depth == 0 || self.return_budget == 0 {
+            return true;
+        }
+        self.returns.insert(target, true);
+        let returns = self.walk_returns(target, depth);
+        self.returns.insert(target, returns);
+        returns
+    }
+
+    fn walk_returns(&mut self, target: u64, depth: u8) -> bool {
+        let mut decoder = self.decoder.clone();
+        let mut seen = HashSet::new();
+        let mut pending = vec![target];
+        while let Some(start) = pending.pop() {
+            decoder.reset();
+            let mut addr = start;
+            while seen.insert(addr) {
+                if seen.len() > RETURN_WALK || self.return_budget == 0 {
+                    return true;
+                }
+                self.return_budget -= 1;
+                let Some(bytes) = self.memory.code(addr) else {
+                    return true;
+                };
+                let insn = decoder.decode(bytes, addr);
+                let callee_returns = |work: &mut Self, to: u64| {
+                    !work.named_noreturn(to) && work.may_return(to, depth - 1)
+                };
+                let ends = match insn.flow {
+                    Flow::Next | Flow::CallIndirect | Flow::CallRegister(_) => false,
+                    Flow::Branch(to) => {
+                        pending.push(to);
+                        false
+                    }
+                    Flow::Call(to) => !callee_returns(self, to),
+                    Flow::CallSlot(slot) => self.noreturn.contains(&slot),
+                    // A jump to another function's start returns when it does.
+                    Flow::Jump(to) if to != target && self.entries.contains_key(&to) => {
+                        if callee_returns(self, to) {
+                            return true;
+                        }
+                        true
+                    }
+                    Flow::Jump(to) => {
+                        pending.push(to);
+                        true
+                    }
+                    Flow::JumpSlot(slot) if self.noreturn.contains(&slot) => !insn.falls,
+                    Flow::Stop => !insn.falls,
+                    Flow::Return
+                    | Flow::Invalid
+                    | Flow::JumpSlot(_)
+                    | Flow::JumpMemory(_)
+                    | Flow::JumpRegister(_)
+                    | Flow::JumpAdd { .. }
+                    | Flow::JumpTable { .. }
+                    | Flow::JumpIndirect => return true,
+                };
+                if ends {
+                    break;
+                }
+                addr = addr.wrapping_add(u64::from(insn.len));
+            }
+        }
+        false
     }
 
     fn explore(&mut self, entry: u64) -> Explored {
@@ -623,7 +748,7 @@ impl Work<'_> {
                                 kind: RefKind::Call,
                             });
                             calls.push(to);
-                            if self.never_returns(to) {
+                            if self.never_returns(to, next) {
                                 ends.insert(addr);
                                 break;
                             }

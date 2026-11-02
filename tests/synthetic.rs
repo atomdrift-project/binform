@@ -587,3 +587,32 @@ fn superh_delay_slots() {
     assert_eq!((main.blocks, main.size), (3, 0x12));
     assert_eq!(function(&recovery.functions, 0x1014).size, 4);
 }
+
+/// A start routine calls one that never returns (it calls an exit loop),
+/// and a word of data follows the call: the call ends the function. A
+/// call to the same routine that code follows runs on into that code, as
+/// rizin has it.
+#[test]
+fn x86_64_inferred_noreturn() {
+    let mut code = Vec::new();
+    let mut at = |addr, bytes: &[u8]| place(&mut code, 0x1000, addr, bytes, 0xcc);
+    at(0x1000, &[0xe8, 0x0b, 0, 0, 0]); // call 0x1010
+    at(0x1005, &[0xff, 0xff, 0xff, 0xff]); // data
+    at(0x1010, &[0x31, 0xff]); // xor edi, edi
+    at(0x1012, &[0xe8, 0x09, 0, 0, 0]); // call 0x1020
+    at(0x1017, &[0x0f, 0x0b]); // ud2
+    at(0x1020, &[0xb8, 0x3c, 0, 0, 0]); // mov eax, 60
+    at(0x1025, &[0x0f, 0x05]); // syscall
+    at(0x1027, &[0xeb, 0xf7]); // jmp 0x1020
+    at(0x1030, &[0xe8, 0xdb, 0xff, 0xff, 0xff]); // call 0x1010
+    at(0x1035, &[0xc3]); // ret
+    let image = image(
+        Arch::X86_64,
+        vec![segment(0x1000, &code, true)],
+        vec![entry(0x1000), entry(0x1030)],
+    );
+    let recovery = funktion::recover(&image);
+    assert_eq!(recovery.invalid, 0);
+    assert_eq!(function(&recovery.functions, 0x1000).size, 5);
+    assert_eq!(function(&recovery.functions, 0x1030).size, 6);
+}
