@@ -171,10 +171,29 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Image<'a>, Error> {
             .sections
             .iter()
             .filter(|sh| sh.flags & elf::SHF_ALLOC != 0 && sh.kind != elf::SHT_NOBITS)
-            .map(|sh| Segment {
-                addr: sh.addr,
-                bytes: Cow::Borrowed(file_range(bytes, sh.offset, sh.size)),
-                executable: sh.flags & elf::SHF_EXECINSTR != 0,
+            .flat_map(|sh| {
+                let data = file_range(bytes, sh.offset, sh.size);
+                let executable = sh.flags & elf::SHF_EXECINSTR != 0;
+                // Zeros that start code are written at load time: SPARC's
+                // `.plt` header (and on 64-bit SPARC, the whole `.plt` but
+                // the entries' first jumps), which the dynamic linker fills.
+                let zeros = if executable {
+                    data.iter().take_while(|&&b| b == 0).count() & !15
+                } else {
+                    0
+                };
+                let (head, code) = data.split_at(zeros);
+                [
+                    (sh.addr, head, false),
+                    (sh.addr.wrapping_add(zeros as u64), code, executable),
+                ]
+                .into_iter()
+                .filter(|(_, part, _)| !part.is_empty())
+                .map(|(addr, part, executable)| Segment {
+                    addr,
+                    bytes: Cow::Borrowed(part),
+                    executable,
+                })
             })
             .collect();
         let addrs = elf.sections.iter().map(|sh| sh.addr).collect();
@@ -363,6 +382,10 @@ fn elf_stubs(bytes: &[u8], arch: Arch, sections: &ElfSections<'_>) -> Vec<u64> {
         Arch::X86 | Arch::X86_64 => (16, None),
         Arch::Arm64 => (32, None),
         Arch::S390x => (32, Some(32)),
+        // Four reserved entries, which the dynamic linker fills, then one
+        // per import (`sethi; ba,a`): 12 bytes on 32-bit SPARC, 32 on V9.
+        Arch::Sparc => (48, Some(12)),
+        Arch::Sparc64 => (128, Some(32)),
         // The others' stubs vary by ABI: the header alone.
         _ => (0, Some(0)),
     };
@@ -384,11 +407,11 @@ fn elf_stubs(bytes: &[u8], arch: Arch, sections: &ElfSections<'_>) -> Vec<u64> {
         .map(|(addr, _)| addr)
         .into_iter()
         .collect();
-    if sections.find(".plt.sec").is_some() {
-        stubs.extend(entries(".plt.sec", 0));
-    } else {
-        stubs.extend(entries(".plt", header));
-    }
+    // With indirect-branch tracking, `.plt` keeps each import's lazy-binding
+    // entry (`endbr64; push n; jmp .plt`) and `.plt.sec` the stub calls go
+    // to: both are code.
+    stubs.extend(entries(".plt", header));
+    stubs.extend(entries(".plt.sec", 0));
     stubs.extend(entries(".plt.got", 0));
     stubs
 }

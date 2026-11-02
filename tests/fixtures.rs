@@ -615,3 +615,114 @@ fn sparc_objects() {
     check("calls-sparc.o", links_calls);
     check("calls-sparc64.o", links_calls);
 }
+
+/// The functions funktion and rizin share, and on how many of them, as a
+/// percentage, they agree on blocks (landing pads aside).
+fn agreement(outcome: &Outcome<'_>) -> (usize, usize) {
+    let (same, shared) = outcome.same_blocks_without_pads();
+    (shared, same * 100 / shared.max(1))
+}
+
+/// FreeBSD's Clang build. Where blocks differ, rizin mostly runs on past a
+/// call that never returns (`__stack_chk_fail`).
+#[test]
+fn freebsd() {
+    check("libsqlite3-freebsd-amd64.so", |outcome| {
+        finds_all_of_rizin(outcome);
+        let (shared, same) = agreement(outcome);
+        assert!(shared > 2150 && same >= 85, "{same}% of {shared}");
+    });
+}
+
+/// OpenBSD on A64 starts each function with `bti c`; rizin splits it off
+/// into a function of its own, with the rest a function 4 bytes on. On
+/// x86-64 OpenBSD's PLT keeps its lazy-binding entries in `.plt` and the
+/// stubs calls go to in `.plt.sec`.
+#[test]
+fn openbsd() {
+    check("libsqlite3-openbsd-arm64.so", |outcome| {
+        finds_all_of_rizin(outcome);
+        let entries: std::collections::HashSet<u64> =
+            outcome.recovery.functions.iter().map(|f| f.entry).collect();
+        let split = outcome
+            .rizin
+            .keys()
+            .filter(|&&theirs| !entries.contains(&theirs) && entries.contains(&(theirs - 4)))
+            .count();
+        assert!(split > 2000, "only {split} of rizin's split after `bti c`");
+    });
+    check("sqlite3-openbsd-amd64", |outcome| {
+        finds_all_of_rizin(outcome);
+        let (shared, same) = agreement(outcome);
+        assert!(shared >= 868 && same >= 99, "{same}% of {shared}");
+    });
+}
+
+#[test]
+fn netbsd() {
+    check("libsqlite3-netbsd-arm64.so", |outcome| {
+        finds_all_of_rizin(outcome);
+        let (shared, same) = agreement(outcome);
+        assert!(shared > 2550 && same >= 99, "{same}% of {shared}");
+    });
+}
+
+#[test]
+fn illumos() {
+    check("sqlite3-illumos-amd64", |outcome| {
+        let missed = outcome.missed();
+        assert!(missed.len() <= 1, "missed {missed:x?}");
+        let (shared, same) = agreement(outcome);
+        assert!(shared > 650 && same >= 98, "{same}% of {shared}");
+    });
+}
+
+/// Sun Studio's 32-bit SPARC: constant pools in `.text` (rizin's `entry0`
+/// is one), text relocations, leaf tail calls through `%g1`, and a PLT
+/// whose reserved header is zeros in the file.
+#[test]
+fn solaris_sparc() {
+    check("libsqlite3-solaris-sparc.so", |outcome| {
+        let missed = outcome.missed();
+        assert!(missed.len() <= 2, "missed {missed:x?}");
+        assert!(
+            outcome.recovery.invalid <= 10,
+            "{}",
+            outcome.recovery.invalid
+        );
+        let (shared, same) = agreement(outcome);
+        assert!(shared > 3350 && same >= 70, "{same}% of {shared}");
+    });
+}
+
+/// GCC's SPARC V9: the PLT's entries branch to a header the dynamic linker
+/// writes, zeros in the file, and tail calls go through `call f; restore`.
+#[test]
+fn linux_sparc64() {
+    check("libsqlite3-linux-sparc64.so", |outcome| {
+        let missed = outcome.missed();
+        assert!(missed.len() <= 5, "missed {missed:x?}");
+        assert!(
+            outcome.recovery.invalid <= 1,
+            "{}",
+            outcome.recovery.invalid
+        );
+        let (shared, same) = agreement(outcome);
+        assert!(shared > 3400 && same >= 95, "{same}% of {shared}");
+    });
+}
+
+/// GCC's MIPS64 and s390x. Blocks differ by rizin's reading: it ends a
+/// MIPS block before a branch's delay slot, and runs on through s390x's
+/// conditional returns (`bler %r14`) as if they did not leave.
+#[test]
+fn c_mips64_and_s390x() {
+    check("libe_sqlite3-linux-mips64.so", |outcome| {
+        finds_all_of_rizin(outcome);
+        assert!(agreement(outcome).0 > 2450);
+    });
+    check("libe_sqlite3-linux-s390x.so", |outcome| {
+        finds_all_of_rizin(outcome);
+        assert_eq!(agreement(outcome).0, outcome.rizin.len());
+    });
+}

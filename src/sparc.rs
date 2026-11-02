@@ -1,6 +1,9 @@
 //! SPARC (V8 and V9): control flow only. Words are big-endian. A transfer
 //! and the instruction in its delay slot decode as one 8-byte instruction,
 //! so a call returns past the slot (to `%o7 + 8`, as `ret` and `retl` go).
+//! A call whose slot restores the caller's register window or return
+//! address (`call f; restore`, `mov %o7, %g1; call f; mov %g1, %o7`) makes
+//! the callee return to this function's caller: a tail call.
 
 use crate::decode::{Flow, Insn};
 
@@ -24,10 +27,22 @@ pub(crate) fn decode(wide: bool, bytes: &[u8], addr: u64) -> Insn {
         return Insn::new(4, flow);
     }
     // A transfer with no slot after it is cut short: the slot is not code.
-    match bytes.get(4..8).and_then(read_word) {
-        Some(_) => Insn::new(8, flow),
-        None => Insn::new(4, Flow::Invalid),
-    }
+    let Some(slot) = bytes.get(4..8).and_then(read_word) else {
+        return Insn::new(4, Flow::Invalid);
+    };
+    let flow = match flow {
+        Flow::Call(target) if returns_elsewhere(slot) => Flow::Jump(target),
+        Flow::CallIndirect if returns_elsewhere(slot) => Flow::JumpIndirect,
+        flow => flow,
+    };
+    Insn::new(8, flow)
+}
+
+/// Whether a call's delay slot `word` makes the callee return past the
+/// caller: a `restore`, or arithmetic that writes `%o7`.
+fn returns_elsewhere(word: u32) -> bool {
+    let op3 = (word >> 19) & 0x3f;
+    word >> 30 == 2 && (op3 == 0x3d || ((word >> 25) & 0x1f == O7 && op3 < 0x30))
 }
 
 fn read_word(bytes: &[u8]) -> Option<u32> {
@@ -122,6 +137,15 @@ mod tests {
         assert_eq!(one(&[0x7fff_ffff, NOP], 0x1_0000).flow, Flow::Call(0xfffc));
         // call .+8: reads the PC.
         assert_eq!(one(&[0x4000_0002, NOP], 0x1_0000).flow, Flow::Next);
+        // call +0x40; restore: a tail call.
+        let tail = one(&[0x4000_0010, 0x81e8_0000], 0x1_0000);
+        assert_eq!(tail.flow, Flow::Jump(0x1_0040));
+        // call +0x40; mov %g1, %o7: a tail call from a leaf.
+        let tail = one(&[0x4000_0010, 0x9e10_0001], 0x1_0000);
+        assert_eq!(tail.flow, Flow::Jump(0x1_0040));
+        // jmpl %g1, %o7; restore
+        let tail = one(&[0x9fc0_4000, 0x81e8_0000], 0x1000);
+        assert_eq!(tail.flow, Flow::JumpIndirect);
         // ret; restore
         assert_eq!(one(&[0x81c7_e008, 0x81e8_0000], 0x1000).flow, Flow::Return);
         // retl

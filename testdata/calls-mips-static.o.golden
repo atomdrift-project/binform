@@ -1,0 +1,7 @@
+# funktion: 4 functions, 288 bytes of code covered, 0 landing pads, 0 cases
+# rizin: 5 functions; 4 shared, 4 with the same blocks (3 of 3 without landing pads)
+only rizin 0x80000e4 fcn.080000e4: inside 0x800009c
+0x8000040 size=92 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
+0x800009c size=76 blocks=3 edges=2 cc=3 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
+0x80000e8 size=48 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
+0x8000118 size=76 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
