@@ -200,7 +200,8 @@ pub struct Image<'a> {
     /// cases of a jump table without a bound.
     pub extents: Vec<Range<u64>>,
     /// The value 32-bit x86 position-independent PLT stubs address the GOT
-    /// through (`jmp [ebx + disp]`), when the binary has one.
+    /// through (`jmp [ebx + disp]`), when the binary has one; on MIPS, the
+    /// address `_gp` stands for, which GOT loads are offsets from.
     pub got: Option<u64>,
 }
 

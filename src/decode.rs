@@ -158,6 +158,9 @@ pub(crate) enum Decoder {
     Mips {
         big: bool,
         wide: bool,
+        /// The address `_gp` stands for, which GOT slots are offsets from.
+        gp: Option<u64>,
+        state: crate::mips::State,
     },
     S390x,
     Sparc {
@@ -189,6 +192,8 @@ impl Decoder {
             Arch::Mips | Arch::MipsEl | Arch::Mips64 | Arch::Mips64El => Self::Mips {
                 big: image.arch.big_endian(),
                 wide: image.arch.address_width() == 8,
+                gp: image.got,
+                state: crate::mips::State::default(),
             },
             Arch::S390x => Self::S390x,
             Arch::Sparc => Self::Sparc { wide: false },
@@ -203,6 +208,7 @@ impl Decoder {
         match self {
             Self::Arm64(state) => **state = crate::arm64::State::default(),
             Self::Arm { state, .. } => *state = crate::arm::State::default(),
+            Self::Mips { state, .. } => *state = crate::mips::State::default(),
             _ => {}
         }
     }
@@ -213,11 +219,22 @@ impl Decoder {
             Self::X86 { bitness, got } => crate::x86::decode(*bitness, *got, bytes, addr),
             Self::Arm64(state) => crate::arm64::decode(state, bytes, addr),
             Self::Arm { state, .. } => crate::arm::decode(state, bytes, addr),
-            Self::Mips { big, wide } => crate::mips::decode(*big, *wide, bytes, addr),
+            Self::Mips {
+                big,
+                wide,
+                gp,
+                state,
+            } => crate::mips::decode(state, *gp, (*big, *wide), bytes, addr),
             Self::S390x => crate::s390x::decode(bytes, addr),
             Self::Sparc { wide } => crate::sparc::decode(*wide, bytes, addr),
             Self::SuperH => crate::superh::decode(bytes, addr),
         }
+    }
+
+    /// Whether a GOT slot of a function of the binary holds its address in
+    /// the file: MIPS GOTs do, without relocations to say so.
+    pub(crate) const fn slots_hold_targets(&self) -> bool {
+        matches!(self, Self::Mips { .. })
     }
 
     /// Bytes in an address.

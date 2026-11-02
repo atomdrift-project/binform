@@ -550,3 +550,68 @@ fn elf_thumb_c() {
         assert!(missed.len() <= 25, "missed {}: {missed:x?}", missed.len());
     });
 }
+
+/// `calls.c` (see `calls-arm.o.md`) built for another instruction set: its
+/// four functions and no others, each of the eight calls linked to one of
+/// them or to the import slot of `puts`, `abort` or `helper`.
+fn links_calls(outcome: &Outcome<'_>) {
+    let functions = &outcome.recovery.functions;
+    let entries: Vec<u64> = functions.iter().map(|f| f.entry).collect();
+    assert_eq!(entries.len(), 4, "functions at {entries:x?}");
+    assert!(functions.iter().all(|f| f.found.contains(Found::SYMBOL)));
+    let slots: HashMap<u64, &str> = outcome
+        .image
+        .imports
+        .iter()
+        .map(|i| (i.slot, i.name.as_str()))
+        .collect();
+    let mut imported = Vec::new();
+    let mut calls = 0;
+    for function in functions {
+        for call in function.refs.iter().filter(|r| r.kind == RefKind::Call) {
+            calls += 1;
+            // Thumb targets carry bit 0; the entries here do not.
+            let to = call.to & !1;
+            assert_ne!(to, function.entry, "unlinked call at {:#x}", call.from);
+            match slots.get(&call.to) {
+                Some(name) => imported.push(*name),
+                None => assert!(entries.contains(&to), "call {:#x} -> {to:#x}", call.from),
+            }
+        }
+    }
+    assert_eq!(calls, 8);
+    imported.sort_unstable();
+    assert_eq!(imported, ["abort", "helper", "puts"]);
+}
+
+#[test]
+fn arm_objects() {
+    check("calls-arm.o", links_calls);
+    check("calls-thumb.o", links_calls);
+}
+
+#[test]
+fn mips_objects() {
+    check("calls-mips.o", links_calls);
+    check("calls-mips-static.o", links_calls);
+    check("calls-mips64.o", links_calls);
+}
+
+/// MIPS shared libraries: calls through GOT slots, named by the GOT's
+/// layout; a slot of a function in the library holds its address.
+#[test]
+fn mips_got_calls() {
+    check("calls-mips.so", links_calls);
+    check("calls-mips64el.so", links_calls);
+}
+
+#[test]
+fn s390x_object() {
+    check("calls-s390x.o", links_calls);
+}
+
+#[test]
+fn sparc_objects() {
+    check("calls-sparc.o", links_calls);
+    check("calls-sparc64.o", links_calls);
+}

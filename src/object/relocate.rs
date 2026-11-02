@@ -114,8 +114,14 @@ pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf, arch: Arch) -> Layout<'a> {
                 Arch::X86_64 => x86_64(section, offset, reloc.kind, fix),
                 Arch::X86 => i386(section, offset, reloc.kind, fix),
                 Arch::Arm64 => aarch64(section, offset, reloc.kind, fix),
-                // Objects for the other sets are laid out but not linked:
-                // their calls read as calls to themselves.
+                Arch::Arm => arm(section, offset, reloc.kind, fix),
+                Arch::Mips | Arch::MipsEl | Arch::Mips64 | Arch::Mips64El => {
+                    mips(section, offset, reloc.kind, fix, arch.big_endian())
+                }
+                Arch::S390x => s390x(section, offset, reloc.kind, fix),
+                Arch::Sparc | Arch::Sparc64 => sparc(section, offset, reloc.kind, fix),
+                // SuperH objects are laid out but not linked: their calls
+                // read as calls to themselves.
                 _ => None,
             };
         }
@@ -278,6 +284,39 @@ impl Fix {
     }
 }
 
+/// The `N`-byte field at `offset`.
+fn field<const N: usize>(bytes: &[u8], offset: usize) -> Option<[u8; N]> {
+    bytes.get(offset..offset.checked_add(N)?)?.try_into().ok()
+}
+
+/// The 32-bit word at `offset`, big-endian when `big`.
+fn word_at(bytes: &[u8], offset: usize, big: bool) -> Option<u32> {
+    let raw = field::<4>(bytes, offset)?;
+    Some(if big {
+        u32::from_be_bytes(raw)
+    } else {
+        u32::from_le_bytes(raw)
+    })
+}
+
+fn put_word(bytes: &mut [u8], offset: usize, word: u32, big: bool) -> Option<()> {
+    let raw = if big {
+        word.to_be_bytes()
+    } else {
+        word.to_le_bytes()
+    };
+    put(bytes, offset, &raw)
+}
+
+/// `value`'s low `bits` bits, if it fits in them as a signed number.
+fn fits(value: i64, bits: u32) -> Option<u32> {
+    let half = 1_i64 << (bits - 1);
+    if !(-half..half).contains(&value) {
+        return None;
+    }
+    u32::try_from(value & ((half << 1) - 1)).ok()
+}
+
 fn put(bytes: &mut [u8], offset: usize, value: &[u8]) -> Option<()> {
     bytes
         .get_mut(offset..offset.checked_add(value.len())?)?
@@ -361,6 +400,187 @@ fn aarch64(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix) -> Option<()> {
     }
 }
 
+/// 32-bit Arm, whose relocations are REL: each addend is in the field it
+/// fixes. A call between A32 and Thumb becomes a `blx`; an import's slot
+/// counts as A32 code.
+fn arm(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix) -> Option<()> {
+    let insn = word_at(bytes, offset, false)?;
+    let thumb = |value: u64| value & 1 != 0;
+    match kind {
+        // ABS32, REL32
+        2 => put(bytes, offset, &low32(fix.target(bytes, offset)?)),
+        3 => put(bytes, offset, &low32(fix.relative(bytes, offset)?)),
+        // PC24, CALL, JUMP24: a word offset in 24 bits; a call to Thumb is
+        // a `blx`, whose H bit holds the offset's halfword.
+        1 | 28 | 29 => {
+            let addend = fix
+                .addend
+                .unwrap_or(i64::from(((insn & 0x00ff_ffff) << 8).cast_signed() >> 6));
+            let s_a = fix.value.wrapping_add_signed(addend);
+            let delta = (s_a & !1).wrapping_sub(fix.place).cast_signed();
+            let imm = fits(delta >> 2, 24)?;
+            let insn = if kind == 28 && thumb(s_a) {
+                0xfa00_0000 | u32::from(delta & 2 != 0) << 24 | imm
+            } else if thumb(s_a) {
+                return None;
+            } else {
+                insn & 0xff00_0000 | imm
+            };
+            put_word(bytes, offset, insn, false)
+        }
+        // THM_CALL, THM_JUMP24: a halfword offset split over two
+        // halfwords; a call to A32 is a `blx`, from the word-aligned PC.
+        10 | 30 => {
+            let (first, second) = (insn & 0xffff, insn >> 16);
+            let addend = fix.addend.unwrap_or_else(|| thumb_offset(first, second));
+            let s_a = fix.value.wrapping_add_signed(addend);
+            let to_a32 = !thumb(s_a);
+            if to_a32 && kind == 30 {
+                return None;
+            }
+            let from = if to_a32 { fix.place & !3 } else { fix.place };
+            let delta = (s_a & !1).wrapping_sub(from).cast_signed();
+            let imm = fits(delta, 25)?;
+            let s = imm >> 24 & 1;
+            let (i1, i2) = (imm >> 23 & 1, imm >> 22 & 1);
+            let (j1, j2) = (!(i1 ^ s) & 1, !(i2 ^ s) & 1);
+            let first = 0xf000 | s << 10 | (imm >> 12 & 0x3ff);
+            // Bit 12 set: `bl`, or `b.w` for the jump; clear: `blx`.
+            let link = u32::from(!to_a32) << 12;
+            let second = second & 0xc000 | link | j1 << 13 | j2 << 11 | (imm >> 1 & 0x7ff);
+            put_word(bytes, offset, second << 16 | first, false)
+        }
+        _ => None,
+    }
+}
+
+/// The offset a Thumb `bl`'s halfwords hold: S:I1:I2:imm10:imm11:0, with
+/// I = not (J xor S).
+fn thumb_offset(first: u32, second: u32) -> i64 {
+    let s = (first >> 10) & 1;
+    let i1 = !((second >> 13) & 1 ^ s) & 1;
+    let i2 = !((second >> 11) & 1 ^ s) & 1;
+    let raw = s << 24 | i1 << 23 | i2 << 22 | (first & 0x3ff) << 12 | (second & 0x7ff) << 1;
+    i64::from((raw << 7).cast_signed() >> 7)
+}
+
+/// MIPS: `R_MIPS_26` fills a `jal` or `j`; position-independent code calls
+/// through `$t9` (`jalr $t9`, or `jr $t9` for a tail call), which
+/// `R_MIPS_JALR` names the callee of, so the jump becomes a direct one as a
+/// linker relaxes it. Both reach only the 256 MB region the delay slot is
+/// in.
+fn mips(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix, big: bool) -> Option<()> {
+    const JALR_T9: u32 = 0x0320_f809;
+    const JR_T9: u32 = 0x0320_0008;
+    let insn = word_at(bytes, offset, big)?;
+    let region = |target: u64| {
+        if (target ^ fix.place.wrapping_add(4)) & !0x0fff_ffff != 0 {
+            return None;
+        }
+        u32::try_from(target >> 2 & 0x03ff_ffff).ok()
+    };
+    match kind {
+        // R_MIPS_32, R_MIPS_64
+        2 => {
+            let addend = fix.addend.unwrap_or(i64::from(insn.cast_signed()));
+            let target = fix.value.wrapping_add_signed(addend);
+            put_word(
+                bytes,
+                offset,
+                u32::try_from(target & 0xffff_ffff).ok()?,
+                big,
+            )
+        }
+        18 => {
+            let raw = field::<8>(bytes, offset)?;
+            let in_place = if big {
+                i64::from_be_bytes(raw)
+            } else {
+                i64::from_le_bytes(raw)
+            };
+            let target = fix
+                .value
+                .wrapping_add_signed(fix.addend.unwrap_or(in_place));
+            let raw = if big {
+                target.to_be_bytes()
+            } else {
+                target.to_le_bytes()
+            };
+            put(bytes, offset, &raw)
+        }
+        // R_MIPS_26: the in-place addend is the 26-bit field, in words.
+        4 => {
+            let addend = fix.addend.unwrap_or(i64::from(insn & 0x03ff_ffff) << 2);
+            let target = fix.value.wrapping_add_signed(addend);
+            put_word(bytes, offset, insn & 0xfc00_0000 | region(target)?, big)
+        }
+        // R_MIPS_JALR
+        37 if insn == JALR_T9 || insn == JR_T9 => {
+            let target = fix.value.wrapping_add_signed(fix.addend.unwrap_or(0));
+            let opcode = if insn == JALR_T9 {
+                0x0c00_0000
+            } else {
+                0x0800_0000
+            };
+            put_word(bytes, offset, opcode | region(target)?, big)
+        }
+        _ => None,
+    }
+}
+
+/// s390x: RELA, big-endian; relative fields count halfwords.
+fn s390x(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix) -> Option<()> {
+    let target = fix.value.wrapping_add_signed(fix.addend?);
+    let relative = target.wrapping_sub(fix.place).cast_signed();
+    match kind {
+        // R_390_32, R_390_PC32, R_390_64
+        4 => put(
+            bytes,
+            offset,
+            &u32::try_from(target & 0xffff_ffff).ok()?.to_be_bytes(),
+        ),
+        5 => put(bytes, offset, &fits(relative, 32)?.to_be_bytes()),
+        22 => put(bytes, offset, &target.to_be_bytes()),
+        // PC16DBL, PLT16DBL, PC32DBL, PLT32DBL
+        16 | 17 => {
+            let half = u16::try_from(fits(relative >> 1, 16)?).ok()?;
+            put(bytes, offset, &half.to_be_bytes())
+        }
+        19 | 20 => put(bytes, offset, &fits(relative >> 1, 32)?.to_be_bytes()),
+        _ => None,
+    }
+}
+
+/// SPARC: RELA, big-endian; `call` holds a 30-bit word displacement.
+fn sparc(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix) -> Option<()> {
+    let target = fix.value.wrapping_add_signed(fix.addend?);
+    let relative = target.wrapping_sub(fix.place).cast_signed();
+    let insn = word_at(bytes, offset, true)?;
+    match kind {
+        // R_SPARC_32, UA32, R_SPARC_64, UA64, DISP32
+        3 | 23 => put(
+            bytes,
+            offset,
+            &u32::try_from(target & 0xffff_ffff).ok()?.to_be_bytes(),
+        ),
+        32 | 54 => put(bytes, offset, &target.to_be_bytes()),
+        6 => put(bytes, offset, &fits(relative, 32)?.to_be_bytes()),
+        // WDISP30, WPLT30: `call`, whose displacement wraps; WDISP22:
+        // `b<cc>`.
+        7 | 18 => {
+            let disp = u32::try_from((relative >> 2) & 0x3fff_ffff).ok()?;
+            put_word(bytes, offset, insn & 0xc000_0000 | disp, true)
+        }
+        8 => put_word(
+            bytes,
+            offset,
+            insn & !0x3f_ffff | fits(relative >> 2, 22)?,
+            true,
+        ),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -421,5 +641,59 @@ mod tests {
             .collect();
         // bl +0x40; adrp x0, +4 pages; add x0, x0, #0x678
         assert_eq!(words, [0x9400_0010, 0x9000_0020, 0x9100_0000 | 0x678 << 10]);
+    }
+
+    /// Where the Arm code at `place` in `code` (Thumb when `place` is odd)
+    /// calls.
+    fn arm_call(code: &[u8], place: u64) -> crate::decode::Flow {
+        crate::arm::decode(&mut crate::arm::State::default(), code, place).flow
+    }
+
+    #[test]
+    fn arm_calls_switch_modes() {
+        use crate::decode::Flow;
+        let at = |place: u64, value: u64| Fix {
+            value,
+            addend: None,
+            place,
+            undefined: false,
+        };
+        // An A32 `bl` (addend -8 in place) to Thumb code at a halfword:
+        // `blx`, with the H bit.
+        let mut code = 0xebff_fffe_u32.to_le_bytes();
+        arm(&mut code, 0, 28, at(0x800_0100, 0x800_0203));
+        assert_eq!(arm_call(&code, 0x800_0100), Flow::Call(0x800_0203));
+        // A Thumb `bl` (addend -4 in place) at a halfword-aligned place,
+        // to A32 code: `blx`, from the word-aligned PC.
+        let mut code = [0xff, 0xf7, 0xfe, 0xff];
+        arm(&mut code, 0, 10, at(0x800_0102, 0x800_0400));
+        assert_eq!(arm_call(&code, 0x800_0103), Flow::Call(0x800_0400));
+        // And to Thumb code, backwards: `bl`.
+        let mut code = [0xff, 0xf7, 0xfe, 0xff];
+        arm(&mut code, 0, 10, at(0x800_0102, 0x800_0041));
+        assert_eq!(arm_call(&code, 0x800_0103), Flow::Call(0x800_0041));
+    }
+
+    #[test]
+    fn mips_calls_through_t9_become_direct() {
+        let at = |value: u64| Fix {
+            value,
+            addend: None,
+            place: 0x800_0010,
+            undefined: false,
+        };
+        // jalr $t9, jr $t9 (little-endian): jal, j.
+        let mut code: Vec<u8> = [0x0320_f809_u32, 0x0320_0008]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        mips(&mut code, 0, 37, at(0x800_0100), false);
+        mips(&mut code, 4, 37, at(0x800_0200), false);
+        assert_eq!(word_at(&code, 0, false), Some(0x0e00_0040));
+        assert_eq!(word_at(&code, 4, false), Some(0x0a00_0080));
+        // Out of the delay slot's 256 MB region: left alone.
+        let mut code = 0x0320_f809_u32.to_be_bytes();
+        assert_eq!(mips(&mut code, 0, 37, at(0x1000_0000), true), None);
+        assert_eq!(code, 0x0320_f809_u32.to_be_bytes());
     }
 }

@@ -231,7 +231,21 @@ impl Work<'_> {
             return None;
         }
         self.budget -= 1;
-        Some(self.decoder.decode(bytes, addr))
+        let mut insn = self.decoder.decode(bytes, addr);
+        // A MIPS GOT slot for a function of this binary holds its address
+        // until the loader relocates it: the call or jump goes there.
+        if self.decoder.slots_hold_targets() {
+            let target = |slot: u64| {
+                let to = self.memory.read(slot, self.decoder.address_width())?;
+                (!self.imports.contains(&slot) && self.memory.is_code(to)).then_some(to)
+            };
+            insn.flow = match insn.flow {
+                Flow::CallSlot(slot) => target(slot).map_or(insn.flow, Flow::Call),
+                Flow::JumpSlot(slot) => target(slot).map_or(insn.flow, Flow::Jump),
+                flow => flow,
+            };
+        }
+        Some(insn)
     }
 
     /// Record a function start inside code, found `how`. True when it is

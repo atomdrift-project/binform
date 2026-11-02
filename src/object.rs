@@ -270,9 +270,28 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Image<'a>, Error> {
             });
         }
     }
+    let mips = matches!(
+        arch,
+        Arch::Mips | Arch::MipsEl | Arch::Mips64 | Arch::Mips64El
+    );
+    if mips {
+        imports.extend(mips_got_imports(elf));
+    }
     let got = if arch == Arch::X86 {
         elf.dynamic_value(elf::DT_PLTGOT)
             .or_else(|| sections.find(".got.plt").map(|(addr, _)| addr))
+    } else if mips {
+        // `_gp`, which the linker places 0x7ff0 past the GOT's start unless
+        // told otherwise.
+        elf.symbols
+            .iter()
+            .chain(&elf.dynamic_symbols)
+            .find(|symbol| symbol.name == "_gp" && symbol.value != 0)
+            .map(|symbol| symbol.value)
+            .or_else(|| {
+                elf.dynamic_value(elf::DT_PLTGOT)
+                    .map(|got| got.wrapping_add(0x7ff0))
+            })
     } else {
         None
     };
@@ -287,6 +306,29 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Image<'a>, Error> {
         extents,
         got,
     })
+}
+
+/// The MIPS GOT's slots for undefined symbols. The GOT holds its local
+/// entries, then one for each dynamic symbol from `DT_MIPS_GOTSYM` on, in
+/// order; the dynamic linker fills them without relocations.
+fn mips_got_imports(elf: &Elf) -> Vec<Import> {
+    let (Some(got), Some(local), Some(first)) = (
+        elf.dynamic_value(elf::DT_PLTGOT),
+        elf.dynamic_value(elf::DT_MIPS_LOCAL_GOTNO),
+        elf.dynamic_value(elf::DT_MIPS_GOTSYM),
+    ) else {
+        return Vec::new();
+    };
+    let width = if elf.is_64 { 8 } else { 4 };
+    let first = usize::try_from(first).unwrap_or(usize::MAX);
+    (local..)
+        .zip(elf.dynamic_symbols.iter().skip(first))
+        .filter(|(_, symbol)| symbol.shndx == elf::SHN_UNDEF && !symbol.name.is_empty())
+        .map(|(entry, symbol)| Import {
+            slot: got.wrapping_add(entry.wrapping_mul(width)),
+            name: symbol.name.clone(),
+        })
+        .collect()
 }
 
 /// An ELF file's section headers with the address each is mapped at.

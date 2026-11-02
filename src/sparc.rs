@@ -47,8 +47,16 @@ fn flow(word: u32, addr: u64, wrap: impl Fn(u64) -> u64) -> Option<Flow> {
     let rd = (word >> 25) & 0x1f;
     let cond = (word >> 25) & 0xf;
     match word >> 30 {
-        // CALL disp30
-        1 => Some(Flow::Call(wrap(displaced(addr, word, 30)))),
+        // CALL disp30; a call past its own delay slot only reads the PC
+        // (position-independent code finding its GOT).
+        1 => {
+            let target = wrap(displaced(addr, word, 30));
+            Some(if target == wrap(addr.wrapping_add(8)) {
+                Flow::Next
+            } else {
+                Flow::Call(target)
+            })
+        }
         0 => {
             let target = match (word >> 22) & 7 {
                 // UNIMP / ILLTRAP: zeros, or a struct-return size word.
@@ -112,6 +120,8 @@ mod tests {
         assert_eq!((call.len, call.flow), (8, Flow::Call(0x1_0040)));
         // call -4
         assert_eq!(one(&[0x7fff_ffff, NOP], 0x1_0000).flow, Flow::Call(0xfffc));
+        // call .+8: reads the PC.
+        assert_eq!(one(&[0x4000_0002, NOP], 0x1_0000).flow, Flow::Next);
         // ret; restore
         assert_eq!(one(&[0x81c7_e008, 0x81e8_0000], 0x1000).flow, Flow::Return);
         // retl

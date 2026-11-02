@@ -37,6 +37,10 @@ const DT_RELSZ: u64 = 18;
 const DT_PLTREL: u64 = 20;
 const DT_JMPREL: u64 = 23;
 const DT_GNU_HASH: u64 = 0x6fff_fef5;
+/// MIPS: the GOT's entries before the first symbol's, and the first
+/// dynamic symbol with a GOT entry (each after it has one, in order).
+pub(super) const DT_MIPS_LOCAL_GOTNO: u64 = 0x7000_000a;
+pub(super) const DT_MIPS_GOTSYM: u64 = 0x7000_0013;
 
 /// The most entries read from any one table.
 const MOST: u64 = 1 << 20;

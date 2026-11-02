@@ -12,12 +12,16 @@
   emits tables only on amd64 and arm64), so they need a C build first.
   Thumb-1's `add pc, rm` tables (GCC's `__gnu_thumb1_case_*` helpers) are
   not read either.
-- **Objects:** `relocate` links only x86, x86-64 and A64. Arm (`CALL`,
-  `JUMP24`, `THM_CALL`), MIPS (`26`), s390x (`PLT32DBL`) and SPARC
-  (`WDISP30`) objects are laid out but their calls not linked.
-- **Imports:** MIPS calls through the GOT (`lw t9, n(gp); jalr t9`) with
-  slots named by `DT_MIPS_GOTSYM`, not relocations; SPARC, SuperH and MIPS
-  PLT stubs are seeded by the header only (their layouts vary by ABI).
+- **Objects:** `relocate` links calls on every set but SuperH. MIPS
+  position-independent objects call through `$t9`; their `R_MIPS_JALR`
+  hints turn the `jalr`/`jr` into a direct `jal`/`j`, but the `$gp`
+  arithmetic (`GOT16`/`LO16`, `CALL16`) is not applied, so any other use of
+  a GOT entry stays unresolved.
+- **Imports:** SPARC, SuperH and MIPS PLT stubs (MIPS `-mplt`
+  executables) are seeded by the header only; their layouts vary by ABI.
+  MIPS GOT calls (`lw $t9, n(rX); jalr $t9`) are read when the load is
+  right before the call; GCC's local form (`lw $t9, %got(f)($gp); addiu
+  $t9, $t9, %lo(f)`) is not.
 - **Not read:** big-endian Arm and SuperH, 31-bit s390, PE `ARMNT`
   (Thumb-2 Windows), `.ARM.exidx` unwind entries, and LSDAs on big-endian
   sets (`eh::landing_pads` reads little-endian).
