@@ -73,6 +73,16 @@ pub enum Arch {
     Mips64,
     /// 64-bit MIPS, little-endian.
     Mips64El,
+    /// 32-bit MIPS Release 6, big-endian. Release 6 reuses opcodes earlier
+    /// releases had for other instructions, for compact branches, which have
+    /// no delay slot.
+    MipsR6,
+    /// 32-bit MIPS Release 6, little-endian.
+    MipsR6El,
+    /// 64-bit MIPS Release 6, big-endian.
+    Mips64R6,
+    /// 64-bit MIPS Release 6, little-endian.
+    Mips64R6El,
     /// 64-bit IBM Z (z/Architecture).
     S390x,
     /// 32-bit SPARC.
@@ -90,7 +100,36 @@ impl Arch {
     pub const fn big_endian(self) -> bool {
         matches!(
             self,
-            Self::Mips | Self::Mips64 | Self::S390x | Self::Sparc | Self::Sparc64
+            Self::Mips
+                | Self::Mips64
+                | Self::MipsR6
+                | Self::Mips64R6
+                | Self::S390x
+                | Self::Sparc
+                | Self::Sparc64
+        )
+    }
+
+    /// Whether the instruction set is MIPS, of any release.
+    pub(crate) const fn mips(self) -> bool {
+        matches!(
+            self,
+            Self::Mips
+                | Self::MipsEl
+                | Self::Mips64
+                | Self::Mips64El
+                | Self::MipsR6
+                | Self::MipsR6El
+                | Self::Mips64R6
+                | Self::Mips64R6El
+        )
+    }
+
+    /// Whether the instruction set is MIPS Release 6.
+    pub(crate) const fn mips_r6(self) -> bool {
+        matches!(
+            self,
+            Self::MipsR6 | Self::MipsR6El | Self::Mips64R6 | Self::Mips64R6El
         )
     }
 
@@ -98,11 +137,20 @@ impl Arch {
     #[must_use]
     pub const fn address_width(self) -> u8 {
         match self {
-            Self::X86 | Self::Arm | Self::Mips | Self::MipsEl | Self::Sparc | Self::SuperH => 4,
+            Self::X86
+            | Self::Arm
+            | Self::Mips
+            | Self::MipsEl
+            | Self::MipsR6
+            | Self::MipsR6El
+            | Self::Sparc
+            | Self::SuperH => 4,
             Self::X86_64
             | Self::Arm64
             | Self::Mips64
             | Self::Mips64El
+            | Self::Mips64R6
+            | Self::Mips64R6El
             | Self::S390x
             | Self::Sparc64 => 8,
         }

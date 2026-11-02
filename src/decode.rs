@@ -162,6 +162,8 @@ pub(crate) enum Decoder {
     Mips {
         big: bool,
         wide: bool,
+        /// Release 6, with compact branches in opcodes it reuses.
+        r6: bool,
         /// The GOT, around the address `_gp` stands for.
         got: crate::mips::Got,
         state: crate::mips::State,
@@ -194,9 +196,17 @@ impl Decoder {
                     thumb: 2 * thumb > image.seeds.len(),
                 }
             }
-            Arch::Mips | Arch::MipsEl | Arch::Mips64 | Arch::Mips64El => Self::Mips {
-                big: image.arch.big_endian(),
-                wide: image.arch.address_width() == 8,
+            arch @ (Arch::Mips
+            | Arch::MipsEl
+            | Arch::Mips64
+            | Arch::Mips64El
+            | Arch::MipsR6
+            | Arch::MipsR6El
+            | Arch::Mips64R6
+            | Arch::Mips64R6El) => Self::Mips {
+                big: arch.big_endian(),
+                wide: arch.address_width() == 8,
+                r6: arch.mips_r6(),
                 got: crate::mips::Got::new(image.got, &image.segments),
                 state: crate::mips::State::default(),
             },
@@ -236,9 +246,10 @@ impl Decoder {
             Self::Mips {
                 big,
                 wide,
+                r6,
                 got,
                 state,
-            } => crate::mips::decode(state, got, (*big, *wide), bytes, addr),
+            } => crate::mips::decode(state, got, (*big, *wide, *r6), bytes, addr),
             Self::S390x(state) => crate::s390x::decode(state, bytes, addr),
             Self::Sparc { wide, state } => crate::sparc::decode(state, *wide, bytes, addr),
             Self::SuperH(state) => crate::superh::decode(state, bytes, addr),

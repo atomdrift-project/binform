@@ -14,6 +14,11 @@
 //! GOT-relative entry (`addu $v0, $v0, $gp; jr $v0`). Other instructions
 //! write the registers they name. A branch's delay slot runs on both
 //! paths, so its note is the branch's.
+//!
+//! Release 6 adds compact branches, jumps and calls, which have no delay
+//! slot (`bc`, `balc`, `beqzc`, `jic`, `jialc`, `bnec`, ...), in opcodes
+//! earlier releases gave `addi`, `daddi`, the branch-likely instructions
+//! and coprocessor 2's loads and stores.
 
 use std::sync::Arc;
 
@@ -50,6 +55,10 @@ pub(crate) struct State {
     /// A register on its way to `_gp`'s address (`lui rX, %hi; addu rX,
     /// rX, $t9; addiu rX, rX, %lo`), and whether `$t9` is added yet.
     hi: Option<(u32, bool)>,
+    /// Small constants in registers (`li $s3, 10`), as a mask and values:
+    /// the bound a Release 6 compact branch compares an index against.
+    small: u32,
+    values: [u16; 32],
 }
 
 /// The GOT as the file holds it, around the address `_gp` stands for: its
@@ -110,14 +119,14 @@ impl Got {
 pub(crate) fn decode(
     state: &mut State,
     got: &Got,
-    (big, wide): (bool, bool),
+    (big, wide, r6): (bool, bool, bool),
     bytes: &[u8],
     addr: u64,
 ) -> Insn {
     let Some(word) = read_word(big, bytes) else {
         return Insn::new(4, Flow::Invalid);
     };
-    let Some(flow) = flow(word, addr, wide) else {
+    let Some((flow, compact)) = flow(word, addr, wide, r6) else {
         track(state, word, got, (big, wide));
         let mut insn = Insn::new(4, Flow::Next);
         // `nop` (`sll $0, $0, 0`) and `ssnop`.
@@ -131,7 +140,10 @@ pub(crate) fn decode(
     if flow == Flow::Stop {
         return Insn::new(4, flow);
     }
-    let through_t9 = word >> 26 == 0 && (word >> 21) & 0x1f == T9;
+    // `jr $t9`, `jalr $t9`, or Release 6's `jrc $t9` and `jalrc $t9`
+    // (`jic $t9, 0`, `jialc $t9, 0`).
+    let through_t9 = (word >> 26 == 0 && (word >> 21) & 0x1f == T9)
+        || (r6 && matches!(word >> 26, 0x36 | 0x3e) && word & 0x03ff_ffff == T9 << 16);
     let flow = match (flow, state.t9, state.target) {
         (Flow::CallIndirect, _, Some(to)) if through_t9 => Flow::Call(to),
         (Flow::JumpRegister(T9), _, Some(to)) => Flow::Jump(to),
@@ -139,6 +151,12 @@ pub(crate) fn decode(
         (Flow::JumpRegister(T9), Some(slot), _) => Flow::JumpSlot(slot),
         _ => flow,
     };
+    if compact {
+        let mut insn = Insn::new(4, flow);
+        insn.note = bound(state, word);
+        settle(state, flow);
+        return insn;
+    }
     // A transfer with no slot after it is cut short: the slot is not code.
     let Some(slot) = bytes.get(4..8).and_then(|slot| read_word(big, slot)) else {
         return Insn::new(4, Flow::Invalid);
@@ -148,6 +166,38 @@ pub(crate) fn decode(
     let mut insn = Insn::new(8, flow);
     track(state, slot, got, (big, wide));
     insn.note = note(state, slot, got, big, wide);
+    settle(state, flow);
+    insn
+}
+
+/// The bound a Release 6 unsigned compact branch puts on an index, when it
+/// compares it with a small constant: `bltuc $s3, $v0, default` with `$s3`
+/// 10 leaves `$v0` at most 10, `bgeuc $v0, $s3, default` at most 9.
+fn bound(state: &State, word: u32) -> Note {
+    let (rs, rt) = ((word >> 21) & 0x1f, (word >> 16) & 0x1f);
+    if rs == 0 || rt == 0 || rs == rt || !matches!(word >> 26, 0x06 | 0x07) {
+        return Note::None;
+    }
+    let value = |reg: u32| {
+        (state.small >> reg & 1 != 0)
+            .then(|| state.values.get(reg as usize).copied())
+            .flatten()
+            .map(u64::from)
+    };
+    // BLTUC rs, rt and BGEUC rs, rt: the constant is the bound on the other
+    // register when it comes first, one past it when second.
+    match (value(rs), value(rt)) {
+        (Some(imm), None) => Note::Compare { reg: rt, imm },
+        (None, Some(imm)) if imm > 0 => Note::Compare {
+            reg: rs,
+            imm: imm - 1,
+        },
+        _ => Note::None,
+    }
+}
+
+/// What a transfer leaves of `state`.
+fn settle(state: &mut State, flow: Flow) {
     // A callee changes `$t9` and the other caller-saved registers; `_gp`
     // stays in the saved ones (`$s0`-`$s7`, `$fp`).
     if matches!(flow, Flow::Call(_) | Flow::CallSlot(_) | Flow::CallIndirect) {
@@ -164,7 +214,6 @@ pub(crate) fn decode(
     ) {
         *state = State::default();
     }
-    insn
 }
 
 /// What `word`, which transfers nowhere, tells a jump-table tracker, and
@@ -182,6 +231,9 @@ fn note(state: &mut State, word: u32, got: &Got, big: bool, wide: bool) -> Note 
     let mut note = note_of(state, word, got, (big, wide), gp_regs);
     let (mut hi, mut set_hi, mut gp_dest) = (state.hi, false, None);
     match opcode {
+        // Release 6's AUI rX, $t9, %hi: `lui` and `addu` in one.
+        0x0f if rs == T9 => (hi, set_hi) = (Some((rt, true)), true),
+        0x0f if rs != 0 => {}
         // LUI
         0x0f => (hi, set_hi) = (Some((rt, false)), true),
         // ADDU, DADDU rX, rX, $t9
@@ -211,6 +263,14 @@ fn note(state: &mut State, word: u32, got: &Got, big: bool, wide: bool) -> Note 
     let written = writes(note) | state.indexed.map_or(0, |(sum, ..)| 1 << sum);
     let written = u32::try_from(written & 0xffff_ffff).unwrap_or(u32::MAX);
     state.gp_regs &= !written;
+    state.small &= !written;
+    if let Note::Address { reg, addr } = note
+        && let Some(slot) = state.values.get_mut(reg as usize)
+        && let Ok(value) = u16::try_from(addr)
+    {
+        *slot = value;
+        state.small |= 1 << reg;
+    }
     if let Some(reg) = gp_dest {
         state.gp_regs |= 1 << reg;
     }
@@ -248,6 +308,8 @@ fn note_of(
     };
     let (scaled, indexed) = (state.scaled, state.indexed.take());
     let note = match opcode {
+        // AUI rX, rY, imm
+        0x0f if rs != 0 => clobber(rt),
         // LUI
         0x0f => Note::Address {
             reg: rt,
@@ -313,6 +375,13 @@ fn note_of(
             0x00 | 0x38 if (1..=3).contains(&((word >> 6) & 0x1f)) && rd != 0 => {
                 state.scaled = Some((rd, u8::try_from((word >> 6) & 0x1f).unwrap_or(0)));
                 return Note::Copy { reg: rd, src: rt };
+            }
+            // Release 6's LSA, DLSA rd, rs, rt, n: rt plus rs shifted left
+            // by n, the address a table entry is loaded from.
+            0x05 | 0x15 if rd != 0 => {
+                let shift = u8::try_from((word >> 6) & 3).unwrap_or(0) + 1;
+                state.indexed = Some((rd, rt, rs, shift));
+                return Note::None;
             }
             // ADDU, DADDU, OR with $zero: a copy.
             0x21 | 0x2d | 0x25 if rt == 0 => Note::Copy { reg: rd, src: rs },
@@ -443,50 +512,95 @@ fn read_word(big: bool, bytes: &[u8]) -> Option<u32> {
 
 /// Where control goes after the transfer at `addr` and its slot; `None`
 /// for an instruction that is no transfer.
-fn flow(word: u32, addr: u64, wide: bool) -> Option<Flow> {
+/// for an instruction that is no transfer. Release 6's compact transfers
+/// come with `true`: they have no slot.
+fn flow(word: u32, addr: u64, wide: bool, r6: bool) -> Option<(Flow, bool)> {
     let opcode = word >> 26;
     let rs = (word >> 21) & 0x1f;
     let rt = (word >> 16) & 0x1f;
     let slot = addr.wrapping_add(4);
     let wrap = |target: u64| if wide { target } else { target & 0xffff_ffff };
-    // A 16-bit word offset from the slot.
-    let offset = (i64::from(word & 0xffff) ^ 0x8000) - 0x8000;
-    let branch = wrap(slot.wrapping_add_signed(offset << 2));
-    Some(match opcode {
-        0 => match word & 0x3f {
-            // JR, JR.HB
-            0x08 if rs == RA => Flow::Return,
-            0x08 => Flow::JumpRegister(rs),
-            // JALR
-            0x09 => Flow::CallIndirect,
-            // BREAK
-            0x0d => Flow::Stop,
-            _ => return None,
-        },
-        // REGIMM: BLTZ, BGEZ and their likely and linking forms.
-        1 => match rt {
-            0x00..=0x03 => Flow::Branch(branch),
-            // BLTZAL, BGEZAL (`bal` on $zero) and their likely forms.
-            0x10..=0x13 => Flow::Call(branch),
-            _ => return None,
-        },
-        // J, JAL: the low 28 bits of the slot's region.
-        2 | 3 => {
-            let target = wrap((slot & !0x0fff_ffff) | u64::from(word & 0x03ff_ffff) << 2);
-            if opcode == 2 {
-                Flow::Jump(target)
-            } else {
-                Flow::Call(target)
-            }
+    // A word offset of `bits` bits from the slot (compact branches count
+    // from the next instruction, the same address).
+    let relative = |bits: u32| {
+        let sign = 1_i64 << (bits - 1);
+        let field = i64::from(word) & ((1 << bits) - 1);
+        wrap(slot.wrapping_add_signed(((field ^ sign) - sign) << 2))
+    };
+    let branch = relative(16);
+    if r6 {
+        let compact = match opcode {
+            // BLEZALC, BGEZALC, BGTZALC, BLTZALC; BGEUC, BLTUC. With rt
+            // zero, BLEZ and BGTZ, which have slots.
+            0x06 | 0x07 if rt != 0 && (rs == 0 || rs == rt) => Flow::Call(branch),
+            0x06 | 0x07 if rt != 0 => Flow::Branch(branch),
+            // BEQZALC, BNEZALC; BEQC, BNEC, BOVC, BNVC.
+            0x08 | 0x18 if rs == 0 && rt != 0 => Flow::Call(branch),
+            0x08 | 0x18 => Flow::Branch(branch),
+            // BLEZC, BGEZC, BGEC; BGTZC, BLTZC, BLTC.
+            0x16 | 0x17 => Flow::Branch(branch),
+            // BC, BALC
+            0x32 => Flow::Jump(relative(26)),
+            0x3a => Flow::Call(relative(26)),
+            // BEQZC, BNEZC
+            0x36 | 0x3e if rs != 0 => Flow::Branch(relative(21)),
+            // JIC (`jrc` at offset 0), JIALC (`jalrc`): to a register plus
+            // an offset.
+            0x36 if word & 0xffff == 0 && rt == RA => Flow::Return,
+            0x36 if word & 0xffff == 0 => Flow::JumpRegister(rt),
+            0x36 => Flow::JumpIndirect,
+            0x3e => Flow::CallIndirect,
+            // BEQL, BNEL are gone.
+            0x14 | 0x15 => Flow::Invalid,
+            // BC1EQZ, BC1NEZ, BC2EQZ, BC2NEZ: with slots.
+            0x11 | 0x12 if rs == 0x09 || rs == 0x0d => return Some((Flow::Branch(branch), false)),
+            _ => Flow::Next,
+        };
+        if compact != Flow::Next {
+            return Some((compact, true));
         }
-        // BEQ $x, $x is `b`, always taken.
-        4 if rs == rt => Flow::Jump(branch),
-        // BEQ, BNE, BLEZ, BGTZ and their likely forms.
-        4..=7 | 0x14..=0x17 => Flow::Branch(branch),
-        // BC1F, BC1T and their likely forms.
-        0x11 if rs == 8 => Flow::Branch(branch),
-        _ => return None,
-    })
+    }
+    Some((
+        match opcode {
+            0 => match word & 0x3f {
+                // JR, JR.HB
+                0x08 if rs == RA => Flow::Return,
+                0x08 => Flow::JumpRegister(rs),
+                // JALR $zero, which Release 6 writes `jr` as.
+                0x09 if (word >> 11) & 0x1f == 0 && rs == RA => Flow::Return,
+                0x09 if (word >> 11) & 0x1f == 0 => Flow::JumpRegister(rs),
+                // JALR
+                0x09 => Flow::CallIndirect,
+                // BREAK
+                0x0d => Flow::Stop,
+                _ => return None,
+            },
+            // REGIMM: BLTZ, BGEZ and their likely and linking forms.
+            1 => match rt {
+                0x00..=0x03 => Flow::Branch(branch),
+                // BLTZAL, BGEZAL (`bal` on $zero) and their likely forms.
+                0x10..=0x13 => Flow::Call(branch),
+                _ => return None,
+            },
+            // J, JAL: the low 28 bits of the slot's region.
+            2 | 3 => {
+                let target = wrap((slot & !0x0fff_ffff) | u64::from(word & 0x03ff_ffff) << 2);
+                if opcode == 2 {
+                    Flow::Jump(target)
+                } else {
+                    Flow::Call(target)
+                }
+            }
+            // BEQ $x, $x is `b`, always taken.
+            4 if rs == rt => Flow::Jump(branch),
+            // BEQ, BNE, BLEZ, BGTZ and their likely forms.
+            4..=7 | 0x14..=0x17 => Flow::Branch(branch),
+            // BC1F, BC1T and their likely forms.
+            0x11 if rs == 8 => Flow::Branch(branch),
+            _ => return None,
+        },
+        false,
+    ))
 }
 
 #[cfg(test)]
@@ -498,10 +612,95 @@ mod tests {
         decode(
             &mut State::default(),
             &Got::default(),
-            (true, false),
+            (true, false, false),
             &bytes,
             addr,
         )
+    }
+
+    /// Each instruction of `words` at `addr` on, as Release 6 code.
+    fn r6(words: &[u32], addr: u64) -> Vec<(Flow, u32)> {
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
+        let mut state = State::default();
+        let mut out = Vec::new();
+        let mut at = 0;
+        while at < bytes.len() {
+            let insn = decode(
+                &mut state,
+                &Got::default(),
+                (true, false, true),
+                &bytes[at..],
+                addr + at as u64,
+            );
+            out.push((insn.flow, insn.len));
+            at += insn.len as usize;
+        }
+        out
+    }
+
+    #[test]
+    fn release_6() {
+        let flows = r6(
+            &[
+                0xc800_0010, // bc +0x40
+                0xe800_0001, // balc +4
+                0xd880_0002, // beqzc $a0, +8
+                0xd81f_0000, // jrc $ra
+                0xf819_0000, // jalrc $t9
+                0x6085_0001, // bnec $a0, $a1, +4
+                0x2005_0001, // beqzalc $a1, +4
+                0x1880_0003, // blez $a0, +12, with a slot
+                0,
+                0x03e0_0009, // jalr $zero, $ra: jr $ra
+                0,
+            ],
+            0x1000,
+        );
+        assert_eq!(
+            flows,
+            [
+                (Flow::Jump(0x1044), 4),
+                (Flow::Call(0x100c), 4),
+                (Flow::Branch(0x1014), 4),
+                (Flow::Return, 4),
+                (Flow::CallIndirect, 4),
+                (Flow::Branch(0x101c), 4),
+                (Flow::Call(0x1020), 4),
+                (Flow::Branch(0x102c), 8),
+                (Flow::Return, 8),
+            ]
+        );
+        // Before Release 6, 0x2005_0001 is `addi $a1, $zero, 1`.
+        assert_eq!(one(&[0x2005_0001], 0x1000).flow, Flow::Next);
+        // li $s3, 10; bltuc $s3, $v0, default: $v0 at most 10. With the
+        // operands swapped, bgeuc $v0, $s3: at most 9.
+        for (branch, imm) in [(0x1e62_0004, 10), (0x1853_0004, 9)] {
+            let bytes: Vec<u8> = [0x2413_000a_u32, branch]
+                .iter()
+                .flat_map(|w| w.to_be_bytes())
+                .collect();
+            let mut state = State::default();
+            let got = Got::default();
+            decode(&mut state, &got, (true, false, true), &bytes, 0x1000);
+            let insn = decode(&mut state, &got, (true, false, true), &bytes[4..], 0x1004);
+            assert_eq!(insn.note, Note::Compare { reg: 2, imm });
+        }
+        // lsa $v0, $a0, $v1, 2; lw $v0, 0($v0): a table entry's load.
+        let notes = insns(&[0x0083_1045, 0x8c42_0000], 0x1000, &Got::default());
+        assert_eq!(
+            notes[1].note,
+            Note::Load {
+                reg: 2,
+                mem: Mem {
+                    base: Some(3),
+                    index: Some(4),
+                    scale: 4,
+                    disp: 0
+                },
+                size: 4,
+                signed: false
+            }
+        );
     }
 
     /// Each instruction of `words` at `addr` on, in order, with `got`.
@@ -514,7 +713,7 @@ mod tests {
             let insn = decode(
                 &mut state,
                 got,
-                (true, false),
+                (true, false, false),
                 &bytes[at..],
                 addr + at as u64,
             );
@@ -673,7 +872,7 @@ mod tests {
         let call = decode(
             &mut State::default(),
             &Got::default(),
-            (false, true),
+            (false, true, false),
             &bytes,
             0x1_2000_0000,
         );

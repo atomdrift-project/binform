@@ -115,9 +115,7 @@ pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf, arch: Arch) -> Layout<'a> {
                 Arch::X86 => i386(section, offset, reloc.kind, fix),
                 Arch::Arm64 => aarch64(section, offset, reloc.kind, fix),
                 Arch::Arm => arm(section, offset, reloc.kind, fix),
-                Arch::Mips | Arch::MipsEl | Arch::Mips64 | Arch::Mips64El => {
-                    mips(section, offset, reloc.kind, fix, arch.big_endian())
-                }
+                arch if arch.mips() => mips(section, offset, reloc.kind, fix, arch.big_endian()),
                 Arch::S390x => s390x(section, offset, reloc.kind, fix),
                 Arch::Sparc | Arch::Sparc64 => sparc(section, offset, reloc.kind, fix),
                 // SuperH objects are laid out but not linked: their calls

@@ -848,6 +848,21 @@ fn s390x_encrypted_payload() {
     });
 }
 
+/// MIPS Release 6: compact branches, jumps and calls in reused opcodes,
+/// `jr` written as `jalr $zero`, and a jump table bounded by a compact
+/// branch.
+#[test]
+fn mips_r6() {
+    check("r6-mipsel-static", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::MipsR6El);
+        assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
+        assert!(outcome.cases() >= 10, "{} cases", outcome.cases());
+        finds_rizin_except(outcome, &[]);
+        assert_eq!(outcome.recovery.invalid, 0);
+        assert_eq!(outcome.recovery.unresolved, 0);
+    });
+}
+
 /// The import stubs a Windows CE file calls through.
 fn thunks(outcome: &Outcome<'_>) -> usize {
     outcome

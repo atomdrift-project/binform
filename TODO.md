@@ -47,8 +47,12 @@
     near-random bytes (`bot-s390x-static-pie`, whose `.text` is mostly an
     encrypted payload: 1070 invalid down to 50). Such files cover little,
     as they should; unpacking them is out of scope.
-  - MIPS R6 (`jq` 1.8.1 `mips32r6`/`mips64r6`) covers 37-50%: the R6
-    compact branches and relocated encodings are not decoded.
+  - MIPS Release 6 (`Arch::MipsR6` and kin, from `e_flags`) decodes
+    compact branches, `jic`/`jialc`, `jalr $zero`, `aui` and `lsa`, and
+    bounds tables by compact compares (`r6-mipsel-static`). `jq` 1.8.1's
+    R6 builds now cover what its other MIPS builds do (90% 32-bit, 84%
+    64-bit). Not yet: R6's PC-relative loads (`lwpc`, `auipc`,
+    `aluipc`) as table addresses.
   - Windows CE on Arm (`bot-wince-arm`, `bot-wince-thumb`) is read:
     `.pdata` seeds and extents, literal-loaded import stubs, ARMv4
     `mov lr, pc` calls. Thumb functions in such files (a clear 32-bit flag

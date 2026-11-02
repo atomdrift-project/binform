@@ -50,6 +50,8 @@ pub(super) struct Elf {
     pub(super) is_64: bool,
     pub(super) big: bool,
     pub(super) machine: u16,
+    /// `e_flags`: on MIPS, the release in its top four bits.
+    pub(super) header_flags: u32,
     pub(super) kind: u16,
     pub(super) entry: u64,
     pub(super) programs: Vec<Program>,
@@ -171,6 +173,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Elf, String> {
         is_64,
         big,
         machine: u16::try_from(machine).unwrap_or(u16::MAX),
+        header_flags: r.u32(if is_64 { 48 } else { 36 }).unwrap_or(0),
         kind: u16::try_from(kind).unwrap_or(u16::MAX),
         entry,
         programs,

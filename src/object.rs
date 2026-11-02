@@ -129,10 +129,20 @@ fn elf_arch(elf: &Elf) -> Result<Arch, Error> {
         (EM_X86_64, _) => Arch::X86_64,
         (EM_AARCH64, _) => Arch::Arm64,
         (EM_ARM, _) => Arch::Arm,
-        (EM_MIPS | EM_MIPS_RS3_LE, false) if elf.big => Arch::Mips,
-        (EM_MIPS | EM_MIPS_RS3_LE, false) => Arch::MipsEl,
-        (EM_MIPS | EM_MIPS_RS3_LE, true) if elf.big => Arch::Mips64,
-        (EM_MIPS | EM_MIPS_RS3_LE, true) => Arch::Mips64El,
+        // EF_MIPS_ARCH: 9 and 10 are MIPS32 and MIPS64 Release 6.
+        (EM_MIPS | EM_MIPS_RS3_LE, wide) => {
+            let r6 = matches!(elf.header_flags >> 28, 9 | 10);
+            match (wide, elf.big, r6) {
+                (false, true, false) => Arch::Mips,
+                (false, false, false) => Arch::MipsEl,
+                (true, true, false) => Arch::Mips64,
+                (true, false, false) => Arch::Mips64El,
+                (false, true, true) => Arch::MipsR6,
+                (false, false, true) => Arch::MipsR6El,
+                (true, true, true) => Arch::Mips64R6,
+                (true, false, true) => Arch::Mips64R6El,
+            }
+        }
         (EM_S390, true) => Arch::S390x,
         (EM_S390, false) => return Err(Error::Arch("31-bit s390".into())),
         (EM_SPARC | EM_SPARC32PLUS, _) => Arch::Sparc,
@@ -347,10 +357,7 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Image<'a>, Error> {
             });
         }
     }
-    let mips = matches!(
-        arch,
-        Arch::Mips | Arch::MipsEl | Arch::Mips64 | Arch::Mips64El
-    );
+    let mips = arch.mips();
     if mips {
         imports.extend(mips_got_imports(elf));
     }
