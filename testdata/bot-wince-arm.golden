@@ -1,0 +1,141 @@
+# funktion: 136 functions, 12664 bytes of code covered, 0 landing pads, 0 cases
+# rizin: 136 functions; 133 shared, 126 with the same blocks (126 of 133 without landing pads)
+only rizin 0x1b7d4 fcn.0001b7d4: not code
+only rizin 0x1e92c fcn.0001e92c: not code
+only rizin 0x25960 fcn.00025960: not code
+0x11000 size=20 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x11018 size=212 blocks=11 edges=15 cc=10 cases=0 found=UNWIND | CALL | SWEEP rizin=11/10
+0x11104 size=20 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x1111c size=624 blocks=30 edges=48 cc=22 cases=0 found=UNWIND | CALL | SWEEP rizin=29/20
+0x113a4 size=212 blocks=15 edges=25 cc=14 cases=0 found=UNWIND | CALL | SWEEP rizin=15/14
+0x11478 size=32 blocks=3 edges=3 cc=2 cases=0 found=UNWIND | CALL | SWEEP rizin=3/2
+0x11498 size=52 blocks=3 edges=3 cc=2 cases=0 found=UNWIND | CALL | SWEEP rizin=3/2
+0x114cc size=92 blocks=3 edges=3 cc=2 cases=0 found=UNWIND | CALL | SWEEP rizin=3/2
+0x1152c size=188 blocks=4 edges=3 cc=5 cases=0 found=UNWIND | CALL | SWEEP rizin=3/3
+0x115e8 size=108 blocks=3 edges=4 cc=3 cases=0 found=UNWIND | CALL | SWEEP rizin=3/3
+0x1165c size=312 blocks=11 edges=14 cc=9 cases=0 found=UNWIND | CALL | SWEEP rizin=11/9
+0x117a4 size=236 blocks=4 edges=4 cc=4 cases=0 found=UNWIND | CALL | SWEEP rizin=4/4
+0x11898 size=264 blocks=10 edges=14 cc=8 cases=0 found=UNWIND | CALL | SWEEP rizin=10/8
+0x119b8 size=192 blocks=12 edges=16 cc=6 cases=0 found=UNWIND | CALL | SWEEP rizin=12/6
+0x11a7c size=96 blocks=5 edges=7 cc=4 cases=0 found=UNWIND | CALL | SWEEP rizin=5/4
+0x11ae0 size=28 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x11afc size=124 blocks=6 edges=8 cc=4 cases=0 found=UNWIND | CALL | SWEEP rizin=6/4
+0x11b78 size=328 blocks=11 edges=14 cc=7 cases=0 found=UNWIND | CALL | SWEEP rizin=11/7
+0x11cc4 size=32 blocks=3 edges=3 cc=2 cases=0 found=UNWIND | CALL | SWEEP rizin=3/2
+0x11ce4 size=28 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x11d00 size=68 blocks=3 edges=3 cc=2 cases=0 found=UNWIND | CALL | SWEEP rizin=3/2
+0x11d44 size=132 blocks=3 edges=4 cc=3 cases=0 found=UNWIND | CALL | SWEEP rizin=3/3
+0x11dcc size=56 blocks=3 edges=2 cc=3 cases=0 found=UNWIND | CALL | SWEEP rizin=3/3
+0x11e04 size=80 blocks=3 edges=4 cc=3 cases=0 found=UNWIND | CALL | SWEEP rizin=3/3
+0x11e54 size=76 blocks=8 edges=11 cc=9 cases=0 found=UNWIND | CALL | SWEEP rizin=8/5
+0x11ea0 size=96 blocks=4 edges=6 cc=4 cases=0 found=UNWIND | CALL | SWEEP rizin=4/4
+0x11f00 size=24 blocks=3 edges=3 cc=2 cases=0 found=UNWIND | CALL | SWEEP rizin=3/2
+0x11f18 size=136 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x11fac size=120 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x12030 size=12 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x12040 size=12 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x12050 size=4 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x12054 size=204 blocks=6 edges=9 cc=5 cases=0 found=UNWIND | CALL | SWEEP rizin=6/5
+0x12130 size=64 blocks=3 edges=3 cc=2 cases=0 found=UNWIND | CALL | SWEEP rizin=3/2
+0x12170 size=12 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x1217c size=20 blocks=1 edges=0 cc=1 cases=0 found=UNWIND rizin=-
+0x12190 size=16 blocks=1 edges=0 cc=1 cases=0 found=UNWIND rizin=-
+0x121a0 size=24 blocks=1 edges=1 cc=0 cases=0 found=UNWIND rizin=1/0
+0x121b8 size=32 blocks=1 edges=1 cc=0 cases=0 found=UNWIND rizin=1/0
+0x121d8 size=188 blocks=4 edges=5 cc=3 cases=0 found=UNWIND | CALL | SWEEP rizin=4/3
+0x12294 size=92 blocks=7 edges=10 cc=5 cases=0 found=UNWIND | CALL | SWEEP rizin=7/5
+0x122f4 size=220 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x123e0 size=264 blocks=9 edges=12 cc=5 cases=0 found=UNWIND | CALL | SWEEP rizin=9/5
+0x124ec size=236 blocks=10 edges=8 cc=8 cases=0 found=UNWIND | CALL | SWEEP rizin=6/4
+0x125d8 size=140 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x12664 size=92 blocks=6 edges=7 cc=5 cases=0 found=UNWIND | CALL | SWEEP rizin=6/5
+0x126c0 size=52 blocks=3 edges=3 cc=2 cases=0 found=UNWIND | CALL | SWEEP rizin=3/2
+0x126f4 size=140 blocks=3 edges=2 cc=3 cases=0 found=UNWIND | CALL | SWEEP | TAIL_CALL rizin=3/3
+0x12780 size=72 blocks=4 edges=5 cc=3 cases=0 found=UNWIND | CALL | SWEEP rizin=4/3
+0x127c8 size=124 blocks=3 edges=3 cc=2 cases=0 found=UNWIND | CALL | SWEEP rizin=3/2
+0x12844 size=116 blocks=3 edges=2 cc=3 cases=0 found=UNWIND | CALL | SWEEP rizin=3/3
+0x128b8 size=120 blocks=4 edges=4 cc=4 cases=0 found=UNWIND | CALL | SWEEP rizin=4/4
+0x12930 size=156 blocks=4 edges=4 cc=4 cases=0 found=UNWIND | CALL | SWEEP rizin=4/4
+0x129cc size=124 blocks=8 edges=10 cc=6 cases=0 found=UNWIND | CALL | SWEEP rizin=8/6
+0x12a48 size=180 blocks=8 edges=12 cc=6 cases=0 found=UNWIND | CALL | SWEEP rizin=8/6
+0x12b00 size=72 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x12b48 size=164 blocks=5 edges=5 cc=4 cases=0 found=UNWIND | CALL | SWEEP rizin=5/4
+0x12bec size=176 blocks=4 edges=4 cc=4 cases=0 found=UNWIND | CALL | SWEEP rizin=3/2
+0x12c9c size=100 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x12d08 size=100 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x12d74 size=496 blocks=13 edges=19 cc=10 cases=0 found=UNWIND | CALL | SWEEP rizin=13/10
+0x12f88 size=84 blocks=3 edges=3 cc=2 cases=0 found=UNWIND | CALL | SWEEP rizin=3/2
+0x12fe0 size=216 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x130c8 size=380 blocks=3 edges=3 cc=2 cases=0 found=UNWIND | CALL | SWEEP rizin=3/2
+0x13254 size=316 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x13394 size=48 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x133c4 size=116 blocks=6 edges=8 cc=4 cases=0 found=UNWIND | CALL | SWEEP rizin=6/4
+0x13438 size=416 blocks=9 edges=13 cc=6 cases=0 found=UNWIND | CALL | SWEEP rizin=9/6
+0x135e0 size=276 blocks=8 edges=11 cc=5 cases=0 found=UNWIND | CALL | SWEEP rizin=8/5
+0x136fc size=56 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x13734 size=68 blocks=1 edges=1 cc=0 cases=0 found=UNWIND | CALL | SWEEP rizin=1/0
+0x13778 size=68 blocks=1 edges=1 cc=0 cases=0 found=UNWIND | CALL | SWEEP rizin=1/0
+0x137bc size=32 blocks=1 edges=1 cc=0 cases=0 found=UNWIND | CALL | SWEEP rizin=1/0
+0x137dc size=388 blocks=12 edges=17 cc=7 cases=0 found=UNWIND rizin=12/7
+0x13980 size=48 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x139b0 size=48 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x139e0 size=56 blocks=5 edges=7 cc=4 cases=0 found=UNWIND | CALL | SWEEP rizin=5/4
+0x13a18 size=28 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x13a34 size=60 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x13a70 size=56 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x13aa8 size=56 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x13ae0 size=28 blocks=1 edges=0 cc=1 cases=0 found=UNWIND | CALL | SWEEP rizin=1/1
+0x13afc size=140 blocks=6 edges=8 cc=6 cases=0 found=UNWIND | CALL | SWEEP rizin=6/6
+0x13b8c size=524 blocks=23 edges=36 cc=17 cases=0 found=UNWIND | CALL | SWEEP rizin=23/17
+0x13db0 size=448 blocks=19 edges=29 cc=14 cases=0 found=UNWIND | CALL | SWEEP rizin=18/12
+0x13f7c size=120 blocks=6 edges=6 cc=6 cases=0 found=UNWIND | CALL | SWEEP rizin=6/6
+0x13ffc size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14008 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14014 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14020 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x1402c size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14038 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14044 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14050 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x1405c size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14068 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14074 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14080 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x1408c size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14098 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x140a4 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x140b0 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x140bc size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x140c8 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x140d4 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x140e0 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x140ec size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x140f8 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14104 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14110 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x1411c size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14128 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14134 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14140 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x1414c size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14158 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14164 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14170 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x1417c size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14188 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14194 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x141a0 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x141ac size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x141b8 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x141c4 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x141d0 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x141dc size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x141e8 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x141f4 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14200 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x1420c size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14218 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14224 size=8 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x14238 size=88 blocks=2 edges=2 cc=2 cases=0 found=ENTRY | UNWIND rizin=1/1
+0x14290 size=72 blocks=3 edges=3 cc=4 cases=0 found=UNWIND rizin=-
+0x142d8 size=240 blocks=7 edges=8 cc=11 cases=0 found=UNWIND | CALL | SWEEP rizin=2/2
