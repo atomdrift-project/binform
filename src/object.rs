@@ -115,6 +115,8 @@ const EM_386: u16 = 3;
 const EM_MIPS: u16 = 8;
 const EM_MIPS_RS3_LE: u16 = 10;
 const EM_SPARC32PLUS: u16 = 18;
+const EM_PPC: u16 = 20;
+const EM_PPC64: u16 = 21;
 const EM_S390: u16 = 22;
 const EM_ARM: u16 = 40;
 const EM_SH: u16 = 42;
@@ -148,6 +150,9 @@ fn elf_arch(elf: &Elf) -> Result<Arch, Error> {
         (EM_SPARC | EM_SPARC32PLUS, _) => Arch::Sparc,
         (EM_SPARCV9, _) => Arch::Sparc64,
         (EM_SH, _) => Arch::SuperH,
+        (EM_PPC, false) => Arch::PowerPc,
+        (EM_PPC64, true) if elf.big => Arch::PowerPc64,
+        (EM_PPC64, true) => Arch::PowerPc64El,
         (machine, _) => return Err(Error::Arch(format!("ELF machine {machine}"))),
     };
     if elf.big != arch.big_endian() {
@@ -380,6 +385,18 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Image<'a>, Error> {
                     .or_else(|| sections.find(".got").map(|(addr, _)| addr))
                     .map(|got| got.wrapping_add(0x7ff0))
             })
+    } else if matches!(arch, Arch::PowerPc64 | Arch::PowerPc64El) {
+        // The TOC pointer in `r2`: `.TOC.`, which the linker places 0x8000
+        // past the start of `.got`.
+        elf.symbols
+            .iter()
+            .find(|symbol| symbol.name == ".TOC." && symbol.value != 0)
+            .map(|symbol| symbol.value)
+            .or_else(|| {
+                sections
+                    .find(".got")
+                    .map(|(addr, _)| addr.wrapping_add(0x8000))
+            })
     } else {
         None
     };
@@ -388,6 +405,27 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Image<'a>, Error> {
             mips_got_pointers(elf, &sections, &memory, &imports)
                 .into_iter()
                 .map(|addr| seed(addr, Origin::Pointer)),
+        );
+    }
+    // 64-bit ELFv1: the entry point and function symbols name descriptors
+    // in `.opd` (the code's address, the TOC pointer, an environment), and
+    // each descriptor stands for a function.
+    if arch == Arch::PowerPc64
+        && !object
+        && let Some((opd, sh)) = sections.find(".opd")
+    {
+        for seed in &mut seeds {
+            if seed.addr.wrapping_sub(opd) < sh.size
+                && let Some(code) = memory.read(seed.addr, 8)
+            {
+                seed.addr = code;
+            }
+        }
+        seeds.extend(
+            (0..sh.size / 24)
+                .filter_map(|i| memory.read(opd.wrapping_add(i * 24), 8))
+                .filter(|&code| code != 0)
+                .map(|code| seed(code, Origin::Pointer)),
         );
     }
     drop(memory);

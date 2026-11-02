@@ -174,6 +174,13 @@ pub(crate) enum Decoder {
         state: crate::sparc::State,
     },
     SuperH(crate::superh::State),
+    PowerPc {
+        big: bool,
+        wide: bool,
+        /// The TOC pointer 64-bit code keeps in `r2`.
+        toc: Option<u64>,
+        state: Box<crate::ppc::State>,
+    },
 }
 
 impl Decoder {
@@ -220,6 +227,12 @@ impl Decoder {
                 state: crate::sparc::State::default(),
             },
             Arch::SuperH => Self::SuperH(crate::superh::State::default()),
+            arch @ (Arch::PowerPc | Arch::PowerPc64 | Arch::PowerPc64El) => Self::PowerPc {
+                big: arch.big_endian(),
+                wide: arch.address_width() == 8,
+                toc: image.got,
+                state: Box::default(),
+            },
         }
     }
 
@@ -233,6 +246,7 @@ impl Decoder {
             Self::S390x(state) => *state = crate::s390x::State::default(),
             Self::Sparc { state, .. } => *state = crate::sparc::State::default(),
             Self::SuperH(state) => *state = crate::superh::State::default(),
+            Self::PowerPc { state, .. } => **state = crate::ppc::State::default(),
             _ => {}
         }
     }
@@ -253,6 +267,12 @@ impl Decoder {
             Self::S390x(state) => crate::s390x::decode(state, bytes, addr),
             Self::Sparc { wide, state } => crate::sparc::decode(state, *wide, bytes, addr),
             Self::SuperH(state) => crate::superh::decode(state, bytes, addr),
+            Self::PowerPc {
+                big,
+                wide,
+                toc,
+                state,
+            } => crate::ppc::decode(state, (*big, *wide, *toc), bytes, addr),
         }
     }
 
@@ -269,12 +289,14 @@ impl Decoder {
             | Self::Arm { .. }
             | Self::Mips { wide: false, .. }
             | Self::Sparc { wide: false, .. }
+            | Self::PowerPc { wide: false, .. }
             | Self::SuperH(_) => 4,
             Self::X86 { .. }
             | Self::Arm64(_)
             | Self::Mips { .. }
             | Self::S390x(_)
-            | Self::Sparc { .. } => 8,
+            | Self::Sparc { .. }
+            | Self::PowerPc { .. } => 8,
         }
     }
 
@@ -284,7 +306,11 @@ impl Decoder {
         match self {
             Self::X86 { .. } => 1,
             Self::S390x(_) | Self::SuperH(_) | Self::Arm { thumb: true, .. } => 2,
-            Self::Arm64(_) | Self::Arm { .. } | Self::Mips { .. } | Self::Sparc { .. } => 4,
+            Self::Arm64(_)
+            | Self::Arm { .. }
+            | Self::Mips { .. }
+            | Self::Sparc { .. }
+            | Self::PowerPc { .. } => 4,
         }
     }
 
@@ -334,7 +360,7 @@ impl Decoder {
     /// of SuperH's literal-pool loads, which hold data, callees and
     /// callbacks (other sets also note addresses inside the function).
     pub(crate) const fn notes_pointers(&self) -> bool {
-        matches!(self, Self::SuperH(_))
+        matches!(self, Self::SuperH(_) | Self::PowerPc { wide: false, .. })
     }
 
     /// Whether transfers have delay slots, whose note a call's or jump's
@@ -364,7 +390,32 @@ impl Decoder {
             Self::Arm { thumb, .. } => crate::arm::starts_frame(*thumb, bytes),
             Self::SuperH(_) => crate::superh::starts_frame(bytes),
             Self::S390x(_) => crate::s390x::starts_frame(bytes),
+            Self::PowerPc { big, .. } => crate::ppc::starts_frame(*big, bytes),
             _ => false,
+        }
+    }
+
+    /// Whether `bytes` can only be a function's first instructions: 64-bit
+    /// ELFv2's global entry, which sets the TOC pointer from the function's
+    /// own address.
+    pub(crate) fn starts_function(&self, bytes: &[u8]) -> bool {
+        match self {
+            Self::PowerPc {
+                big, wide: true, ..
+            } => crate::ppc::global_entry(*big, bytes),
+            _ => false,
+        }
+    }
+
+    /// Where the function entered at `addr` starts, given the eight bytes
+    /// before it: 64-bit ELFv2 code enters a function eight bytes in from
+    /// within its module, past the instructions that set the TOC pointer.
+    pub(crate) fn global_entry(&self, addr: u64, before: &[u8]) -> u64 {
+        match self {
+            Self::PowerPc {
+                big, wide: true, ..
+            } if crate::ppc::global_entry(*big, before) => addr.wrapping_sub(8),
+            _ => addr,
         }
     }
 }

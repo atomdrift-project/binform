@@ -863,6 +863,85 @@ fn mips_r6() {
     });
 }
 
+/// Every function rizin finds, but those in `except`, funktion finds too,
+/// or `offset` bytes before: rizin starts PowerPC functions after their
+/// first instructions (at `mflr`, past `stwu`; at ELFv2's local entry).
+fn finds_rizin_before(outcome: &Outcome<'_>, offset: u64, except: &[u64]) {
+    let entries = outcome.entries();
+    let missed: Vec<u64> = outcome
+        .missed()
+        .into_iter()
+        .filter(|entry| !except.contains(entry))
+        .filter(|entry| !entries.contains_key(&entry.wrapping_sub(offset)))
+        .collect();
+    assert!(
+        missed.is_empty(),
+        "missed {} of rizin's: {missed:x?}",
+        missed.len()
+    );
+}
+
+/// A 32-bit PowerPC bot: functions reached only through addresses built
+/// in halves (`lis; addi`), and a jump table.
+#[test]
+fn powerpc_static() {
+    check("bot-ppc-static", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::PowerPc);
+        assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
+        let pointers = outcome.found(Found::POINTER);
+        assert!(pointers >= 15, "only {pointers} from built addresses");
+        assert!(outcome.cases() >= 11, "{} cases", outcome.cases());
+        // Rizin also starts three in the ELF header.
+        finds_rizin_before(outcome, 4, &[0x1000_0000, 0x1000_0014, 0x1000_0018]);
+        assert_eq!(outcome.recovery.invalid, 0);
+        assert!(outcome.recovery.unresolved <= 1);
+    });
+}
+
+/// 64-bit ELFv1: the entry point and symbols name `.opd` descriptors.
+#[test]
+fn powerpc64_elfv1() {
+    check("bot-ppc64-elfv1", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::PowerPc64);
+        assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
+        let pointers = outcome.found(Found::POINTER);
+        assert!(pointers >= 20, "only {pointers} from descriptors");
+        let entries = outcome.entries();
+        let entry = entries.values().find(|f| f.found.contains(Found::ENTRY));
+        assert!(
+            entry.is_some_and(|f| outcome
+                .image
+                .segments
+                .iter()
+                .any(|s| { s.executable && f.entry.wrapping_sub(s.addr) < s.bytes.len() as u64 })),
+            "the entry point is not code"
+        );
+        finds_rizin_before(outcome, 8, &[]);
+        assert_eq!(outcome.recovery.invalid, 0);
+    });
+}
+
+/// 64-bit ELFv2: functions start at their global entries, which set the
+/// TOC pointer, though calls go to the local ones eight bytes in.
+#[test]
+fn powerpc64le_static() {
+    check("ppc64le-static", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::PowerPc64El);
+        assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
+        finds_rizin_before(outcome, 8, &[]);
+        // No function starts at a local entry.
+        let entries = outcome.entries();
+        let local: Vec<u64> = entries
+            .keys()
+            .copied()
+            .filter(|entry| entries.contains_key(&entry.wrapping_sub(8)))
+            .collect();
+        assert!(local.is_empty(), "local entries: {local:x?}");
+        assert_eq!(outcome.recovery.invalid, 0);
+        assert_eq!(outcome.recovery.unresolved, 0);
+    });
+}
+
 /// The import stubs a Windows CE file calls through.
 fn thunks(outcome: &Outcome<'_>) -> usize {
     outcome

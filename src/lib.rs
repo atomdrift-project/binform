@@ -40,6 +40,7 @@ mod cfg;
 pub mod cil;
 mod decode;
 mod mips;
+mod ppc;
 mod s390x;
 mod sparc;
 mod superh;
@@ -91,6 +92,13 @@ pub enum Arch {
     Sparc64,
     /// SuperH (SH-2, SH-3, SH-4), little-endian.
     SuperH,
+    /// 32-bit PowerPC, big-endian.
+    PowerPc,
+    /// 64-bit PowerPC, big-endian (the ELFv1 ABI, with function
+    /// descriptors).
+    PowerPc64,
+    /// 64-bit PowerPC, little-endian (the ELFv2 ABI).
+    PowerPc64El,
 }
 
 impl Arch {
@@ -107,6 +115,8 @@ impl Arch {
                 | Self::S390x
                 | Self::Sparc
                 | Self::Sparc64
+                | Self::PowerPc
+                | Self::PowerPc64
         )
     }
 
@@ -144,7 +154,8 @@ impl Arch {
             | Self::MipsR6
             | Self::MipsR6El
             | Self::Sparc
-            | Self::SuperH => 4,
+            | Self::SuperH
+            | Self::PowerPc => 4,
             Self::X86_64
             | Self::Arm64
             | Self::Mips64
@@ -152,7 +163,9 @@ impl Arch {
             | Self::Mips64R6
             | Self::Mips64R6El
             | Self::S390x
-            | Self::Sparc64 => 8,
+            | Self::Sparc64
+            | Self::PowerPc64
+            | Self::PowerPc64El => 8,
         }
     }
 }
@@ -253,7 +266,8 @@ pub struct Image<'a> {
     pub extents: Vec<Range<u64>>,
     /// The value 32-bit x86 position-independent PLT stubs address the GOT
     /// through (`jmp [ebx + disp]`), when the binary has one; on MIPS, the
-    /// address `_gp` stands for, which GOT loads are offsets from.
+    /// address `_gp` stands for, which GOT loads are offsets from; on 64-bit
+    /// PowerPC, the TOC pointer `r2` holds (`.TOC.`).
     pub got: Option<u64>,
 }
 

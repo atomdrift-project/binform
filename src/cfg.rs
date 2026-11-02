@@ -169,18 +169,18 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
         }
         let explored = work.explore(entry);
         for target in explored.calls {
-            if work.add_entry(target, Found::CALL, limits.functions) {
-                queue.push(target);
+            if let Some(entry) = work.add_entry(target, Found::CALL, limits.functions) {
+                queue.push(entry);
             }
         }
         for main in explored.mains {
-            if work.add_entry(main, Found::MAIN, limits.functions) {
-                queue.push(main);
+            if let Some(entry) = work.add_entry(main, Found::MAIN, limits.functions) {
+                queue.push(entry);
             }
         }
         for pointer in explored.pointers {
-            if work.add_entry(pointer, Found::POINTER, limits.functions) {
-                queue.push(pointer);
+            if let Some(entry) = work.add_entry(pointer, Found::POINTER, limits.functions) {
+                queue.push(entry);
             }
         }
         runs.extend(explored.runs);
@@ -294,26 +294,32 @@ impl Work<'_> {
         Some(insn)
     }
 
-    /// Record a function start inside code, found `how`. True when it is
-    /// new.
-    fn add_entry(&mut self, addr: u64, how: Found, most: usize) -> bool {
+    /// Record a function start inside code, found `how`: the function's
+    /// own entry, when `addr` is one past the start (64-bit ELFv2's local
+    /// entry). The entry, when it is new.
+    fn add_entry(&mut self, addr: u64, how: Found, most: usize) -> Option<u64> {
+        let addr = addr
+            .checked_sub(8)
+            .and_then(|before| self.memory.code(before))
+            .map_or(addr, |before| self.decoder.global_entry(addr, before));
         if let Some(found) = self.entries.get_mut(&addr) {
             *found |= how;
-            return false;
+            return None;
         }
         if !self.memory.is_code(addr) {
-            return false;
+            return None;
         }
         if self.entries.len() >= most {
             self.truncated = true;
-            return false;
+            return None;
         }
         self.entries.insert(addr, how);
-        true
+        Some(addr)
     }
 
-    /// Linear sweep of every code segment for direct calls into code, and
-    /// direct jumps to code that starts a frame. (Code after `int3` padding
+    /// Linear sweep of every code segment for direct calls into code,
+    /// direct jumps to code that starts a frame, and code only a function
+    /// starts with (64-bit ELFv2's global entry). (Code after `int3` padding
     /// is no sign of a function: MSVC aligns jump targets inside functions
     /// with it.) Windows of bytes as random as compressed or encrypted data
     /// (a packer's payload kept in `.text`) are skipped: what decodes there
@@ -344,6 +350,9 @@ impl Work<'_> {
                 let Some(insn) = self.decode(rest, addr) else {
                     return;
                 };
+                if self.decoder.starts_function(rest) {
+                    self.add_entry(addr, Found::SWEEP, most);
+                }
                 match insn.flow {
                     Flow::Call(target) => {
                         self.add_entry(target, Found::SWEEP, most);

@@ -2,7 +2,8 @@
 
 ## The newer instruction sets
 
-32-bit Arm, MIPS, s390x, SPARC and SuperH decode control flow only. Next:
+32-bit Arm, MIPS, PowerPC, s390x, SPARC and SuperH decode control flow
+only. Next:
 
 - **Jump tables:** Arm reads `tbb`/`tbh`, `addls pc, pc, rN, lsl #2` and
   `ldrls pc, [pc, rN, lsl #2]` when the `cmp` that bounds them sits right
@@ -34,9 +35,16 @@
   neither funktion nor rizin decodes: OpenWrt 24.10's `busybox` and
   `libsqlite3` for `mips_24kc` come out as a few dozen functions with
   thousands of unresolved jumps.
-- **Not supported at all:** AIX (XCOFF, and PowerPC, which funktion does
-  not decode on any format); PowerPC ELF (SQLitePCLRaw has a
-  `linux-ppc64le` build).
+- **PowerPC** (ELF: 32-bit big-endian, 64-bit ELFv1 and ELFv2) decodes
+  branches, `blr`/`bctr` and their linking forms, `.opd` descriptors,
+  ELFv2 global entries, addresses built with `lis; addi` (as pointers, in
+  32-bit code), and GCC's TOC-relative tables (`bot-ppc-static`,
+  `bot-ppc64-elfv1`, `ppc64le-static`; `jq` 1.8.1 covers 92% 32-bit and
+  91% `ppc64el`). Left: PLT and glink stubs as imports (ELFv1's `ld r12,
+  n(r2); mtctr r12; bctr` reads as unresolved), 32-bit PIC tables (169
+  unresolved in `jq`), Go's ppc64 code (`ppc64/bad-154c...` covers 76%),
+  32-bit little-endian PowerPC, and Power10 prefixed instructions.
+- **Not supported at all:** AIX (XCOFF).
 
 - **From the exotic-binaries survey** (`C:\data\exotic_binaries`, all
   hostile: parse only):
