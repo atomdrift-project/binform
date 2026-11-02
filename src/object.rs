@@ -611,14 +611,17 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &Pe<'_>) -> Result<Image<'a>, Error> {
         0x014c => Arch::X86,
         0x8664 => Arch::X86_64,
         0xaa64 => Arch::Arm64,
-        // ARMNT: Windows on 32-bit Arm runs Thumb-2 only.
-        0x01c4 => Arch::Arm,
+        // Windows CE on Arm, with Thumb (`THUMB`) or without; ARMNT,
+        // Windows on 32-bit Arm, which runs Thumb-2 only.
+        0x01c0 | 0x01c2 | 0x01c4 => Arch::Arm,
         _ => return Err(Error::Arch(format!("PE machine {machine:#06x}"))),
     };
-    // Code addresses carry Thumb's bit 0, as `.pdata` writes them.
-    let code = |addr: u64| if arch == Arch::Arm { addr | 1 } else { addr };
+    // ARMNT code addresses carry Thumb's bit 0, as `.pdata` writes them;
+    // Windows CE's set it for Thumb code only.
+    let code = |addr: u64| if machine == 0x01c4 { addr | 1 } else { addr };
     let base = pe.image_base;
     let at = |rva: u32| base.wrapping_add(u64::from(rva));
+    let resources = pe.resources();
     let segments: Vec<Segment<'a>> = pe
         .sections
         .iter()
@@ -636,7 +639,10 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &Pe<'_>) -> Result<Image<'a>, Error> {
                     size,
                 )),
                 executable: section.characteristics & (IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE)
-                    != 0,
+                    != 0
+                    && !resources.is_some_and(|rva| {
+                        rva.wrapping_sub(section.virtual_address) < section.virtual_size.max(1)
+                    }),
             }
         })
         .collect();
@@ -667,11 +673,17 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &Pe<'_>) -> Result<Image<'a>, Error> {
                 .into_iter()
                 .map(|begin| seed(at(begin), Origin::Unwind)),
         ),
-        Arch::Arm => seeds.extend(
+        Arch::Arm if machine == 0x01c4 => seeds.extend(
             pe.arm_functions()
                 .into_iter()
                 .map(|begin| seed(at(begin), Origin::Unwind)),
         ),
+        Arch::Arm => {
+            for (begin, end) in pe.wince_functions() {
+                seeds.push(seed(begin, Origin::Unwind));
+                extents.push(begin..end);
+            }
+        }
         Arch::X86_64 => {
             for (begin, end) in pe.x64_functions() {
                 seeds.push(seed(at(begin), Origin::Unwind));

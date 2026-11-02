@@ -11,6 +11,7 @@ const MOST: u64 = 1 << 20;
 
 const DIRECTORY_EXPORT: usize = 0;
 const DIRECTORY_IMPORT: usize = 1;
+const DIRECTORY_RESOURCE: usize = 2;
 const DIRECTORY_EXCEPTION: usize = 3;
 const DIRECTORY_TLS: usize = 9;
 
@@ -148,6 +149,12 @@ impl Pe<'_> {
             .map(|section| {
                 u64::from(section.pointer_to_raw_data) + (rva - u64::from(section.virtual_address))
             })
+    }
+
+    /// The RVA of the resource directory, which old linkers put in a
+    /// section they mark executable.
+    pub(super) fn resources(&self) -> Option<u32> {
+        self.directory(DIRECTORY_RESOURCE).map(|(rva, _)| rva)
     }
 
     fn directory(&self, index: usize) -> Option<(u32, u32)> {
@@ -355,6 +362,24 @@ impl Pe<'_> {
             .map_while(|at| Some((r.u32(at)?, r.u32(at + 4)?)))
             .filter(|&(_, unwind)| !self.arm64_fragment(unwind))
             .map(|(begin, _)| begin)
+            .collect()
+    }
+
+    /// Windows CE's Arm `.pdata`, as (begin, end) addresses, begin odd for
+    /// Thumb. An entry holds the function's address (not an RVA) and a word
+    /// that packs the prologue's length (8 bits), the function's in
+    /// instructions (22 bits), a flag set for 32-bit (Arm) code and one for
+    /// an exception handler.
+    pub(super) fn wince_functions(&self) -> Vec<(u64, u64)> {
+        let r = &self.r;
+        self.runtime_functions(8)
+            .map_while(|at| Some((r.u32(at)?, r.u32(at + 4)?)))
+            .map(|(begin, packed)| {
+                let arm = packed >> 30 & 1 != 0;
+                let size = u64::from(packed >> 8 & 0x3f_ffff) * if arm { 4 } else { 2 };
+                let begin = u64::from(begin);
+                (begin | u64::from(!arm), begin + size)
+            })
             .collect()
     }
 

@@ -49,9 +49,14 @@
     as they should; unpacking them is out of scope.
   - MIPS R6 (`jq` 1.8.1 `mips32r6`/`mips64r6`) covers 37-50%: the R6
     compact branches and relocated encodings are not decoded.
-  - PE for Windows CE on Arm and Thumb (machines 0x1c0, 0x1c2) is not
-    read.
-  - Some small ARMNT DLLs come out with no functions.
+  - Windows CE on Arm (`bot-wince-arm`, `bot-wince-thumb`) is read:
+    `.pdata` seeds and extents, literal-loaded import stubs, ARMv4
+    `mov lr, pc` calls. Thumb functions in such files (a clear 32-bit flag
+    in `.pdata`) are untested: no sample has any. One sample
+    (`pe-arm/bad-47897`) embeds x86 code in `.text` that `.pdata` points
+    into.
+  - The small ARMNT DLLs with no functions have no code: resource-only
+    (MUI) DLLs, API-set forwarders, IL-only and MDIL assemblies.
   - Packed MIPS bots (no section headers, UPX-style stubs) cover under
     35%; unpacking is out of scope.
 

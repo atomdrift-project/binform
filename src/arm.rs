@@ -26,6 +26,11 @@ pub(crate) struct State {
     it: u8,
     /// The address in `ip` (r12), from the arithmetic a PLT stub does.
     ip: Option<u64>,
+    /// The slot whose pointer Arm code loaded into `ip` (`ldr ip, [ip]`).
+    ip_slot: Option<u64>,
+    /// Whether the last Arm instruction was `mov lr, pc`, which makes the
+    /// jump after it a call (ARMv4 has no `blx`).
+    linked: bool,
     /// What Thumb code left in each register, as far as calls through
     /// import slots need: MSVC loads a slot's address from a literal pool,
     /// the pointer from the slot, and calls it (`ldr r4, [pc, #n]; ldr r4,
@@ -159,6 +164,7 @@ fn a32(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
     let load = word & 0x0010_0000 != 0;
     let branch = || wrap(pc.wrapping_add_signed(signed(word, 24) * 4));
     let rotated = || (word & 0xff).rotate_right(((word >> 8) & 0xf) * 2);
+    let linked = std::mem::replace(&mut state.linked, word & 0x0fff_ffff == 0x01a0_e00f);
     let flow = if cond == 0xf {
         // BLX (immediate): to Thumb, at a halfword the H bit picks.
         if (word >> 25) & 7 == 5 {
@@ -178,9 +184,10 @@ fn a32(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
         }
     } else if word & 0x0fff_fff0 == 0x012f_ff10 {
         // BX
-        match word & 0xf {
-            LR => Flow::Return,
-            rm => Flow::JumpRegister(rm),
+        match (word & 0xf, state.ip_slot) {
+            (LR, _) => Flow::Return,
+            (12, Some(slot)) => Flow::JumpSlot(slot),
+            (rm, _) => Flow::JumpRegister(rm),
         }
     } else if word & 0x0fff_fff0 == 0x012f_ff30 {
         // BLX (register)
@@ -256,9 +263,22 @@ fn a32(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
             _ => Flow::JumpIndirect,
         }
     } else {
-        // The arithmetic a PLT stub finds its slot with.
+        // The arithmetic a PLT stub finds its slot with, or the literal
+        // a Windows CE import stub loads it from (`ldr ip, [pc, #n]; ldr pc,
+        // [ip]`).
         if rd == 12 {
-            state.ip = if word & 0x0fff_f000 == 0x028f_c000 {
+            state.ip_slot = (word & 0x0fff_ffff == 0x059c_c000)
+                .then_some(state.ip)
+                .flatten();
+            state.ip = if word & 0x0f7f_f000 == 0x051f_c000 {
+                let offset = u64::from(word & 0xfff);
+                let at = if word & 0x0080_0000 != 0 {
+                    pc.wrapping_add(offset)
+                } else {
+                    pc.wrapping_sub(offset)
+                };
+                literal(bytes, addr, wrap(at)).map(u64::from)
+            } else if word & 0x0fff_f000 == 0x028f_c000 {
                 Some(wrap(pc.wrapping_add(u64::from(rotated()))))
             } else if word & 0x0fff_f000 == 0x028c_c000 {
                 state
@@ -270,6 +290,15 @@ fn a32(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
         }
         Flow::Next
     };
+    // `mov lr, pc; mov pc, r4`, or `ldr pc, [...]`: a call.
+    let flow = match flow {
+        Flow::JumpRegister(_) | Flow::JumpIndirect if linked => Flow::CallIndirect,
+        Flow::JumpSlot(slot) if linked => Flow::CallSlot(slot),
+        flow => flow,
+    };
+    if flow != Flow::Next {
+        state.ip_slot = None;
+    }
     let mut decoded = insn(4, flow, conditional);
     // NOP, `mov r0, r0`, and zeros (`andeq r0, r0, r0`), which Go places
     // after calls that never return.
@@ -737,6 +766,19 @@ mod tests {
         let insns = a(&[0xe28f_c600, 0xe28c_ca01, 0xe5bc_f010], 0x1_0000);
         // ip = 0x10008 + 0 (0x600 rotates 0 by 12: 0); then + 0x1000.
         assert_eq!(insns[2].flow, Flow::JumpSlot(0x1_1018));
+        // Windows CE: ldr ip, [pc, #0]; ldr pc, [ip]; the literal 0x2_0040.
+        let insns = a(&[0xe59f_c000, 0xe59c_f000, 0x0002_0040], 0x1_0000);
+        assert_eq!(insns[1].flow, Flow::JumpSlot(0x2_0040));
+        // With interworking: ldr ip, [pc, #4]; ldr ip, [ip]; bx ip.
+        let insns = a(
+            &[0xe59f_c004, 0xe59c_c000, 0xe12f_ff1c, 0x0002_0044],
+            0x1_0000,
+        );
+        assert_eq!(insns[2].flow, Flow::JumpSlot(0x2_0044));
+        // ARMv4 calls: mov lr, pc; mov pc, r4. Then mov pc, r4 alone.
+        let insns = a(&[0xe1a0_e00f, 0xe1a0_f004, 0xe1a0_f004], 0x1_0000);
+        assert_eq!(insns[1].flow, Flow::CallIndirect);
+        assert_eq!(insns[2].flow, Flow::JumpRegister(4));
     }
 
     #[test]

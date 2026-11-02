@@ -848,6 +848,62 @@ fn s390x_encrypted_payload() {
     });
 }
 
+/// The import stubs a Windows CE file calls through.
+fn thunks(outcome: &Outcome<'_>) -> usize {
+    outcome
+        .recovery
+        .functions
+        .iter()
+        .filter(|f| f.thunk.is_some())
+        .count()
+}
+
+/// Windows CE on Arm: functions from its `.pdata` of addresses and
+/// lengths, import stubs that load the slot from a literal, ARMv4 calls
+/// through registers (`mov lr, pc; mov pc, rN`), and a `.rsrc` marked
+/// executable that is not code.
+#[test]
+fn wince_arm() {
+    check("bot-wince-arm", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::Arm);
+        assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
+        assert!(outcome.found(Found::UNWIND) > 80);
+        assert!(
+            thunks(outcome) > 40,
+            "only {} import stubs",
+            thunks(outcome)
+        );
+        finds_rizin_except(
+            outcome,
+            &[
+                (0x1_b7d4, "in .rsrc"),
+                (0x1_e92c, "in .rsrc"),
+                (0x2_5960, "in .rsrc"),
+            ],
+        );
+        assert_eq!(outcome.recovery.invalid, 0);
+        assert!(outcome.recovery.unresolved <= 10);
+    });
+}
+
+/// Windows CE's `THUMB` machine, with Arm code throughout and interworking
+/// import stubs (`ldr ip, [ip]; bx ip`).
+#[test]
+fn wince_thumb() {
+    check("bot-wince-thumb", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::Arm);
+        assert!(coverage(outcome) >= 70, "covers {}%", coverage(outcome));
+        assert!(
+            thunks(outcome) >= 25,
+            "only {} import stubs",
+            thunks(outcome)
+        );
+        finds_rizin_except(outcome, &[]);
+        assert_eq!(outcome.recovery.invalid, 0);
+        assert_eq!(outcome.recovery.unresolved, 0);
+    });
+}
+
 /// MSVC's Windows on 32-bit Arm: Thumb-2 entries from `.pdata`, and calls
 /// to imports through slots loaded from literal pools.
 #[test]
