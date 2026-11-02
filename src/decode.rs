@@ -171,7 +171,7 @@ pub(crate) enum Decoder {
         wide: bool,
         state: crate::sparc::State,
     },
-    SuperH,
+    SuperH(crate::superh::State),
 }
 
 impl Decoder {
@@ -209,7 +209,7 @@ impl Decoder {
                 wide: true,
                 state: crate::sparc::State::default(),
             },
-            Arch::SuperH => Self::SuperH,
+            Arch::SuperH => Self::SuperH(crate::superh::State::default()),
         }
     }
 
@@ -222,6 +222,7 @@ impl Decoder {
             Self::Mips { state, .. } => *state = crate::mips::State::default(),
             Self::S390x(state) => *state = crate::s390x::State::default(),
             Self::Sparc { state, .. } => *state = crate::sparc::State::default(),
+            Self::SuperH(state) => *state = crate::superh::State::default(),
             _ => {}
         }
     }
@@ -240,7 +241,7 @@ impl Decoder {
             } => crate::mips::decode(state, got, (*big, *wide), bytes, addr),
             Self::S390x(state) => crate::s390x::decode(state, bytes, addr),
             Self::Sparc { wide, state } => crate::sparc::decode(state, *wide, bytes, addr),
-            Self::SuperH => crate::superh::decode(bytes, addr),
+            Self::SuperH(state) => crate::superh::decode(state, bytes, addr),
         }
     }
 
@@ -257,7 +258,7 @@ impl Decoder {
             | Self::Arm { .. }
             | Self::Mips { wide: false, .. }
             | Self::Sparc { wide: false, .. }
-            | Self::SuperH => 4,
+            | Self::SuperH(_) => 4,
             Self::X86 { .. }
             | Self::Arm64(_)
             | Self::Mips { .. }
@@ -271,7 +272,7 @@ impl Decoder {
     pub(crate) fn alignment(&self) -> u64 {
         match self {
             Self::X86 { .. } => 1,
-            Self::S390x(_) | Self::SuperH | Self::Arm { thumb: true, .. } => 2,
+            Self::S390x(_) | Self::SuperH(_) | Self::Arm { thumb: true, .. } => 2,
             Self::Arm64(_) | Self::Arm { .. } | Self::Mips { .. } | Self::Sparc { .. } => 4,
         }
     }
@@ -317,6 +318,14 @@ impl Decoder {
         }
     }
 
+    /// Whether a fixed address an instruction loads into a register is, when
+    /// it points at code, a function whose address the program takes: true
+    /// of SuperH's literal-pool loads, which hold data, callees and
+    /// callbacks (other sets also note addresses inside the function).
+    pub(crate) const fn notes_pointers(&self) -> bool {
+        matches!(self, Self::SuperH(_))
+    }
+
     /// Whether transfers have delay slots, whose note a call's or jump's
     /// is: it applies before the target.
     pub(crate) const fn delay_slots(&self) -> bool {
@@ -342,6 +351,7 @@ impl Decoder {
             Self::X86 { bitness, .. } => crate::x86::starts_frame(*bitness, bytes),
             Self::Arm64(_) => crate::arm64::starts_frame(bytes),
             Self::Arm { thumb, .. } => crate::arm::starts_frame(*thumb, bytes),
+            Self::SuperH(_) => crate::superh::starts_frame(bytes),
             _ => false,
         }
     }

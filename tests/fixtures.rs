@@ -797,6 +797,30 @@ fn mips_uclibc_static() {
     });
 }
 
+/// A static uClibc bot for SuperH: calls through literal pools, `.init`
+/// and `.fini` calling with `braf` and `lds r0, pr`, and the bot's routines
+/// reached only through code addresses in literal pools.
+#[test]
+fn superh_uclibc_static() {
+    check("bot-sh-uclibc-static", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::SuperH);
+        assert!(coverage(outcome) >= 75, "covers {}%", coverage(outcome));
+        let pointers = outcome.found(Found::POINTER);
+        assert!(
+            pointers > 20,
+            "only {pointers} functions from literal pools"
+        );
+        finds_rizin_except(
+            outcome,
+            &[(0x40_b288, "inside the string \"/dev/watchdog\"")],
+        );
+        // `.fini` calls with `braf` and returns past the literal after it.
+        let fini = outcome.entries().get(&0x40_b1c0).map(|f| f.size);
+        assert!(matches!(fini, Some(1..64)), ".fini: {fini:?} bytes");
+        assert!(outcome.recovery.invalid <= 1);
+    });
+}
+
 /// MSVC's Windows on 32-bit Arm: Thumb-2 entries from `.pdata`, and calls
 /// to imports through slots loaded from literal pools.
 #[test]

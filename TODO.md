@@ -40,7 +40,9 @@
 
 - **From the exotic-binaries survey** (`C:\data\exotic_binaries`, all
   hostile: parse only):
-  - SuperH static bots cover 18-48%.
+  - SuperH static bots now cover 70-88% (`bot-sh-uclibc-static`: 77%).
+    What remains: code reached only through tables and pointers kept
+    outside literal pools.
   - s390x static-pie (`s390x/bad-00b6e99b...`, four copies) covers 58%
     with 1070 invalid and 2045 unresolved.
   - MIPS R6 (`jq` 1.8.1 `mips32r6`/`mips64r6`) covers 37-50%: the R6

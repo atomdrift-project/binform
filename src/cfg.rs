@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::decode::{Decoder, Flow, Insn, Memory};
+use crate::decode::{Decoder, Flow, Insn, Memory, Note};
 use crate::table::Tracker;
 use crate::{Found, Function, Image, Limits, Origin, Recovery, Ref, RefKind};
 
@@ -178,6 +178,11 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
                 queue.push(main);
             }
         }
+        for pointer in explored.pointers {
+            if work.add_entry(pointer, Found::POINTER, limits.functions) {
+                queue.push(pointer);
+            }
+        }
         runs.extend(explored.runs);
         invalid = invalid.saturating_add(explored.invalid);
         unresolved = unresolved.saturating_add(explored.unresolved);
@@ -254,6 +259,8 @@ struct Explored {
     calls: Vec<u64>,
     /// What it passes a C runtime start routine as `main`.
     mains: Vec<u64>,
+    /// Code addresses it loads: functions whose address is taken.
+    pointers: Vec<u64>,
     /// Address ranges of its instructions.
     runs: Vec<(u64, u64)>,
     /// Instructions on its paths that do not decode.
@@ -443,6 +450,7 @@ impl Work<'_> {
         let mut refs = Vec::new();
         let mut calls = Vec::new();
         let mut mains = Vec::new();
+        let mut pointers = Vec::new();
         let mut ends = HashSet::new(); // calls that never return
         let mut cases: HashMap<u64, u32> = HashMap::new();
         let (mut invalid, mut unresolved) = (0_u64, 0_u64);
@@ -501,6 +509,14 @@ impl Work<'_> {
                                 pending.push((to, tracker.clone()));
                             }
                         };
+                    if let Note::Address { addr: to, .. } = insn.note
+                        && self.decoder.notes_pointers()
+                        && to & 1 == 0
+                        && to != entry
+                        && self.memory.is_code(to)
+                    {
+                        pointers.push(to);
+                    }
                     // Branches and calls only read registers; what a call
                     // changes, `call` forgets below.
                     // A compare-and-branch bounds a case value too. A delay
@@ -667,6 +683,7 @@ impl Work<'_> {
             },
             calls,
             mains,
+            pointers,
             runs: runs(&insns),
             invalid,
             unresolved,
