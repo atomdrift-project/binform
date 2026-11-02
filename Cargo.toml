@@ -20,11 +20,10 @@ members = [".", "tools"]
 [features]
 default = ["object"]
 # Build an `Image` from ELF, PE and Mach-O bytes.
-object = ["dep:goblin", "dep:gimli"]
+object = ["dep:gimli"]
 
 [dependencies]
 iced-x86 = { version = "1.22", default-features = false, features = ["decoder", "std", "instr_info"] }
-goblin = { version = "0.10", optional = true, default-features = false, features = ["std", "pe32", "pe64", "elf32", "elf64", "endian_fd", "mach32", "mach64"] }
 gimli = { version = "0.32", optional = true, default-features = false, features = ["read", "std"] }
 
 [dev-dependencies]

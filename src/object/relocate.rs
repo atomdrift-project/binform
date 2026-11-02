@@ -12,7 +12,8 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use goblin::elf::{Elf, section_header};
+use super::elf::{self, Elf};
+use super::macho;
 
 use crate::{Arch, Import, Segment};
 
@@ -28,31 +29,29 @@ pub(super) struct Layout<'a> {
     pub(super) imports: Vec<Import>,
 }
 
-pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf<'_>, arch: Arch) -> Layout<'a> {
-    let headers = &elf.section_headers;
-    let alloc = |sh: &section_header::SectionHeader| {
-        sh.sh_flags & u64::from(section_header::SHF_ALLOC) != 0
-    };
+pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf, arch: Arch) -> Layout<'a> {
+    let headers = &elf.sections;
+    let alloc = |sh: &elf::Section| sh.flags & elf::SHF_ALLOC != 0;
     let mut addrs = vec![0_u64; headers.len()];
     let mut end = BASE.saturating_add(bytes.len() as u64);
     for (addr, sh) in addrs.iter_mut().zip(headers) {
         if !alloc(sh) {
             continue;
         }
-        if sh.sh_type == section_header::SHT_NOBITS {
+        if sh.kind == elf::SHT_NOBITS {
             // No file bytes to sit over: after everything else.
-            let align = sh.sh_addralign.clamp(1, 1 << 12);
+            let align = sh.addralign.clamp(1, 1 << 12);
             *addr = end.div_ceil(align).saturating_mul(align);
-            end = addr.saturating_add(sh.sh_size);
+            end = addr.saturating_add(sh.size);
         } else {
-            *addr = BASE.saturating_add(sh.sh_offset);
+            *addr = BASE.saturating_add(sh.offset);
         }
     }
     let mut data: Vec<Option<Vec<u8>>> = headers
         .iter()
         .map(|sh| {
-            (alloc(sh) && sh.sh_type != section_header::SHT_NOBITS)
-                .then(|| super::file_range(bytes, sh.sh_offset, sh.sh_size).to_vec())
+            (alloc(sh) && sh.kind != elf::SHT_NOBITS)
+                .then(|| super::file_range(bytes, sh.offset, sh.size).to_vec())
         })
         .collect();
 
@@ -61,10 +60,10 @@ pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf<'_>, arch: Arch) -> Layout<'
     let mut imports = Vec::new();
     let first_slot = end.div_ceil(16).saturating_mul(16);
     let mut symbol = |index: usize| -> Option<(u64, bool)> {
-        let symbol = elf.syms.get(index)?;
-        match symbol.st_shndx {
-            0 => {
-                let name = elf.strtab.get_at(symbol.st_name).unwrap_or_default();
+        let symbol = elf.symbols.get(index)?;
+        match symbol.shndx {
+            elf::SHN_UNDEF => {
+                let name = &symbol.name;
                 if name.is_empty() {
                     return None;
                 }
@@ -72,28 +71,21 @@ pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf<'_>, arch: Arch) -> Layout<'
                 let slot = *slots.entry(index).or_insert_with(|| {
                     imports.push(Import {
                         slot: next,
-                        name: name.to_owned(),
+                        name: name.clone(),
                     });
                     next
                 });
                 Some((slot, true))
             }
-            // SHN_ABS
-            0xfff1 => Some((symbol.st_value, false)),
+            elf::SHN_ABS => Some((symbol.value, false)),
             section => {
-                let base = *addrs.get(section).filter(|&&addr| addr != 0)?;
-                Some((base.wrapping_add(symbol.st_value), false))
+                let base = *addrs.get(usize::from(section)).filter(|&&addr| addr != 0)?;
+                Some((base.wrapping_add(symbol.value), false))
             }
         }
     };
 
-    for (reloc_section, relocs) in &elf.shdr_relocs {
-        let Some(target) = headers
-            .get(*reloc_section)
-            .and_then(|sh| usize::try_from(sh.sh_info).ok())
-        else {
-            continue;
-        };
+    for &(target, ref relocs) in &elf.relocations {
         let Some(place_base) = addrs.get(target).copied() else {
             continue;
         };
@@ -101,17 +93,17 @@ pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf<'_>, arch: Arch) -> Layout<'
             continue;
         };
         for reloc in relocs.iter() {
-            let Some((value, undefined)) = (match reloc.r_sym {
+            let Some((value, undefined)) = (match reloc.symbol {
                 0 => Some((0, false)),
                 index => symbol(index),
             }) else {
                 continue;
             };
-            let Ok(offset) = usize::try_from(reloc.r_offset) else {
+            let Ok(offset) = usize::try_from(reloc.offset) else {
                 continue;
             };
-            let place = place_base.wrapping_add(reloc.r_offset);
-            let addend = reloc.r_addend;
+            let place = place_base.wrapping_add(reloc.offset);
+            let addend = reloc.addend;
             let fix = Fix {
                 value,
                 addend,
@@ -119,9 +111,9 @@ pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf<'_>, arch: Arch) -> Layout<'
                 undefined,
             };
             match arch {
-                Arch::X86_64 => x86_64(section, offset, reloc.r_type, fix),
-                Arch::X86 => i386(section, offset, reloc.r_type, fix),
-                Arch::Arm64 => aarch64(section, offset, reloc.r_type, fix),
+                Arch::X86_64 => x86_64(section, offset, reloc.kind, fix),
+                Arch::X86 => i386(section, offset, reloc.kind, fix),
+                Arch::Arm64 => aarch64(section, offset, reloc.kind, fix),
             };
         }
     }
@@ -134,7 +126,7 @@ pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf<'_>, arch: Arch) -> Layout<'
             Some(Segment {
                 addr,
                 bytes: Cow::Owned(data.take()?),
-                executable: sh.sh_flags & u64::from(section_header::SHF_EXECINSTR) != 0,
+                executable: sh.flags & elf::SHF_EXECINSTR != 0,
             })
         })
         .collect();
@@ -151,11 +143,11 @@ pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf<'_>, arch: Arch) -> Layout<'
 /// where functions are, and an unlinked one reads as a call to itself.
 pub(super) fn macho(
     bytes: &[u8],
-    sections: &[super::MachSection],
-    symbols: &[(&str, goblin::mach::symbols::Nlist)],
+    sections: &[macho::Section],
+    symbols: &[macho::Symbol],
     arch: Arch,
 ) -> (Vec<Option<Vec<u8>>>, Vec<Import>) {
-    use goblin::mach::symbols::{N_SECT, N_TYPE, N_UNDF};
+    use macho::{N_SECT, N_TYPE, N_UNDF};
     /// `ARM64_RELOC_ADDEND`: the addend of the relocation after it.
     const ADDEND: u32 = 10;
     /// `ARM64_RELOC_BRANCH26`, `X86_64_RELOC_BRANCH`.
@@ -202,17 +194,17 @@ pub(super) fn macho(
                 continue;
             }
             let index = symbol as usize;
-            let Some((name, nlist)) = symbols.get(index) else {
+            let Some(nlist) = symbols.get(index) else {
                 continue;
             };
             let (value, undefined) = match nlist.n_type & N_TYPE {
                 N_SECT => (nlist.n_value, false),
-                N_UNDF if !name.is_empty() => {
+                N_UNDF if !nlist.name.is_empty() => {
                     let next = first_slot.saturating_add(8 * slots.len() as u64);
                     let slot = *slots.entry(index).or_insert_with(|| {
                         imports.push(Import {
                             slot: next,
-                            name: (*name).to_owned(),
+                            name: nlist.name.clone(),
                         });
                         next
                     });

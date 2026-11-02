@@ -9,15 +9,19 @@
 use std::borrow::Cow;
 use std::fmt;
 
-use goblin::elf::{Elf, program_header, section_header, sym};
-use goblin::mach::{self, MachO};
-use goblin::pe::PE;
-
 use crate::decode::Memory;
 use crate::{Arch, Handler, Image, Import, Origin, Seed, Segment};
 
+use elf::Elf;
+use macho::MachO;
+use pe::Pe;
+
 mod eh;
+mod elf;
 mod gopclntab;
+mod macho;
+mod pe;
+mod read;
 mod relocate;
 
 /// Why bytes could not become an [`Image`].
@@ -44,20 +48,11 @@ impl std::error::Error for Error {}
 /// The [`Image`] of an ELF, PE or Mach-O file. A universal Mach-O yields its
 /// first slice of a supported architecture.
 pub fn image(bytes: &[u8]) -> Result<Image<'_>, Error> {
-    let format = |e: goblin::error::Error| Error::Format(e.to_string());
     match bytes.get(..4) {
-        Some(b"\x7fELF") => elf_image(bytes, &Elf::parse(bytes).map_err(format)?),
-        Some([b'M', b'Z', ..]) => {
-            let mut options = goblin::pe::options::ParseOptions::default();
-            options.parse_attribute_certificates = false;
-            options.parse_resources = false;
-            pe_image(
-                bytes,
-                &PE::parse_with_opts(bytes, &options).map_err(format)?,
-            )
-        }
-        Some(&[0xca, 0xfe, 0xba, 0xbe]) => fat_image(bytes),
-        Some(_) => macho_image(bytes, &MachO::parse(bytes, 0).map_err(format)?),
+        Some(b"\x7fELF") => elf_image(bytes, &elf::parse(bytes).map_err(Error::Format)?),
+        Some([b'M', b'Z', ..]) => pe_image(bytes, &pe::parse(bytes).map_err(Error::Format)?),
+        Some(&[0xca, 0xfe, 0xba, 0xbe | 0xbf]) => fat_image(bytes),
+        Some(_) => macho_image(bytes, &macho::parse(bytes).map_err(Error::Format)?),
         None => Err(Error::Format("too short".into())),
     }
 }
@@ -115,18 +110,30 @@ fn seed(addr: u64, origin: Origin) -> Seed {
 // ELF
 // ---------------------------------------------------------------------------
 
-fn elf_image<'a>(bytes: &'a [u8], elf: &Elf<'_>) -> Result<Image<'a>, Error> {
-    use goblin::elf::header::{EM_386, EM_AARCH64, EM_X86_64, ET_REL};
-    let arch = match elf.header.e_machine {
+const EM_386: u16 = 3;
+const EM_X86_64: u16 = 62;
+const EM_AARCH64: u16 = 183;
+
+const DT_INIT: u64 = 12;
+const DT_FINI: u64 = 13;
+const DT_INIT_ARRAY: u64 = 25;
+const DT_FINI_ARRAY: u64 = 26;
+const DT_INIT_ARRAYSZ: u64 = 27;
+const DT_FINI_ARRAYSZ: u64 = 28;
+const DT_PREINIT_ARRAY: u64 = 32;
+const DT_PREINIT_ARRAYSZ: u64 = 33;
+
+fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Image<'a>, Error> {
+    let arch = match elf.machine {
         EM_386 => Arch::X86,
         EM_X86_64 => Arch::X86_64,
         EM_AARCH64 => Arch::Arm64,
         machine => return Err(Error::Arch(format!("ELF machine {machine}"))),
     };
-    if !elf.little_endian {
+    if elf.big {
         return Err(Error::Arch("big-endian ELF".into()));
     }
-    let object = elf.header.e_type == ET_REL;
+    let object = elf.kind == elf::ET_REL;
 
     // An object's sections are placed and linked as a loader would see
     // them; an executable's sit at their addresses. Program headers stand in
@@ -136,19 +143,16 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf<'_>) -> Result<Image<'a>, Error> {
         (layout.addrs, layout.segments, layout.imports)
     } else {
         let segments = elf
-            .section_headers
+            .sections
             .iter()
-            .filter(|sh| {
-                sh.sh_flags & u64::from(section_header::SHF_ALLOC) != 0
-                    && sh.sh_type != section_header::SHT_NOBITS
-            })
+            .filter(|sh| sh.flags & elf::SHF_ALLOC != 0 && sh.kind != elf::SHT_NOBITS)
             .map(|sh| Segment {
-                addr: sh.sh_addr,
-                bytes: Cow::Borrowed(file_range(bytes, sh.sh_offset, sh.sh_size)),
-                executable: sh.sh_flags & u64::from(section_header::SHF_EXECINSTR) != 0,
+                addr: sh.addr,
+                bytes: Cow::Borrowed(file_range(bytes, sh.offset, sh.size)),
+                executable: sh.flags & elf::SHF_EXECINSTR != 0,
             })
             .collect();
-        let addrs = elf.section_headers.iter().map(|sh| sh.sh_addr).collect();
+        let addrs = elf.sections.iter().map(|sh| sh.addr).collect();
         (addrs, segments, Vec::new())
     };
     if !segments
@@ -156,13 +160,13 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf<'_>) -> Result<Image<'a>, Error> {
         .any(|segment: &Segment<'_>| segment.executable && !segment.bytes.is_empty())
     {
         segments = elf
-            .program_headers
+            .programs
             .iter()
-            .filter(|ph| ph.p_type == program_header::PT_LOAD)
+            .filter(|ph| ph.kind == elf::PT_LOAD)
             .map(|ph| Segment {
-                addr: ph.p_vaddr,
-                bytes: Cow::Borrowed(file_range(bytes, ph.p_offset, ph.p_filesz)),
-                executable: ph.p_flags & program_header::PF_X != 0,
+                addr: ph.vaddr,
+                bytes: Cow::Borrowed(file_range(bytes, ph.offset, ph.filesz)),
+                executable: ph.flags & elf::PF_X != 0,
             })
             .collect();
     }
@@ -172,28 +176,23 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf<'_>) -> Result<Image<'a>, Error> {
     if elf.entry != 0 {
         seeds.push(seed(elf.entry, Origin::Entry));
     }
-    for (symbols, names) in [(&elf.syms, &elf.strtab), (&elf.dynsyms, &elf.dynstrtab)] {
-        for symbol in symbols.iter() {
-            if symbol.st_type() != sym::STT_FUNC
-                || symbol.st_shndx == section_header::SHN_UNDEF as usize
-            {
-                continue;
-            }
-            // An object's symbol values are offsets into their sections, and
-            // the first function of each sits at offset zero.
-            let addr = if object {
-                match addrs.get(symbol.st_shndx) {
-                    Some(&base) if base != 0 => base.wrapping_add(symbol.st_value),
-                    _ => continue,
-                }
-            } else if symbol.st_value != 0 {
-                symbol.st_value
-            } else {
-                continue;
-            };
-            let name = names.get_at(symbol.st_name).unwrap_or_default();
-            seeds.push(seed(addr, Origin::Symbol(name.to_owned())));
+    for symbol in elf.symbols.iter().chain(&elf.dynamic_symbols) {
+        if symbol.kind != elf::STT_FUNC || symbol.shndx == elf::SHN_UNDEF {
+            continue;
         }
+        // An object's symbol values are offsets into their sections, and
+        // the first function of each sits at offset zero.
+        let addr = if object {
+            match addrs.get(usize::from(symbol.shndx)) {
+                Some(&base) if base != 0 => base.wrapping_add(symbol.value),
+                _ => continue,
+            }
+        } else if symbol.value != 0 {
+            symbol.value
+        } else {
+            continue;
+        };
+        seeds.push(seed(addr, Origin::Symbol(symbol.name.clone())));
     }
     let memory = Memory::new(&segments);
     let (inits, finis) = elf_initializers(elf, &sections, &memory);
@@ -209,7 +208,7 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf<'_>) -> Result<Image<'a>, Error> {
     );
     if let Some((_, sh)) = sections.find(".gopclntab") {
         let text = sections.find(".text").map(|(addr, _)| addr);
-        let table = file_range(bytes, sh.sh_offset, sh.sh_size);
+        let table = file_range(bytes, sh.offset, sh.size);
         seeds.extend(
             gopclntab::functions(table, text, true)
                 .into_iter()
@@ -218,7 +217,7 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf<'_>) -> Result<Image<'a>, Error> {
     }
     let (mut handlers, mut extents) = (Vec::new(), Vec::new());
     if let Some((addr, sh)) = sections.find(".eh_frame") {
-        (extents, handlers) = eh::eh_frame(&memory, addr, sh.sh_size, elf.is_64);
+        (extents, handlers) = eh::eh_frame(&memory, addr, sh.size, elf.is_64);
         seeds.extend(
             extents
                 .iter()
@@ -232,30 +231,22 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf<'_>) -> Result<Image<'a>, Error> {
     );
 
     // Relocations against undefined symbols fill import slots.
-    for reloc in elf
-        .pltrelocs
-        .iter()
-        .chain(elf.dynrelas.iter())
-        .chain(elf.dynrels.iter())
-    {
-        if reloc.r_sym == 0 {
+    for reloc in &elf.dynamic_relocations {
+        if reloc.symbol == 0 {
             continue;
         }
-        let Some(symbol) = elf.dynsyms.get(reloc.r_sym) else {
+        let Some(symbol) = elf.dynamic_symbols.get(reloc.symbol) else {
             continue;
         };
-        let name = elf.dynstrtab.get_at(symbol.st_name).unwrap_or_default();
-        if symbol.st_shndx == section_header::SHN_UNDEF as usize && !name.is_empty() {
+        if symbol.shndx == elf::SHN_UNDEF && !symbol.name.is_empty() {
             imports.push(Import {
-                slot: reloc.r_offset,
-                name: name.to_owned(),
+                slot: reloc.offset,
+                name: symbol.name.clone(),
             });
         }
     }
     let got = if arch == Arch::X86 {
-        elf.dynamic
-            .as_ref()
-            .and_then(|dynamic| dynamic.info.pltgot)
+        elf.dynamic_value(elf::DT_PLTGOT)
             .or_else(|| sections.find(".got.plt").map(|(addr, _)| addr))
     } else {
         None
@@ -275,18 +266,18 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf<'_>) -> Result<Image<'a>, Error> {
 
 /// An ELF file's section headers with the address each is mapped at.
 struct ElfSections<'e> {
-    elf: &'e Elf<'e>,
+    elf: &'e Elf,
     addrs: &'e [u64],
 }
 
 impl ElfSections<'_> {
     /// The address and header of the section called `name`.
-    fn find(&self, name: &str) -> Option<(u64, &section_header::SectionHeader)> {
+    fn find(&self, name: &str) -> Option<(u64, &elf::Section)> {
         self.elf
-            .section_headers
+            .sections
             .iter()
             .zip(self.addrs)
-            .find(|(sh, _)| self.elf.shdr_strtab.get_at(sh.sh_name) == Some(name))
+            .find(|(sh, _)| sh.name == name)
             .map(|(sh, &addr)| (addr, sh))
     }
 }
@@ -300,12 +291,8 @@ fn elf_stubs(arch: Arch, sections: &ElfSections<'_>) -> Vec<u64> {
         let Some((addr, sh)) = sections.find(name) else {
             return Vec::new();
         };
-        let size = if sh.sh_entsize >= 4 {
-            sh.sh_entsize
-        } else {
-            16
-        };
-        let count = (sh.sh_size.saturating_sub(skip) / size).min(1 << 16);
+        let size = if sh.entsize >= 4 { sh.entsize } else { 16 };
+        let count = (sh.size.saturating_sub(skip) / size).min(1 << 16);
         (0..count).map(|i| addr + skip + i * size).collect()
     };
     let header = if arch == Arch::Arm64 { 32 } else { 16 };
@@ -327,7 +314,7 @@ fn elf_stubs(arch: Arch, sections: &ElfSections<'_>) -> Vec<u64> {
 /// `DT_PREINIT_ARRAY`, `DT_INIT`, `DT_INIT_ARRAY`, then `DT_FINI_ARRAY` and
 /// `DT_FINI`; or the array sections of a static executable.
 fn elf_initializers(
-    elf: &Elf<'_>,
+    elf: &Elf,
     sections: &ElfSections<'_>,
     memory: &Memory<'_>,
 ) -> (Vec<u64>, Vec<u64>) {
@@ -335,10 +322,10 @@ fn elf_initializers(
     // A position-independent array holds zeros until a RELATIVE relocation
     // fills it; the relocation's addend is the address.
     let relative = |slot: u64| {
-        elf.dynrelas
+        elf.dynamic_relocations
             .iter()
-            .find(|reloc| reloc.r_offset == slot && reloc.r_sym == 0)
-            .and_then(|reloc| reloc.r_addend)
+            .find(|reloc| reloc.offset == slot && reloc.symbol == 0 && reloc.addend.is_some())
+            .and_then(|reloc| reloc.addend)
             .and_then(|addend| u64::try_from(addend).ok())
     };
     let array = |start: u64, size: u64| -> Vec<u64> {
@@ -358,37 +345,21 @@ fn elf_initializers(
     let section = |name: &str| {
         sections
             .find(name)
-            .map(|(addr, sh)| array(addr, sh.sh_size))
+            .map(|(addr, sh)| array(addr, sh.size))
             .unwrap_or_default()
     };
-    match &elf.dynamic {
-        Some(dynamic) => {
-            use goblin::elf::dynamic::{
-                DT_FINI, DT_FINI_ARRAY, DT_FINI_ARRAYSZ, DT_INIT, DT_INIT_ARRAY, DT_INIT_ARRAYSZ,
-                DT_PREINIT_ARRAY, DT_PREINIT_ARRAYSZ,
-            };
-            // The raw entries: goblin's summary turns these addresses into
-            // file offsets.
-            let value = |tag: u64| {
-                dynamic
-                    .dyns
-                    .iter()
-                    .find(|entry| entry.d_tag == tag)
-                    .map_or(0, |entry| entry.d_val)
-            };
-            let mut inits = array(value(DT_PREINIT_ARRAY), value(DT_PREINIT_ARRAYSZ));
-            inits.extend(Some(value(DT_INIT)).filter(|&init| init != 0));
-            inits.extend(array(value(DT_INIT_ARRAY), value(DT_INIT_ARRAYSZ)));
-            let mut finis = array(value(DT_FINI_ARRAY), value(DT_FINI_ARRAYSZ));
-            finis.extend(Some(value(DT_FINI)).filter(|&fini| fini != 0));
-            (inits, finis)
-        }
-        None => {
-            let mut inits = section(".preinit_array");
-            inits.extend(section(".init_array"));
-            (inits, section(".fini_array"))
-        }
+    if elf.dynamic.is_empty() {
+        let mut inits = section(".preinit_array");
+        inits.extend(section(".init_array"));
+        return (inits, section(".fini_array"));
     }
+    let value = |tag: u64| elf.dynamic_value(tag).unwrap_or(0);
+    let mut inits = array(value(DT_PREINIT_ARRAY), value(DT_PREINIT_ARRAYSZ));
+    inits.extend(Some(value(DT_INIT)).filter(|&init| init != 0));
+    inits.extend(array(value(DT_INIT_ARRAY), value(DT_INIT_ARRAYSZ)));
+    let mut finis = array(value(DT_FINI_ARRAY), value(DT_FINI_ARRAYSZ));
+    finis.extend(Some(value(DT_FINI)).filter(|&fini| fini != 0));
+    (inits, finis)
 }
 
 // ---------------------------------------------------------------------------
@@ -398,8 +369,8 @@ fn elf_initializers(
 const IMAGE_SCN_CNT_CODE: u32 = 0x0000_0020;
 const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
 
-fn pe_image<'a>(bytes: &'a [u8], pe: &PE<'_>) -> Result<Image<'a>, Error> {
-    let machine = pe.header.coff_header.machine;
+fn pe_image<'a>(bytes: &'a [u8], pe: &Pe<'_>) -> Result<Image<'a>, Error> {
+    let machine = pe.machine;
     let arch = match machine {
         0x014c => Arch::X86,
         0x8664 => Arch::X86_64,
@@ -407,6 +378,7 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &PE<'_>) -> Result<Image<'a>, Error> {
         _ => return Err(Error::Arch(format!("PE machine {machine:#06x}"))),
     };
     let base = pe.image_base;
+    let at = |rva: u32| base.wrapping_add(u64::from(rva));
     let segments: Vec<Segment<'a>> = pe
         .sections
         .iter()
@@ -417,7 +389,7 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &PE<'_>) -> Result<Image<'a>, Error> {
                 virtual_size => raw.min(virtual_size),
             };
             Segment {
-                addr: base.wrapping_add(u64::from(section.virtual_address)),
+                addr: at(section.virtual_address),
                 bytes: Cow::Borrowed(file_range(
                     bytes,
                     u64::from(section.pointer_to_raw_data),
@@ -431,58 +403,45 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &PE<'_>) -> Result<Image<'a>, Error> {
 
     let mut seeds = Vec::new();
     if pe.entry != 0 {
-        seeds.push(seed(base.wrapping_add(u64::from(pe.entry)), Origin::Entry));
+        seeds.push(seed(at(pe.entry), Origin::Entry));
     }
-    for export in &pe.exports {
-        if export.reexport.is_none() && export.rva != 0 {
-            let name = export.name.unwrap_or_default().to_owned();
-            seeds.push(seed(
-                base.wrapping_add(export.rva as u64),
-                Origin::Export(name),
-            ));
+    for (rva, name) in pe.exports() {
+        if rva != 0 {
+            seeds.push(seed(at(rva), Origin::Export(name)));
         }
     }
-    if let Some(tls) = &pe.tls_data {
-        seeds.extend(
-            (0..)
-                .zip(&tls.callbacks)
-                .map(|(i, &addr)| seed(addr, Origin::Tls(i))),
-        );
-    }
+    seeds.extend(
+        (0..)
+            .zip(pe.tls_callbacks())
+            .map(|(i, addr)| seed(addr, Origin::Tls(i))),
+    );
     seeds.extend(
         pe_gopclntab(&segments)
             .into_iter()
             .map(|(addr, name)| seed(addr, Origin::Symbol(name))),
     );
     let mut extents = Vec::new();
-    if let Some(exceptions) = &pe.exception_data {
-        if arch == Arch::Arm64 {
-            for function in exceptions.functions_arm64().flatten() {
-                if !arm64_fragment(exceptions, function, &pe.sections) {
-                    let addr = base.wrapping_add(u64::from(function.begin_address));
-                    seeds.push(seed(addr, Origin::Unwind));
-                }
-            }
-        } else {
-            for function in exceptions.functions().flatten() {
-                // A chained entry continues a function that starts elsewhere.
-                let chained = exceptions
-                    .get_unwind_info(function, &pe.sections)
-                    .is_ok_and(|info| info.chained_info.is_some());
-                if !chained {
-                    let addr = base.wrapping_add(u64::from(function.begin_address));
-                    seeds.push(seed(addr, Origin::Unwind));
-                    extents.push(addr..base.wrapping_add(u64::from(function.end_address)));
-                }
+    match arch {
+        Arch::Arm64 => seeds.extend(
+            pe.arm64_functions()
+                .into_iter()
+                .map(|begin| seed(at(begin), Origin::Unwind)),
+        ),
+        Arch::X86_64 => {
+            for (begin, end) in pe.x64_functions() {
+                seeds.push(seed(at(begin), Origin::Unwind));
+                extents.push(at(begin)..at(end));
             }
         }
+        // 32-bit x86 unwinds by frame chain, not by table.
+        Arch::X86 => {}
     }
     let imports = pe
-        .imports
-        .iter()
-        .map(|import| Import {
-            slot: base.wrapping_add(import.offset as u64),
-            name: import.name.to_string(),
+        .imports()
+        .into_iter()
+        .map(|(slot, name)| Import {
+            slot: at(slot),
+            name,
         })
         .collect();
 
@@ -497,78 +456,9 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &PE<'_>) -> Result<Image<'a>, Error> {
     })
 }
 
-/// Whether an A64 unwind entry describes a fragment of a function rather
-/// than its start: packed data that says so, or unwind codes that begin with
-/// `end_c`, which stands for the prologue a fragment does not have. MSVC
-/// splits functions it shrink-wraps into such fragments.
-fn arm64_fragment(
-    exceptions: &goblin::pe::exception::ExceptionData<'_>,
-    function: goblin::pe::exception::Arm64RuntimeFunction,
-    sections: &[goblin::pe::section_table::SectionTable],
-) -> bool {
-    use goblin::pe::exception::{ARM64_PDATA_PACKED_UNWIND_FRAGMENT, Arm64UnwindCode};
-    if function.flag() == ARM64_PDATA_PACKED_UNWIND_FRAGMENT {
-        return true;
-    }
-    let Some(Ok(info)) = exceptions.get_unwind_info_arm64(function, sections) else {
-        return false;
-    };
-    let first = info.unwind_codes(0).ok().and_then(|mut codes| codes.next());
-    matches!(first, Some(Ok(code)) if code.code == Arm64UnwindCode::EndC)
-}
-
 // ---------------------------------------------------------------------------
 // Mach-O
 // ---------------------------------------------------------------------------
-
-const CPU_TYPE_X86: u32 = 7;
-const CPU_TYPE_X86_64: u32 = 0x0100_0007;
-const CPU_TYPE_ARM64: u32 = 0x0100_000c;
-
-fn macho_arch(cputype: u32) -> Option<Arch> {
-    match cputype {
-        CPU_TYPE_X86 => Some(Arch::X86),
-        CPU_TYPE_X86_64 => Some(Arch::X86_64),
-        CPU_TYPE_ARM64 => Some(Arch::Arm64),
-        _ => None,
-    }
-}
-
-fn fat_image(bytes: &[u8]) -> Result<Image<'_>, Error> {
-    let format = |e: goblin::error::Error| Error::Format(e.to_string());
-    let fat = mach::MultiArch::new(bytes).map_err(format)?;
-    let arches = fat.arches().map_err(format)?;
-    let slice = arches
-        .iter()
-        .find(|arch| macho_arch(arch.cputype).is_some())
-        .ok_or_else(|| Error::Arch("no supported slice in universal binary".into()))?;
-    let slice = file_range(bytes, u64::from(slice.offset), u64::from(slice.size));
-    macho_image(slice, &MachO::parse(slice, 0).map_err(format)?)
-}
-
-/// One section header, read from the load commands: goblin's `Section`
-/// drops `reserved1`, a pointer or stub section's index into the indirect
-/// symbol table, and `reserved2`, a stub section's stub size.
-struct MachSection {
-    name: [u8; 16],
-    addr: u64,
-    size: u64,
-    offset: u64,
-    /// File offset and count of the section's relocations (objects only).
-    reloff: u32,
-    nreloc: u32,
-    flags: u32,
-    reserved1: u32,
-    reserved2: u32,
-    code: bool,
-}
-
-impl MachSection {
-    fn named(&self, name: &str) -> bool {
-        let len = self.name.iter().position(|&b| b == 0).unwrap_or(16);
-        self.name.get(..len) == Some(name.as_bytes())
-    }
-}
 
 const S_ZEROFILL: u32 = 0x1;
 const S_NON_LAZY_SYMBOL_POINTERS: u32 = 0x6;
@@ -576,101 +466,38 @@ const S_LAZY_SYMBOL_POINTERS: u32 = 0x7;
 const S_SYMBOL_STUBS: u32 = 0x8;
 const S_GB_ZEROFILL: u32 = 0xc;
 const S_THREAD_LOCAL_ZEROFILL: u32 = 0x12;
-const S_ATTR_CODE: u32 =
-    mach::constants::S_ATTR_PURE_INSTRUCTIONS | mach::constants::S_ATTR_SOME_INSTRUCTIONS;
-const VM_PROT_EXECUTE: u32 = 0x4;
 
-fn mach_sections(bytes: &[u8], macho: &MachO<'_>) -> Vec<MachSection> {
-    use mach::load_command::CommandVariant;
-    let u32_at = |at: usize| {
-        bytes
-            .get(at..at.checked_add(4)?)
-            .and_then(|b| b.try_into().ok())
-            .map(u32::from_le_bytes)
-    };
-    let u64_at = |at: usize| {
-        bytes
-            .get(at..at.checked_add(8)?)
-            .and_then(|b| b.try_into().ok())
-            .map(u64::from_le_bytes)
-    };
-    let mut sections = Vec::new();
-    for command in &macho.load_commands {
-        let (header, size, wide, executable, count) = match &command.command {
-            CommandVariant::Segment32(segment) => (
-                56,
-                68,
-                false,
-                segment.initprot & VM_PROT_EXECUTE != 0,
-                segment.nsects,
-            ),
-            CommandVariant::Segment64(segment) => (
-                72,
-                80,
-                true,
-                segment.initprot & VM_PROT_EXECUTE != 0,
-                segment.nsects,
-            ),
-            _ => continue,
-        };
-        for i in 0..count.min(1 << 12) as usize {
-            let at = command
-                .offset
-                .saturating_add(header)
-                .saturating_add(i.saturating_mul(size));
-            let field = |offset: usize| at.saturating_add(offset);
-            let parsed = if wide {
-                (|| {
-                    Some(MachSection {
-                        name: bytes.get(at..at.checked_add(16)?)?.try_into().ok()?,
-                        addr: u64_at(field(32))?,
-                        size: u64_at(field(40))?,
-                        offset: u64::from(u32_at(field(48))?),
-                        reloff: u32_at(field(56))?,
-                        nreloc: u32_at(field(60))?,
-                        flags: u32_at(field(64))?,
-                        reserved1: u32_at(field(68))?,
-                        reserved2: u32_at(field(72))?,
-                        code: false,
-                    })
-                })()
-            } else {
-                (|| {
-                    Some(MachSection {
-                        name: bytes.get(at..at.checked_add(16)?)?.try_into().ok()?,
-                        addr: u64::from(u32_at(field(32))?),
-                        size: u64::from(u32_at(field(36))?),
-                        offset: u64::from(u32_at(field(40))?),
-                        reloff: u32_at(field(48))?,
-                        nreloc: u32_at(field(52))?,
-                        flags: u32_at(field(56))?,
-                        reserved1: u32_at(field(60))?,
-                        reserved2: u32_at(field(64))?,
-                        code: false,
-                    })
-                })()
-            };
-            let Some(mut section) = parsed else { break };
-            section.code = executable && section.flags & S_ATTR_CODE != 0;
-            sections.push(section);
-        }
+fn macho_arch(cputype: u32) -> Option<Arch> {
+    match cputype {
+        macho::CPU_TYPE_X86 => Some(Arch::X86),
+        macho::CPU_TYPE_X86_64 => Some(Arch::X86_64),
+        macho::CPU_TYPE_ARM64 => Some(Arch::Arm64),
+        _ => None,
     }
-    sections
 }
 
-fn macho_image<'a>(bytes: &'a [u8], macho: &MachO<'_>) -> Result<Image<'a>, Error> {
-    use mach::load_command::CommandVariant;
-    let cputype = macho.header.cputype;
+fn fat_image(bytes: &[u8]) -> Result<Image<'_>, Error> {
+    let slices = macho::fat(bytes).map_err(Error::Format)?;
+    let slice = slices
+        .iter()
+        .find(|slice| macho_arch(slice.cputype).is_some())
+        .ok_or_else(|| Error::Arch("no supported slice in universal binary".into()))?;
+    let slice = file_range(bytes, slice.offset, slice.size);
+    macho_image(slice, &macho::parse(slice).map_err(Error::Format)?)
+}
+
+fn macho_image<'a>(bytes: &'a [u8], macho: &MachO) -> Result<Image<'a>, Error> {
+    let cputype = macho.cputype;
     let arch =
         macho_arch(cputype).ok_or_else(|| Error::Arch(format!("Mach-O CPU type {cputype:#x}")))?;
-    if !macho.little_endian {
+    if macho.big {
         return Err(Error::Arch("big-endian Mach-O".into()));
     }
-    let sections = mach_sections(bytes, macho);
-    let symbols: Vec<(&str, mach::symbols::Nlist)> = macho.symbols().flatten().collect();
+    let sections = &macho.sections;
+    let symbols = &macho.symbols;
     // An object's calls are linked to their symbols first.
-    let (mut linked, mut imports) = if macho.header.filetype == mach::header::MH_OBJECT {
-        relocate::macho(bytes, &sections, &symbols, arch)
+    let (mut linked, mut imports) = if macho.filetype == macho::MH_OBJECT {
+        relocate::macho(bytes, sections, symbols, arch)
     } else {
         (Vec::new(), Vec::new())
     };
@@ -679,7 +506,7 @@ fn macho_image<'a>(bytes: &'a [u8], macho: &MachO<'_>) -> Result<Image<'a>, Erro
         .enumerate()
         .filter(|(_, section)| {
             !matches!(
-                section.flags & mach::constants::SECTION_TYPE,
+                section.flags & macho::SECTION_TYPE,
                 S_ZEROFILL | S_GB_ZEROFILL | S_THREAD_LOCAL_ZEROFILL
             )
         })
@@ -697,65 +524,47 @@ fn macho_image<'a>(bytes: &'a [u8], macho: &MachO<'_>) -> Result<Image<'a>, Erro
     if macho.entry != 0 {
         seeds.push(seed(macho.entry, Origin::Entry));
     }
-    for (name, nlist) in &symbols {
-        if !nlist.is_stab()
-            && nlist.n_type & mach::symbols::N_TYPE == mach::symbols::N_SECT
-            && nlist.n_value != 0
+    for symbol in symbols {
+        if !symbol.is_stab()
+            && symbol.n_type & macho::N_TYPE == macho::N_SECT
+            && symbol.n_value != 0
         {
-            seeds.push(seed(nlist.n_value, Origin::Symbol((*name).to_owned())));
+            seeds.push(seed(symbol.n_value, Origin::Symbol(symbol.name.clone())));
         }
     }
     let text = macho
         .segments
         .iter()
-        .find(|segment| segment.name().is_ok_and(|name| name == "__TEXT"))
+        .find(|segment| segment.named("__TEXT"))
         .map(|segment| segment.vmaddr);
     let pointer: u64 = if macho.is_64 { 8 } else { 4 };
-    for command in &macho.load_commands {
-        match &command.command {
-            CommandVariant::FunctionStarts(starts) => {
-                let Some(mut addr) = text else { continue };
-                let data = file_range(bytes, u64::from(starts.dataoff), u64::from(starts.datasize));
-                for delta in uleb128s(data).take_while(|&delta| delta != 0) {
-                    addr = addr.wrapping_add(delta);
-                    seeds.push(seed(addr, Origin::FunctionStarts));
-                }
+    if let (Some(mut addr), Some((offset, size))) = (text, macho.function_starts) {
+        for delta in uleb128s(file_range(bytes, offset, size)).take_while(|&delta| delta != 0) {
+            addr = addr.wrapping_add(delta);
+            seeds.push(seed(addr, Origin::FunctionStarts));
+        }
+    }
+    for section in sections {
+        let kind = section.flags & macho::SECTION_TYPE;
+        if kind != S_NON_LAZY_SYMBOL_POINTERS && kind != S_LAZY_SYMBOL_POINTERS {
+            continue;
+        }
+        let first = section.reserved1 as usize;
+        let count = usize::try_from(section.size / pointer).unwrap_or(0);
+        let entries = macho.indirect.iter().skip(first).take(count);
+        for (i, &index) in (0_u64..).zip(entries) {
+            // INDIRECT_SYMBOL_LOCAL and INDIRECT_SYMBOL_ABS name no import.
+            if index & 0xc000_0000 != 0 {
+                continue;
             }
-            CommandVariant::Dysymtab(dysymtab) => {
-                let table = file_range(
-                    bytes,
-                    u64::from(dysymtab.indirectsymoff),
-                    u64::from(dysymtab.nindirectsyms).saturating_mul(4),
-                );
-                let indirect: Vec<u32> = table
-                    .chunks_exact(4)
-                    .filter_map(|b| b.try_into().ok().map(u32::from_le_bytes))
-                    .collect();
-                for section in &sections {
-                    let kind = section.flags & mach::constants::SECTION_TYPE;
-                    if kind != S_NON_LAZY_SYMBOL_POINTERS && kind != S_LAZY_SYMBOL_POINTERS {
-                        continue;
-                    }
-                    let first = section.reserved1 as usize;
-                    let count = usize::try_from(section.size / pointer).unwrap_or(0);
-                    let entries = indirect.iter().skip(first).take(count);
-                    for (i, &index) in (0_u64..).zip(entries) {
-                        // INDIRECT_SYMBOL_LOCAL and INDIRECT_SYMBOL_ABS name no import.
-                        if index & 0xc000_0000 != 0 {
-                            continue;
-                        }
-                        if let Some((name, _)) = symbols.get(index as usize)
-                            && !name.is_empty()
-                        {
-                            imports.push(Import {
-                                slot: section.addr.wrapping_add(i * pointer),
-                                name: (*name).to_owned(),
-                            });
-                        }
-                    }
-                }
+            if let Some(symbol) = symbols.get(index as usize)
+                && !symbol.name.is_empty()
+            {
+                imports.push(Import {
+                    slot: section.addr.wrapping_add(i * pointer),
+                    name: symbol.name.clone(),
+                });
             }
-            _ => {}
         }
     }
 
@@ -773,9 +582,8 @@ fn macho_image<'a>(bytes: &'a [u8], macho: &MachO<'_>) -> Result<Image<'a>, Erro
     }
 
     // Stubs: each jumps through the symbol pointer its index names.
-    for section in &sections {
-        if section.flags & mach::constants::SECTION_TYPE != S_SYMBOL_STUBS || section.reserved2 == 0
-        {
+    for section in sections {
+        if section.flags & macho::SECTION_TYPE != S_SYMBOL_STUBS || section.reserved2 == 0 {
             continue;
         }
         let size = u64::from(section.reserved2);

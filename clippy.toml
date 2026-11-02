@@ -1,0 +1,3 @@
+# Unit tests fail by panicking, and build their inputs by index.
+allow-panic-in-tests = true
+allow-indexing-slicing-in-tests = true
