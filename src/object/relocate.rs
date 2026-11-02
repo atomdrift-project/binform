@@ -114,6 +114,9 @@ pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf, arch: Arch) -> Layout<'a> {
                 Arch::X86_64 => x86_64(section, offset, reloc.kind, fix),
                 Arch::X86 => i386(section, offset, reloc.kind, fix),
                 Arch::Arm64 => aarch64(section, offset, reloc.kind, fix),
+                // Objects for the other sets are laid out but not linked:
+                // their calls read as calls to themselves.
+                _ => None,
             };
         }
     }
@@ -238,7 +241,7 @@ pub(super) fn macho(
                         undefined,
                     },
                 ),
-                Arch::X86 => None,
+                _ => None,
             };
         }
         linked.push(Some(data));

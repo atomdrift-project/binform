@@ -238,7 +238,13 @@ fn golden(outcome: &Outcome<'_>) -> String {
 fn check(name: &str, claims: impl Fn(&Outcome<'_>)) {
     let bytes = read_zst(&format!("{name}.zst"));
     let image = funktion::object::image(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
-    let recovery = funktion::recover(&image);
+    let mut recovery = funktion::recover(&image);
+    // Thumb entries carry their mode in bit 0; rizin's are even.
+    if image.arch == funktion::Arch::Arm {
+        for function in &mut recovery.functions {
+            function.entry &= !1;
+        }
+    }
     let outcome = Outcome {
         image,
         recovery,
@@ -437,5 +443,103 @@ fn macho_arm64_go_garbled() {
         let named = outcome.found(Found::SYMBOL);
         assert!(named > 2000, "only {named} functions from the Go table");
         finds_rizin_except(outcome, &[(0x1_0007_ac08, DEBUG_CALL)]);
+    });
+}
+
+/// Bytes of code that some recovered function's instructions cover, as a
+/// share of all code, in percent.
+fn coverage(outcome: &Outcome<'_>) -> u64 {
+    outcome.recovery.covered * 100 / outcome.recovery.code.max(1)
+}
+
+/// Go on 32-bit Arm (A32): `add pc, lr, #0` returns, and the zero words Go
+/// leaves after calls that never return decode as padding.
+#[test]
+fn elf_arm_go() {
+    check("does-nothing-linux-arm", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::Arm);
+        let named = outcome.found(Found::SYMBOL);
+        assert!(named > 2000, "only {named} functions from the Go table");
+        finds_all_of_rizin(outcome);
+        let (same, shared) = outcome.same_blocks_without_pads();
+        assert!(
+            same * 100 >= shared * 95,
+            "blocks agree on {same} of {shared}"
+        );
+        assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
+        assert_eq!(outcome.recovery.invalid, 0, "zero words stop paths");
+    });
+}
+
+/// Go on big-endian MIPS: the function table read in the file's byte
+/// order, delay slots joined to their branches.
+#[test]
+fn elf_mips_go() {
+    check("does-nothing-linux-mips", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::Mips);
+        let named = outcome.found(Found::SYMBOL);
+        assert!(named > 2000, "only {named} functions from the Go table");
+        assert!(coverage(outcome) >= 99, "covers {}%", coverage(outcome));
+        // Rizin starts a function in the epilogue after each `jal
+        // runtime.deferreturn`, which the Go runtime resumes at and no
+        // instruction reaches. Every other function rizin finds, funktion
+        // finds or holds.
+        let missed = outcome.missed();
+        assert!(
+            missed.len() <= 33,
+            "missed {} of rizin's: {missed:x?}",
+            missed.len()
+        );
+    });
+}
+
+/// Go on IBM Z. Rizin finds next to nothing here; the function table and
+/// the code covered stand in.
+#[test]
+fn elf_s390x_go() {
+    check("does-nothing-linux-s390x", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::S390x);
+        let named = outcome.found(Found::SYMBOL);
+        assert!(named > 2000, "only {named} functions from the Go table");
+        assert!(coverage(outcome) >= 97, "covers {}%", coverage(outcome));
+    });
+}
+
+/// GCC Thumb-2: entries in Thumb mode, an A32 PLT whose stubs resolve to
+/// their slots.
+#[test]
+fn elf_thumb_c() {
+    check("libe_sqlite3-linux-arm.so", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::Arm);
+        // Each stub jumps through its GOT slot; a slot an import fills makes
+        // the stub that import's thunk. (Most stubs here call the library's
+        // own exported functions, whose slots name no import.)
+        let imports: std::collections::HashSet<u64> =
+            outcome.image.imports.iter().map(|i| i.slot).collect();
+        let stubs: Vec<&funktion::Function> = outcome
+            .recovery
+            .functions
+            .iter()
+            .filter(|f| f.found.contains(Found::STUB) && !f.refs.is_empty())
+            .collect();
+        assert!(stubs.len() > 200, "only {} PLT stubs", stubs.len());
+        for stub in &stubs {
+            let slot = stub.refs[0].to;
+            assert_eq!(stub.refs[0].kind, RefKind::Jump, "{:#x}", stub.entry);
+            if imports.contains(&slot) {
+                assert_eq!(stub.thunk, Some(slot), "stub {:#x}", stub.entry);
+            }
+        }
+        assert!(stubs.iter().filter(|s| s.thunk.is_some()).count() > 20);
+        let (same, shared) = outcome.same_blocks_without_pads();
+        assert!(shared > 2600, "only {shared} functions shared with rizin");
+        assert!(
+            same * 100 >= shared * 95,
+            "blocks agree on {same} of {shared}"
+        );
+        // Rizin's others are case code of `tbb`/`tbh` tables funktion does
+        // not read yet, and literal pools it decodes.
+        let missed = outcome.missed();
+        assert!(missed.len() <= 25, "missed {}: {missed:x?}", missed.len());
     });
 }

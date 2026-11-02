@@ -177,7 +177,14 @@ fn compare(options: &Options, file: &Path) -> Option<Value> {
     let bytes = std::fs::read(file).ok()?;
     let started = Instant::now();
     let image = funktion::object::image(&bytes).ok()?;
-    let recovery = funktion::recover(&image);
+    let mut recovery = funktion::recover(&image);
+    // Thumb entries carry their mode in bit 0; rizin's are the even
+    // addresses of their first instructions.
+    if image.arch == Arch::Arm {
+        for function in &mut recovery.functions {
+            function.entry &= !1;
+        }
+    }
     let native_ms = started.elapsed().as_secs_f64() * 1e3;
 
     let script = options

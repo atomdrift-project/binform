@@ -3,8 +3,8 @@
 //! Functions reached only through method tables, closures and type
 //! descriptors are found nowhere else.
 //!
-//! The layout, by the magic number that starts it (little-endian; every
-//! instruction set funktion decodes is):
+//! The layout, by the magic number that starts it, in the binary's byte
+//! order (which the magic number gives, or for a garbled one, the file):
 //!
 //! - Go 1.2-1.15 (`0xfffffffb`): after the 8-byte header, the function
 //!   count, then (entry, offset) pairs of pointers; each offset finds the
@@ -32,12 +32,31 @@ pub(super) const MAGICS: [u32; 4] = [0xffff_fffb, 0xffff_fff0, 0xffff_fffa, 0xff
 /// first entry out of order. `text` is the start of the code, which entries
 /// count from when the header leaves the text start out (a
 /// position-independent binary fills it in at load time). `named` says the
-/// table's section names it, so a magic number may have been overwritten.
-pub(super) fn functions(table: &[u8], text: Option<u64>, named: bool) -> Vec<(u64, String)> {
-    functions_of(table, text, named).unwrap_or_default()
+/// table's section names it, so a magic number may have been overwritten;
+/// `big` is the file's byte order, for a table whose magic number does not
+/// say.
+pub(super) fn functions(
+    table: &[u8],
+    text: Option<u64>,
+    named: bool,
+    big: bool,
+) -> Vec<(u64, String)> {
+    let big = match (u32_at(table, 0, false), u32_at(table, 0, true)) {
+        (Some(magic), _) if MAGICS.contains(&magic) => false,
+        (_, Some(magic)) if MAGICS.contains(&magic) => true,
+        _ => big,
+    };
+    functions_of(table, text, named, big).unwrap_or_default()
 }
 
-fn functions_of(table: &[u8], text: Option<u64>, named: bool) -> Option<Vec<(u64, String)>> {
+fn functions_of(
+    table: &[u8],
+    text: Option<u64>,
+    named: bool,
+    big: bool,
+) -> Option<Vec<(u64, String)>> {
+    let u32_at = |bytes: &[u8], at: usize| u32_at(bytes, at, big);
+    let uint_at = |bytes: &[u8], at: usize, size: usize| uint_at(bytes, at, size, big);
     let magic = u32_at(table, 0)?;
     let (pad, quantum, ptr) = (table.get(4..6)?, *table.get(6)?, *table.get(7)?);
     if pad != [0, 0] || !matches!(quantum, 1 | 2 | 4) || !matches!(ptr, 4 | 8) {
@@ -99,20 +118,23 @@ fn functions_of(table: &[u8], text: Option<u64>, named: bool) -> Option<Vec<(u64
     )
 }
 
-fn u32_at(bytes: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(
-        bytes.get(at..at.checked_add(4)?)?.try_into().ok()?,
-    ))
+fn u32_at(bytes: &[u8], at: usize, big: bool) -> Option<u32> {
+    uint_at(bytes, at, 4, big).and_then(|value| u32::try_from(value).ok())
 }
 
-/// The little-endian `size`-byte (4 or 8) unsigned integer at `at`.
-fn uint_at(bytes: &[u8], at: usize, size: usize) -> Option<u64> {
+/// The `size`-byte (4 or 8) unsigned integer at `at`, big-endian when
+/// `big`.
+fn uint_at(bytes: &[u8], at: usize, size: usize, big: bool) -> Option<u64> {
     let bytes = bytes.get(at..at.checked_add(size)?)?;
-    match size {
-        4 => Some(u64::from(u32::from_le_bytes(bytes.try_into().ok()?))),
-        8 => Some(u64::from_le_bytes(bytes.try_into().ok()?)),
-        _ => None,
+    if size != 4 && size != 8 {
+        return None;
     }
+    let word = |value: u64, &byte: &u8| value << 8 | u64::from(byte);
+    Some(if big {
+        bytes.iter().fold(0, word)
+    } else {
+        bytes.iter().rev().fold(0, word)
+    })
 }
 
 #[cfg(test)]
@@ -143,22 +165,25 @@ mod tests {
             (0x40_1010, "main.main".to_owned()),
             (0x40_1040, "main.f".to_owned()),
         ];
-        assert_eq!(functions(&table, Some(0x40_1000), false), both);
-        assert!(functions(&table, None, false).is_empty(), "no text start");
+        assert_eq!(functions(&table, Some(0x40_1000), false, false), both);
+        assert!(
+            functions(&table, None, false, false).is_empty(),
+            "no text start"
+        );
         let cut = table.get(..0x80).unwrap_or_default();
-        assert_eq!(functions(cut, Some(0), false).len(), 1, "cut short");
+        assert_eq!(functions(cut, Some(0), false, false).len(), 1, "cut short");
 
         // garble's: the magic overwritten, the rest intact.
         let mut garbled = table.clone();
         garbled.splice(..4, [0xa6, 0xab, 0x7f, 0xcc]);
-        assert!(functions(&garbled, Some(0x40_1000), false).is_empty());
-        assert_eq!(functions(&garbled, Some(0x40_1000), true), both);
+        assert!(functions(&garbled, Some(0x40_1000), false, false).is_empty());
+        assert_eq!(functions(&garbled, Some(0x40_1000), true, false), both);
 
         if let Some(pad) = table.get_mut(4) {
             *pad = 1;
         }
         assert!(
-            functions(&table, Some(0x40_1000), true).is_empty(),
+            functions(&table, Some(0x40_1000), true, false).is_empty(),
             "not a table"
         );
     }

@@ -7,6 +7,7 @@
 use super::read::Reader;
 
 pub(super) const ET_REL: u16 = 1;
+const EM_MIPS: u16 = 8;
 pub(super) const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 pub(super) const PF_X: u32 = 1;
@@ -414,7 +415,15 @@ impl Elf {
                 } else {
                     None
                 };
-                let (symbol, kind) = if self.is_64 {
+                let (symbol, kind) = if self.is_64 && self.machine == EM_MIPS {
+                    // MIPS64 stores the symbol first, then a byte each for
+                    // a special symbol and three types, the first last.
+                    if self.big {
+                        (info >> 32, info & 0xff)
+                    } else {
+                        (info & 0xffff_ffff, info >> 56)
+                    }
+                } else if self.is_64 {
                     (info >> 32, info & 0xffff_ffff)
                 } else {
                     (info >> 8, info & 0xff)

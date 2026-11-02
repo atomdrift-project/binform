@@ -34,10 +34,15 @@
 //! never panics, and bounds its work by [`Limits`], so hostile input costs at
 //! most the configured budget.
 
+mod arm;
 mod arm64;
 mod cfg;
 pub mod cil;
 mod decode;
+mod mips;
+mod s390x;
+mod sparc;
+mod superh;
 use std::borrow::Cow;
 use std::ops::Range;
 
@@ -56,6 +61,52 @@ pub enum Arch {
     X86_64,
     /// 64-bit Arm (A64).
     Arm64,
+    /// 32-bit Arm, A32 and Thumb, little-endian. A Thumb address carries
+    /// its mode in bit 0, as Arm symbol tables write it: seeds, function
+    /// entries and branch targets in Thumb code are odd.
+    Arm,
+    /// 32-bit MIPS, big-endian.
+    Mips,
+    /// 32-bit MIPS, little-endian.
+    MipsEl,
+    /// 64-bit MIPS, big-endian.
+    Mips64,
+    /// 64-bit MIPS, little-endian.
+    Mips64El,
+    /// 64-bit IBM Z (z/Architecture).
+    S390x,
+    /// 32-bit SPARC.
+    Sparc,
+    /// 64-bit SPARC (V9).
+    Sparc64,
+    /// SuperH (SH-2, SH-3, SH-4), little-endian.
+    SuperH,
+}
+
+impl Arch {
+    /// Whether the instruction set stores words most significant byte
+    /// first.
+    #[must_use]
+    pub const fn big_endian(self) -> bool {
+        matches!(
+            self,
+            Self::Mips | Self::Mips64 | Self::S390x | Self::Sparc | Self::Sparc64
+        )
+    }
+
+    /// Bytes in an address.
+    #[must_use]
+    pub const fn address_width(self) -> u8 {
+        match self {
+            Self::X86 | Self::Arm | Self::Mips | Self::MipsEl | Self::Sparc | Self::SuperH => 4,
+            Self::X86_64
+            | Self::Arm64
+            | Self::Mips64
+            | Self::Mips64El
+            | Self::S390x
+            | Self::Sparc64 => 8,
+        }
+    }
 }
 
 /// Bytes mapped at a virtual address.

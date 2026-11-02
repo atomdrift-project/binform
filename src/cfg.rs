@@ -62,7 +62,7 @@ fn main_argument(name: &str) -> Option<usize> {
 
 pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
     let mut work = Work {
-        memory: Memory::new(&image.segments),
+        memory: Memory::for_arch(&image.segments, image.arch),
         decoder: Decoder::new(image),
         budget: limits.instructions,
         table_entries: limits.table_entries,
@@ -263,11 +263,12 @@ impl Work<'_> {
             .map(|segment| (segment.addr, segment.bytes))
             .collect();
         let step = self.decoder.alignment();
+        let mode = self.decoder.sweep_mode();
         for (base, bytes) in segments {
             self.decoder.reset();
             let mut offset = 0_usize;
             while let Some(rest) = bytes.get(offset..).filter(|rest| !rest.is_empty()) {
-                let addr = base.wrapping_add(offset as u64);
+                let addr = base.wrapping_add(offset as u64) | mode;
                 let Some(insn) = self.decode(rest, addr) else {
                     return;
                 };
@@ -314,7 +315,7 @@ impl Work<'_> {
                     found = self.imports.contains(&slot).then_some(slot);
                     break;
                 }
-                Flow::Next if insn.pad || self.decoder.alignment() == 4 => {
+                Flow::Next if insn.pad || self.decoder.stub_arithmetic() => {
                     at = at.wrapping_add(u64::from(insn.len));
                 }
                 _ => break,
@@ -433,7 +434,7 @@ impl Work<'_> {
                     // Padding after a call that never returns runs into
                     // nothing.
                     if !insn.pad {
-                        falls = matches!(insn.flow, Flow::Next | Flow::Branch(_));
+                        falls = insn.falls || matches!(insn.flow, Flow::Next | Flow::Branch(_));
                     }
                     let next = addr.wrapping_add(u64::from(insn.len));
                     let target =
@@ -515,7 +516,9 @@ impl Work<'_> {
                                 to: slot,
                                 kind: RefKind::Jump,
                             });
-                            break;
+                            if !insn.falls {
+                                break;
+                            }
                         }
                         Flow::JumpMemory(_) | Flow::JumpRegister(_) => {
                             let table = tracker.jump(insn.flow);
@@ -534,17 +537,27 @@ impl Work<'_> {
                                 });
                                 target(to, &tracker, &mut leaders, &mut pending);
                             }
-                            break;
+                            if !insn.falls {
+                                break;
+                            }
                         }
                         Flow::JumpIndirect => {
                             unresolved = unresolved.saturating_add(1);
-                            break;
+                            if !insn.falls {
+                                break;
+                            }
                         }
                         Flow::Invalid => {
                             invalid = invalid.saturating_add(1);
                             break;
                         }
-                        Flow::Return | Flow::Stop => break,
+                        Flow::Return | Flow::Stop if !insn.falls => break,
+                        Flow::Return | Flow::Stop => {}
+                    }
+                    // A conditional return or jump ends its block; the code
+                    // after it, reached when the condition fails, starts one.
+                    if insn.falls {
+                        leaders.insert(next);
                     }
                     addr = next;
                 }
@@ -647,18 +660,20 @@ impl Work<'_> {
             blocks = blocks.saturating_add(1);
             let mut addr = leader;
             while let Some(insn) = insns.get(&addr) {
+                // A conditional return or jump also runs into the next block.
+                let falls = u32::from(insn.falls);
                 let (out, exit) = match insn.flow {
                     _ if ends.contains(&addr) => (0, true),
                     Flow::Jump(_) => (1, false),
                     Flow::Branch(_) => (2, false),
-                    Flow::JumpMemory(_) | Flow::JumpRegister(_) => {
-                        (cases.get(&addr).copied().unwrap_or(0), true)
+                    Flow::JumpMemory(_) | Flow::JumpRegister(_) => (
+                        cases.get(&addr).copied().unwrap_or(0).saturating_add(falls),
+                        true,
+                    ),
+                    Flow::JumpSlot(_) | Flow::JumpIndirect | Flow::Return | Flow::Stop => {
+                        (falls, true)
                     }
-                    Flow::JumpSlot(_)
-                    | Flow::JumpIndirect
-                    | Flow::Return
-                    | Flow::Stop
-                    | Flow::Invalid => (0, true),
+                    Flow::Invalid => (0, true),
                     _ => {
                         let next = addr.wrapping_add(u64::from(insn.len));
                         if leaders.contains(&next) && insns.contains_key(&next) {

@@ -427,3 +427,102 @@ fn weak_recovery_says_so() {
     assert_eq!(recovery.invalid, 1);
     assert_eq!(recovery.unresolved, 0);
 }
+
+fn halves(halves: &[u16]) -> Vec<u8> {
+    halves.iter().flat_map(|half| half.to_le_bytes()).collect()
+}
+
+fn big_words(words: &[u32]) -> Vec<u8> {
+    words.iter().flat_map(|word| word.to_be_bytes()).collect()
+}
+
+/// Thumb code keeps its mode in bit 0: a Thumb entry, a `bl` to Thumb and a
+/// `blx` to A32. A return inside an `it` block is conditional: the code
+/// after it is the same function.
+#[test]
+fn thumb_and_a32_interwork() {
+    let mut code = halves(&[
+        0xb510, // 0x8000: push {r4, lr}
+        0xf000, 0xf807, // 0x8002: bl 0x8014 (Thumb)
+        0x2800, // 0x8006: cmp r0, #0
+        0xbf08, // 0x8008: it eq
+        0xbd10, // 0x800a: popeq {r4, pc}
+        0xf000, 0xe808, // 0x800c: blx 0x8020 (A32)
+        0xbd10, // 0x8010: pop {r4, pc}
+        0xbf00, // 0x8012: nop
+        0x4770, // 0x8014: bx lr
+        0xbf00, 0xbf00, 0xbf00, 0xbf00, 0xbf00, // padding to 0x8020
+    ]);
+    code.extend(words(&[0xe12f_ff1e])); // 0x8020: bx lr
+    let image = image(
+        Arch::Arm,
+        vec![segment(0x8000, &code, true)],
+        vec![entry(0x8001)],
+    );
+    let recovery = funktion::recover(&image);
+    let entries: Vec<u64> = recovery.functions.iter().map(|f| f.entry).collect();
+    assert_eq!(entries, [0x8001, 0x8015, 0x8020]);
+    let main = function(&recovery.functions, 0x8001);
+    assert_eq!((main.blocks, main.size), (2, 0x12));
+}
+
+/// SPARC: a call and its delay slot are one instruction, so the call
+/// returns past the slot; `ret; restore` and `retl; nop` return.
+#[test]
+fn sparc_delay_slots() {
+    let code = big_words(&[
+        0x9de3_bfa0, // 0x1000: save %sp, -96, %sp
+        0x4000_0008, // 0x1004: call 0x1024
+        0x0100_0000, // 0x1008: nop (slot)
+        0x80a2_2000, // 0x100c: cmp %o0, 0
+        0x0280_0003, // 0x1010: be 0x101c
+        0x0100_0000, // 0x1014: nop (slot)
+        0xb010_2001, // 0x1018: mov 1, %i0
+        0x81c7_e008, // 0x101c: ret
+        0x81e8_0000, // 0x1020: restore (slot)
+        0x81c3_e008, // 0x1024: retl
+        0x0100_0000, // 0x1028: nop (slot)
+    ]);
+    let image = image(
+        Arch::Sparc,
+        vec![segment(0x1000, &code, true)],
+        vec![entry(0x1000)],
+    );
+    let recovery = funktion::recover(&image);
+    let main = function(&recovery.functions, 0x1000);
+    assert_eq!((main.blocks, main.size), (3, 0x24));
+    assert!(
+        main.refs
+            .iter()
+            .any(|r| r.kind == RefKind::Call && r.to == 0x1024)
+    );
+    assert_eq!(function(&recovery.functions, 0x1024).size, 8);
+}
+
+/// SuperH: `bsr` and `rts` take a delay slot, `bt` does not.
+#[test]
+fn superh_delay_slots() {
+    let code = halves(&[
+        0x4f22, // 0x1000: sts.l pr, @-r15
+        0xb007, // 0x1002: bsr 0x1014
+        0x0009, // 0x1004: nop (slot)
+        0x2008, // 0x1006: tst r0, r0
+        0x8900, // 0x1008: bt 0x100c
+        0x7001, // 0x100a: add #1, r0
+        0x4f26, // 0x100c: lds.l @r15+, pr
+        0x000b, // 0x100e: rts
+        0x0009, // 0x1010: nop (slot)
+        0x0009, // 0x1012: nop
+        0x000b, // 0x1014: rts
+        0x0009, // 0x1016: nop (slot)
+    ]);
+    let image = image(
+        Arch::SuperH,
+        vec![segment(0x1000, &code, true)],
+        vec![entry(0x1000)],
+    );
+    let recovery = funktion::recover(&image);
+    let main = function(&recovery.functions, 0x1000);
+    assert_eq!((main.blocks, main.size), (3, 0x12));
+    assert_eq!(function(&recovery.functions, 0x1014).size, 4);
+}

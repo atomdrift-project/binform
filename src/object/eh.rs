@@ -25,7 +25,7 @@ pub(super) fn eh_frame(
     size: u64,
     is_64: bool,
 ) -> (Vec<Range<u64>>, Vec<Handler>) {
-    use gimli::{BaseAddresses, CieOrFde, EhFrame, LittleEndian, Pointer, UnwindSection};
+    use gimli::{BaseAddresses, CieOrFde, EhFrame, Pointer, RunTimeEndian, UnwindSection};
     let Some((data, _)) = memory.at(addr) else {
         return (Vec::new(), Vec::new());
     };
@@ -33,7 +33,12 @@ pub(super) fn eh_frame(
         .get(..usize::try_from(size).unwrap_or(usize::MAX).min(data.len()))
         .unwrap_or_default();
     let width: u8 = if is_64 { 8 } else { 4 };
-    let mut eh_frame = EhFrame::new(data, LittleEndian);
+    let endian = if memory.big_endian() {
+        RunTimeEndian::Big
+    } else {
+        RunTimeEndian::Little
+    };
+    let mut eh_frame = EhFrame::new(data, endian);
     eh_frame.set_address_size(width);
     let bases = BaseAddresses::default().set_eh_frame(addr);
     let mut entries = eh_frame.entries(&bases);

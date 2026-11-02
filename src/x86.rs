@@ -13,6 +13,7 @@ pub(crate) fn decode(bitness: u32, got: Option<u64>, bytes: &[u8], addr: u64) ->
             flow: Flow::Invalid,
             note: Note::None,
             pad: false,
+            falls: false,
         };
     }
     let len = u32::try_from(instruction.len()).unwrap_or(1).max(1);
@@ -25,6 +26,7 @@ pub(crate) fn decode(bitness: u32, got: Option<u64>, bytes: &[u8], addr: u64) ->
             flow: Flow::Next,
             note: Note::Push(next),
             pad: false,
+            falls: false,
         };
     }
     let flow = match instruction.flow_control() {
@@ -73,6 +75,7 @@ pub(crate) fn decode(bitness: u32, got: Option<u64>, bytes: &[u8], addr: u64) ->
         flow,
         note,
         pad,
+        falls: false,
     }
 }
 

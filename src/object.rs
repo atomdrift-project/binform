@@ -79,7 +79,7 @@ fn pe_gopclntab(segments: &[Segment<'_>]) -> Vec<(u64, String)> {
                 .flatten()
         });
         for table in headers {
-            let functions = gopclntab::functions(table, text, false);
+            let functions = gopclntab::functions(table, text, false, false);
             if functions
                 .first()
                 .is_some_and(|&(entry, _)| memory.is_code(entry))
@@ -110,9 +110,42 @@ fn seed(addr: u64, origin: Origin) -> Seed {
 // ELF
 // ---------------------------------------------------------------------------
 
+const EM_SPARC: u16 = 2;
 const EM_386: u16 = 3;
+const EM_MIPS: u16 = 8;
+const EM_MIPS_RS3_LE: u16 = 10;
+const EM_SPARC32PLUS: u16 = 18;
+const EM_S390: u16 = 22;
+const EM_ARM: u16 = 40;
+const EM_SH: u16 = 42;
+const EM_SPARCV9: u16 = 43;
 const EM_X86_64: u16 = 62;
 const EM_AARCH64: u16 = 183;
+
+/// The instruction set of an ELF file's machine, word size and byte order.
+fn elf_arch(elf: &Elf) -> Result<Arch, Error> {
+    let arch = match (elf.machine, elf.is_64) {
+        (EM_386, _) => Arch::X86,
+        (EM_X86_64, _) => Arch::X86_64,
+        (EM_AARCH64, _) => Arch::Arm64,
+        (EM_ARM, _) => Arch::Arm,
+        (EM_MIPS | EM_MIPS_RS3_LE, false) if elf.big => Arch::Mips,
+        (EM_MIPS | EM_MIPS_RS3_LE, false) => Arch::MipsEl,
+        (EM_MIPS | EM_MIPS_RS3_LE, true) if elf.big => Arch::Mips64,
+        (EM_MIPS | EM_MIPS_RS3_LE, true) => Arch::Mips64El,
+        (EM_S390, true) => Arch::S390x,
+        (EM_S390, false) => return Err(Error::Arch("31-bit s390".into())),
+        (EM_SPARC | EM_SPARC32PLUS, _) => Arch::Sparc,
+        (EM_SPARCV9, _) => Arch::Sparc64,
+        (EM_SH, _) => Arch::SuperH,
+        (machine, _) => return Err(Error::Arch(format!("ELF machine {machine}"))),
+    };
+    if elf.big != arch.big_endian() {
+        let order = if elf.big { "big" } else { "little" };
+        return Err(Error::Arch(format!("{order}-endian {arch:?} ELF")));
+    }
+    Ok(arch)
+}
 
 const DT_INIT: u64 = 12;
 const DT_FINI: u64 = 13;
@@ -124,15 +157,7 @@ const DT_PREINIT_ARRAY: u64 = 32;
 const DT_PREINIT_ARRAYSZ: u64 = 33;
 
 fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Image<'a>, Error> {
-    let arch = match elf.machine {
-        EM_386 => Arch::X86,
-        EM_X86_64 => Arch::X86_64,
-        EM_AARCH64 => Arch::Arm64,
-        machine => return Err(Error::Arch(format!("ELF machine {machine}"))),
-    };
-    if elf.big {
-        return Err(Error::Arch("big-endian ELF".into()));
-    }
+    let arch = elf_arch(elf)?;
     let object = elf.kind == elf::ET_REL;
 
     // An object's sections are placed and linked as a loader would see
@@ -194,7 +219,7 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Image<'a>, Error> {
         };
         seeds.push(seed(addr, Origin::Symbol(symbol.name.clone())));
     }
-    let memory = Memory::new(&segments);
+    let memory = Memory::for_arch(&segments, arch);
     let (inits, finis) = elf_initializers(elf, &sections, &memory);
     seeds.extend(
         (0..)
@@ -210,7 +235,7 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Image<'a>, Error> {
         let text = sections.find(".text").map(|(addr, _)| addr);
         let table = file_range(bytes, sh.offset, sh.size);
         seeds.extend(
-            gopclntab::functions(table, text, true)
+            gopclntab::functions(table, text, true, elf.big)
                 .into_iter()
                 .map(|(addr, name)| seed(addr, Origin::Symbol(name))),
         );
@@ -225,7 +250,7 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Image<'a>, Error> {
         );
     }
     seeds.extend(
-        elf_stubs(arch, &sections)
+        elf_stubs(bytes, arch, &sections)
             .into_iter()
             .map(|addr| seed(addr, Origin::Stub)),
     );
@@ -286,16 +311,32 @@ impl ElfSections<'_> {
 /// the dynamic linker, and one stub per import. With indirect-branch
 /// tracking the stubs callers use live in `.plt.sec`; `.plt.got` holds the
 /// stubs of imports bound at load time.
-fn elf_stubs(arch: Arch, sections: &ElfSections<'_>) -> Vec<u64> {
+fn elf_stubs(bytes: &[u8], arch: Arch, sections: &ElfSections<'_>) -> Vec<u64> {
+    if arch == Arch::Arm {
+        return arm_stubs(bytes, sections);
+    }
+    // Each set's header size, and its stub size when the section's entry
+    // size does not give it (Arm's `.plt` says 4, a word).
+    let (header, stub) = match arch {
+        Arch::X86 | Arch::X86_64 => (16, None),
+        Arch::Arm64 => (32, None),
+        Arch::S390x => (32, Some(32)),
+        // The others' stubs vary by ABI: the header alone.
+        _ => (0, Some(0)),
+    };
     let entries = |name: &str, skip: u64| -> Vec<u64> {
         let Some((addr, sh)) = sections.find(name) else {
             return Vec::new();
         };
-        let size = if sh.entsize >= 4 { sh.entsize } else { 16 };
+        let size = match stub {
+            Some(0) => return Vec::new(),
+            Some(size) => size,
+            None if sh.entsize >= 4 => sh.entsize,
+            None => 16,
+        };
         let count = (sh.size.saturating_sub(skip) / size).min(1 << 16);
         (0..count).map(|i| addr + skip + i * size).collect()
     };
-    let header = if arch == Arch::Arm64 { 32 } else { 16 };
     let mut stubs: Vec<u64> = sections
         .find(".plt")
         .map(|(addr, _)| addr)
@@ -307,6 +348,30 @@ fn elf_stubs(arch: Arch, sections: &ElfSections<'_>) -> Vec<u64> {
         stubs.extend(entries(".plt", header));
     }
     stubs.extend(entries(".plt.got", 0));
+    stubs
+}
+
+/// The entries of a 32-bit Arm PLT: after its 20-byte header, 12-byte A32
+/// stubs, each preceded by a 4-byte Thumb `bx pc; b.n` when Thumb code
+/// calls it. The Thumb entry is a stub of its own, at an odd address.
+fn arm_stubs(bytes: &[u8], sections: &ElfSections<'_>) -> Vec<u64> {
+    let Some((addr, sh)) = sections.find(".plt") else {
+        return Vec::new();
+    };
+    let plt = file_range(bytes, sh.offset, sh.size);
+    let mut stubs = vec![addr];
+    let mut at = 20_usize;
+    while at < plt.len() && stubs.len() <= 1 << 16 {
+        let stub = addr.wrapping_add(at as u64);
+        // `bx pc` (0x4778), little-endian.
+        if plt.get(at..at + 2) == Some(&[0x78, 0x47][..]) {
+            stubs.extend([stub | 1, stub + 4]);
+            at += 16;
+        } else {
+            stubs.push(stub);
+            at += 12;
+        }
+    }
     stubs
 }
 
@@ -434,7 +499,7 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &Pe<'_>) -> Result<Image<'a>, Error> {
             }
         }
         // 32-bit x86 unwinds by frame chain, not by table.
-        Arch::X86 => {}
+        _ => {}
     }
     let imports = pe
         .imports()
@@ -575,7 +640,7 @@ fn macho_image<'a>(bytes: &'a [u8], macho: &MachO) -> Result<Image<'a>, Error> {
             .map(|section| section.addr);
         let table = file_range(bytes, section.offset, section.size);
         seeds.extend(
-            gopclntab::functions(table, text, true)
+            gopclntab::functions(table, text, true, false)
                 .into_iter()
                 .map(|(addr, name)| seed(addr, Origin::Symbol(name))),
         );

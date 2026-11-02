@@ -1,27 +1,25 @@
 # TODO
 
-## More instruction sets
+## The newer instruction sets
 
-`object::image` returns `Error::Arch` for 32-bit Arm, MIPS, SuperH, s390
-and SPARC. Each needs a flow decoder like `arm64.rs` (length, branches,
-calls, returns, indirect jumps; no jump-table notes at first):
+32-bit Arm, MIPS, s390x, SPARC and SuperH decode control flow only. Next:
 
-- 32-bit Arm: A32 and Thumb. The mode comes from an address's low bit
-  (symbols, the entry point, `blx`); A32 reads PC as the instruction + 8,
-  Thumb as + 4. Conditional returns and the inline `ldr pc, [pc, rN, lsl
-  #2]` switch table need an instruction that may also fall through (an
-  `Insn` flag the walk honours).
-- MIPS, SPARC, SuperH: branch delay slots. Treat a branch and its slot as
-  one instruction (the branch's length covers the slot), so a call returns
-  past the slot.
-- s390: 2-, 4- and 6-byte instructions, length from the first byte's top
-  two bits; big-endian.
-- Big-endian MIPS and SPARC: the readers above already take a byte order;
-  `Memory::read` (jump tables) is little-endian only.
-
-Check each against rizin on Go builds of the traits-dev `does-nothing`
-program (`GOARCH=arm`, `mips`, `mipsle`, `mips64`, `s390x`); SuperH and
-SPARC have no Go port, so hand-assembled tests in `tests/synthetic.rs`.
+- **Jump tables:** the new decoders emit no `Note`s, so Thumb `tbb`/`tbh`,
+  the A32 `ldrls pc, [pc, rN, lsl #2]` table, and MIPS/s390x `jr`/`br`
+  through a loaded table stay unresolved. In GCC Thumb-2 sqlite
+  (`libe_sqlite3-linux-arm.so`) they hold coverage to about 80%.
+- **Objects:** `relocate` links only x86, x86-64 and A64. Arm (`CALL`,
+  `JUMP24`, `THM_CALL`), MIPS (`26`), s390x (`PLT32DBL`) and SPARC
+  (`WDISP30`) objects are laid out but their calls not linked.
+- **Imports:** MIPS calls through the GOT (`lw t9, n(gp); jalr t9`) with
+  slots named by `DT_MIPS_GOTSYM`, not relocations; SPARC, SuperH and MIPS
+  PLT stubs are seeded by the header only (their layouts vary by ABI).
+- **Not read:** big-endian Arm and SuperH, 31-bit s390, PE `ARMNT`
+  (Thumb-2 Windows), `.ARM.exidx` unwind entries, and LSDAs on big-endian
+  sets (`eh::landing_pads` reads little-endian).
+- **Go:** calls to `runtime.gopanic`, `runtime.throw` and the like are not
+  known to never return (the list is rizin's), so padding after them shows
+  as `invalid` on s390x.
 
 ## Other open items
 

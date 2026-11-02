@@ -25,6 +25,7 @@ pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
             flow: Flow::Invalid,
             note: Note::None,
             pad: false,
+            falls: false,
         };
     };
     let flow = flow(state, word, addr);
@@ -38,6 +39,7 @@ pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
         },
         // NOP, BTI, PACIASP and the rest of the hint space.
         pad: word & 0xffff_f01f == 0xd503_201f,
+        falls: false,
     }
 }
 

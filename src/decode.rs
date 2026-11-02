@@ -14,6 +14,24 @@ pub(crate) struct Insn {
     /// Does nothing a stub cares about (`endbr64`, `nop`, `bti`): a stub may
     /// start with it and still be only a jump through a slot.
     pub(crate) pad: bool,
+    /// A return, jump or trap that runs only when a condition holds (an Arm
+    /// `bxne lr`, `ldrls pc, [...]`): control may also go on to the next
+    /// instruction.
+    pub(crate) falls: bool,
+}
+
+impl Insn {
+    /// An instruction of `len` bytes that always does `flow`, and is no
+    /// padding.
+    pub(crate) const fn new(len: u32, flow: Flow) -> Self {
+        Self {
+            len,
+            flow,
+            note: Note::None,
+            pad: false,
+            falls: false,
+        }
+    }
 }
 
 /// Where control goes after an instruction.
@@ -117,8 +135,25 @@ pub(crate) struct Mem {
 /// An instruction decoder for one image's architecture.
 #[derive(Clone)]
 pub(crate) enum Decoder {
-    X86 { bitness: u32, got: Option<u64> },
+    X86 {
+        bitness: u32,
+        got: Option<u64>,
+    },
     Arm64(Box<crate::arm64::State>),
+    Arm {
+        state: crate::arm::State,
+        /// Most of the code is Thumb: the sweep decodes it so.
+        thumb: bool,
+    },
+    Mips {
+        big: bool,
+        wide: bool,
+    },
+    S390x,
+    Sparc {
+        wide: bool,
+    },
+    SuperH,
 }
 
 impl Decoder {
@@ -133,14 +168,32 @@ impl Decoder {
                 got: None,
             },
             Arch::Arm64 => Self::Arm64(Box::default()),
+            Arch::Arm => {
+                // The mode most known starts are in: Thumb addresses are odd.
+                let thumb = image.seeds.iter().filter(|seed| seed.addr & 1 != 0).count();
+                Self::Arm {
+                    state: crate::arm::State::default(),
+                    thumb: 2 * thumb > image.seeds.len(),
+                }
+            }
+            Arch::Mips | Arch::MipsEl | Arch::Mips64 | Arch::Mips64El => Self::Mips {
+                big: image.arch.big_endian(),
+                wide: image.arch.address_width() == 8,
+            },
+            Arch::S390x => Self::S390x,
+            Arch::Sparc => Self::Sparc { wide: false },
+            Arch::Sparc64 => Self::Sparc { wide: true },
+            Arch::SuperH => Self::SuperH,
         }
     }
 
     /// Forget what earlier instructions left in registers. Called wherever
     /// control may arrive from elsewhere.
     pub(crate) fn reset(&mut self) {
-        if let Self::Arm64(state) = self {
-            **state = crate::arm64::State::default();
+        match self {
+            Self::Arm64(state) => **state = crate::arm64::State::default(),
+            Self::Arm { state, .. } => *state = crate::arm::State::default(),
+            _ => {}
         }
     }
 
@@ -149,23 +202,50 @@ impl Decoder {
         match self {
             Self::X86 { bitness, got } => crate::x86::decode(*bitness, *got, bytes, addr),
             Self::Arm64(state) => crate::arm64::decode(state, bytes, addr),
+            Self::Arm { state, .. } => crate::arm::decode(state, bytes, addr),
+            Self::Mips { big, wide } => crate::mips::decode(*big, *wide, bytes, addr),
+            Self::S390x => crate::s390x::decode(bytes, addr),
+            Self::Sparc { wide } => crate::sparc::decode(*wide, bytes, addr),
+            Self::SuperH => crate::superh::decode(bytes, addr),
         }
     }
 
     /// Bytes in an address.
     pub(crate) fn address_width(&self) -> u8 {
         match self {
-            Self::X86 { bitness: 32, .. } => 4,
-            Self::X86 { .. } | Self::Arm64(_) => 8,
+            Self::X86 { bitness: 32, .. }
+            | Self::Arm { .. }
+            | Self::Mips { wide: false, .. }
+            | Self::Sparc { wide: false }
+            | Self::SuperH => 4,
+            Self::X86 { .. }
+            | Self::Arm64(_)
+            | Self::Mips { .. }
+            | Self::S390x
+            | Self::Sparc { .. } => 8,
         }
     }
 
-    /// Instructions start at multiples of this.
+    /// Instructions start at multiples of this, in the mode the sweep
+    /// decodes.
     pub(crate) fn alignment(&self) -> u64 {
         match self {
             Self::X86 { .. } => 1,
-            Self::Arm64(_) => 4,
+            Self::S390x | Self::SuperH | Self::Arm { thumb: true, .. } => 2,
+            Self::Arm64(_) | Self::Arm { .. } | Self::Mips { .. } | Self::Sparc { .. } => 4,
         }
+    }
+
+    /// What the sweep adds to an address to decode it in the mode most code
+    /// is in: 1 for Thumb, whose addresses are odd.
+    pub(crate) fn sweep_mode(&self) -> u64 {
+        u64::from(matches!(self, Self::Arm { thumb: true, .. }))
+    }
+
+    /// Whether a stub may compute its slot's address before jumping
+    /// through it, as on the fixed-width RISC sets, rather than only pad.
+    pub(crate) fn stub_arithmetic(&self) -> bool {
+        !matches!(self, Self::X86 { .. })
     }
 
     /// The register a 32-bit PC thunk at the start of `bytes` returns the
@@ -173,7 +253,7 @@ impl Decoder {
     pub(crate) fn pc_thunk(&self, bytes: &[u8]) -> Option<u32> {
         match self {
             Self::X86 { bitness: 32, .. } => crate::x86::pc_thunk(bytes),
-            Self::X86 { .. } | Self::Arm64(_) => None,
+            _ => None,
         }
     }
 
@@ -184,6 +264,8 @@ impl Decoder {
             Self::X86 { bitness: 64, .. } => crate::x86::argument(n),
             Self::X86 { .. } => None,
             Self::Arm64(_) => u32::try_from(n).ok().filter(|&n| n < 8),
+            // No decoder below tracks the registers arguments travel in.
+            _ => None,
         }
     }
 
@@ -193,6 +275,8 @@ impl Decoder {
         match self {
             Self::X86 { bitness, .. } => crate::x86::starts_frame(*bitness, bytes),
             Self::Arm64(_) => crate::arm64::starts_frame(bytes),
+            Self::Arm { thumb, .. } => crate::arm::starts_frame(*thumb, bytes),
+            _ => false,
         }
     }
 }
@@ -201,6 +285,11 @@ impl Decoder {
 pub(crate) struct Memory<'a> {
     /// Sorted by address.
     segments: Vec<Span<'a>>,
+    /// Words are stored most significant byte first.
+    big: bool,
+    /// Cleared from a code address before it is looked up: bit 0, which
+    /// marks Thumb code, on 32-bit Arm.
+    code_mask: u64,
 }
 
 /// One segment's bytes, borrowed from the image.
@@ -223,7 +312,21 @@ impl<'a> Memory<'a> {
             })
             .collect();
         segments.sort_by_key(|segment| segment.addr);
-        Self { segments }
+        Self {
+            segments,
+            big: false,
+            code_mask: !0,
+        }
+    }
+
+    /// The segments, read as `arch` reads them: in its byte order, and on
+    /// 32-bit Arm with a Thumb address's bit 0 cleared to find its code.
+    pub(crate) fn for_arch(segments: &'a [Segment<'_>], arch: Arch) -> Self {
+        Self {
+            big: arch.big_endian(),
+            code_mask: if arch == Arch::Arm { !1 } else { !0 },
+            ..Self::new(segments)
+        }
     }
 
     /// The bytes from `addr` to the end of its segment, and whether they are
@@ -247,7 +350,7 @@ impl<'a> Memory<'a> {
     /// The code from `addr` to the end of its segment, when `addr` is in
     /// executable code.
     pub(crate) fn code(&self, addr: u64) -> Option<&'a [u8]> {
-        self.at(addr)
+        self.at(addr & self.code_mask)
             .and_then(|(bytes, executable)| executable.then_some(bytes))
     }
 
@@ -255,17 +358,22 @@ impl<'a> Memory<'a> {
         self.code(addr).is_some()
     }
 
-    /// The little-endian unsigned integer of `size` bytes, at most eight,
-    /// stored at `addr`.
+    /// The unsigned integer of `size` bytes, at most eight, stored at
+    /// `addr` in the image's byte order.
     pub(crate) fn read(&self, addr: u64, size: u8) -> Option<u64> {
         let (bytes, _) = self.at(addr)?;
         let bytes = bytes.get(..usize::from(size)).filter(|_| size <= 8)?;
-        Some(
-            bytes
-                .iter()
-                .rev()
-                .fold(0, |value, &byte| value << 8 | u64::from(byte)),
-        )
+        let word = |value: u64, &byte: &u8| value << 8 | u64::from(byte);
+        Some(if self.big {
+            bytes.iter().fold(0, word)
+        } else {
+            bytes.iter().rev().fold(0, word)
+        })
+    }
+
+    /// Whether words are stored most significant byte first.
+    pub(crate) fn big_endian(&self) -> bool {
+        self.big
     }
 
     pub(crate) fn code_segments(&self) -> impl Iterator<Item = &Span<'a>> {
