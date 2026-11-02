@@ -9,7 +9,7 @@
 //! through. The decoder also follows the address arithmetic of a PLT stub
 //! (`add ip, pc, #n; add ip, ip, #n; ldr pc, [ip, #n]!`) to its slot.
 
-use crate::decode::{Flow, Insn};
+use crate::decode::{Flow, Insn, Mem, Note};
 
 /// The link register.
 const LR: u32 = 14;
@@ -84,10 +84,38 @@ fn insn(len: u32, flow: Flow, conditional: bool) -> Insn {
             Flow::Return
                 | Flow::Stop
                 | Flow::JumpSlot(_)
+                | Flow::JumpMemory(_)
                 | Flow::JumpRegister(_)
+                | Flow::JumpTable { .. }
                 | Flow::JumpIndirect
         );
     insn
+}
+
+/// What an instruction that continues to the next one tells a jump-table
+/// tracker: `cmp rN, #imm` bounds a case value; anything else is taken to
+/// write every register, so a bound holds only up to the table jump right
+/// after it (or after the branch to the default case between them).
+fn note(compare: Option<(u32, u32)>) -> Note {
+    match compare {
+        Some((reg, imm)) => Note::Compare {
+            reg,
+            imm: u64::from(imm),
+        },
+        None => Note::Clobber(0xffff),
+    }
+}
+
+/// A Thumb-2 modified immediate, from `i:imm3:imm8`.
+fn thumb_immediate(imm12: u32) -> u32 {
+    let imm8 = imm12 & 0xff;
+    match imm12 >> 8 {
+        0 => imm8,
+        1 => imm8 << 16 | imm8,
+        2 => imm8 << 24 | imm8 << 8,
+        3 => imm8.wrapping_mul(0x0101_0101),
+        _ => (0x80 | imm12 & 0x7f).rotate_right(imm12 >> 7),
+    }
 }
 
 fn a32(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
@@ -101,6 +129,7 @@ fn a32(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
     let rn = (word >> 16) & 0xf;
     let load = word & 0x0010_0000 != 0;
     let branch = || wrap(pc.wrapping_add_signed(signed(word, 24) * 4));
+    let rotated = || (word & 0xff).rotate_right(((word >> 8) & 0xf) * 2);
     let flow = if cond == 0xf {
         // BLX (immediate): to Thumb, at a halfword the H bit picks.
         if (word >> 25) & 7 == 5 {
@@ -136,6 +165,28 @@ fn a32(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
             Flow::Return
         } else {
             Flow::JumpIndirect
+        }
+    } else if word & 0x0fff_fff0 == 0x079f_f100 {
+        // LDR pc, [pc, rm, lsl #2]: a table of addresses after the next
+        // instruction (the branch to the default case).
+        Flow::JumpMemory(Mem {
+            base: None,
+            index: Some(word & 0xf),
+            scale: 4,
+            disp: wrap(pc),
+        })
+    } else if word & 0x0fff_fff0 == 0x008f_f100 {
+        // ADD pc, pc, rm, lsl #2: a run of branches there.
+        Flow::JumpTable {
+            mem: Mem {
+                base: None,
+                index: Some(word & 0xf),
+                scale: 1,
+                disp: wrap(pc),
+            },
+            size: 0,
+            base: wrap(pc),
+            shift: 2,
         }
     } else if (word >> 26) & 3 == 1 && load && word & 0x0040_0000 == 0 && rd == PC {
         // LDR pc, [...]
@@ -177,15 +228,13 @@ fn a32(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
         }
     } else {
         // The arithmetic a PLT stub finds its slot with.
-        let rotated = || {
-            let imm = word & 0xff;
-            u64::from(imm.rotate_right(((word >> 8) & 0xf) * 2))
-        };
         if rd == 12 {
             state.ip = if word & 0x0fff_f000 == 0x028f_c000 {
-                Some(wrap(pc.wrapping_add(rotated())))
+                Some(wrap(pc.wrapping_add(u64::from(rotated()))))
             } else if word & 0x0fff_f000 == 0x028c_c000 {
-                state.ip.map(|ip| wrap(ip.wrapping_add(rotated())))
+                state
+                    .ip
+                    .map(|ip| wrap(ip.wrapping_add(u64::from(rotated()))))
             } else {
                 None
             };
@@ -196,6 +245,11 @@ fn a32(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
     // NOP, `mov r0, r0`, and zeros (`andeq r0, r0, r0`), which Go places
     // after calls that never return.
     decoded.pad = word == 0xe320_f000 || word == 0xe1a0_0000 || word == 0;
+    if flow == Flow::Next && !decoded.pad {
+        // CMP rn, #imm
+        let compare = word & 0xfff0_f000 == 0xe350_0000;
+        decoded.note = note(compare.then(|| (rn, rotated())));
+    }
     decoded
 }
 
@@ -218,8 +272,16 @@ fn thumb(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
         let Some(second) = half(2) else {
             return Insn::new(2, Flow::Invalid);
         };
-        let flow = t32(u32::from(first), u32::from(second), pc, conditional);
-        return insn(4, flow, conditional);
+        let (first, second) = (u32::from(first), u32::from(second));
+        let flow = t32(first, second, pc, conditional);
+        let mut decoded = insn(4, flow, conditional);
+        if flow == Flow::Next {
+            // CMP.W rn, #imm
+            let compare = first & 0xfbf0 == 0xf1b0 && second & 0x8f00 == 0x0f00;
+            let imm12 = (first >> 10 & 1) << 11 | (second >> 12 & 7) << 8 | second & 0xff;
+            decoded.note = note(compare.then(|| (first & 0xf, thumb_immediate(imm12))));
+        }
+        return decoded;
     }
     let word = u32::from(first);
     let flow = if word & 0xf000 == 0xd000 {
@@ -280,6 +342,12 @@ fn thumb(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
     let mut decoded = insn(2, flow, conditional);
     // NOP and the other hints, `mov r8, r8`
     decoded.pad = word == 0xbf00 || word == 0x46c0;
+    let it = word & 0xff00 == 0xbf00;
+    if flow == Flow::Next && !decoded.pad && !it {
+        // CMP rn, #imm8
+        let compare = word & 0xf800 == 0x2800;
+        decoded.note = note(compare.then_some(((word >> 8) & 7, word & 0xff)));
+    }
     decoded
 }
 
@@ -323,11 +391,24 @@ fn t32(first: u32, second: u32, pc: u64, conditional: bool) -> Flow {
             }
         };
     }
-    // TBB, TBH: a table of branch offsets.
-    if first & 0xfff0 == 0xe8d0 && second & 0xffe0 == 0xf000 {
-        return Flow::JumpIndirect;
-    }
     let rn = first & 0xf;
+    // TBB, TBH: a table of halfword counts forward from the PC, at the
+    // PC's own address when `rn` is the PC.
+    if first & 0xfff0 == 0xe8d0 && second & 0xffe0 == 0xf000 {
+        let size = if second & 0x10 == 0 { 1 } else { 2 };
+        let pcrel = rn == PC;
+        return Flow::JumpTable {
+            mem: Mem {
+                base: (!pcrel).then_some(rn),
+                index: Some(second & 0xf),
+                scale: size,
+                disp: if pcrel { wrap(pc) } else { 0 },
+            },
+            size,
+            base: wrap(pc) | 1,
+            shift: 1,
+        };
+    }
     // LDM.W / POP.W with the PC in its list.
     if (first & 0xffd0 == 0xe890 || first & 0xffd0 == 0xe910) && second & 0x8000 != 0 {
         return if rn == SP {
@@ -415,7 +496,12 @@ mod tests {
                 Flow::Return,
                 Flow::Return,
                 Flow::Call(0x1_0029),
-                Flow::JumpIndirect,
+                Flow::JumpMemory(Mem {
+                    base: None,
+                    index: Some(0),
+                    scale: 4,
+                    disp: 0x1_002c,
+                }),
             ]
         );
         assert!(!insns[3].falls && insns[4].falls && insns[9].falls);
@@ -487,11 +573,47 @@ mod tests {
             [
                 Flow::Jump(0x2005),
                 Flow::Branch(0x2009),
-                Flow::JumpIndirect,
+                Flow::JumpTable {
+                    mem: Mem {
+                        base: Some(0),
+                        index: Some(1),
+                        scale: 1,
+                        disp: 0,
+                    },
+                    size: 1,
+                    base: 0x200d,
+                    shift: 1,
+                },
                 Flow::Return,
                 Flow::JumpSlot(0x2018),
             ]
         );
+    }
+
+    #[test]
+    fn compares_bound_tables() {
+        let compare = |reg, imm| Note::Compare { reg, imm };
+        // cmp r3, #200; add r0, r0, #1
+        let insns = a(&[0xe353_00c8, 0xe280_0001], 0);
+        assert_eq!(insns[0].note, compare(3, 200));
+        assert_eq!(insns[1].note, Note::Clobber(0xffff));
+        // cmp r3, #9; cmp.w r4, #300; it hi; nop
+        let insns = t(&[0x2b09, 0xf5b4, 0x7f96, 0xbf88, 0xbf00], 0);
+        assert_eq!(insns[0].note, compare(3, 9));
+        assert_eq!(insns[1].note, compare(4, 300));
+        assert_eq!((insns[2].note, insns[3].note), (Note::None, Note::None));
+        // addls pc, pc, r3, lsl #2: the branches after the default's.
+        let insns = a(&[0x908f_f103], 0x1000);
+        assert!(insns[0].falls);
+        assert!(matches!(
+            insns[0].flow,
+            Flow::JumpTable {
+                size: 0,
+                base: 0x1008,
+                shift: 2,
+                ..
+            }
+        ));
     }
 
     #[test]

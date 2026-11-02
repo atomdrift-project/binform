@@ -466,6 +466,66 @@ fn thumb_and_a32_interwork() {
     assert_eq!((main.blocks, main.size), (2, 0x12));
 }
 
+/// GCC's Thumb-2 switch: `tbb` reads a byte of halfwords to skip from the
+/// table that follows it, after a `cmp` and a branch to the default case.
+#[test]
+fn thumb_tbb_table() {
+    let code = halves(&[
+        0x2b02, // 0x8000: cmp r3, #2
+        0xd805, // 0x8002: bhi 0x8010
+        0xe8df, 0xf003, // 0x8004: tbb [pc, r3]
+        0x0302, 0x0004, // 0x8008: the table: 2, 3, 4 halfwords on
+        0x4770, // 0x800c: bx lr
+        0x4770, // 0x800e: bx lr
+        0x4770, // 0x8010: bx lr
+    ]);
+    let image = image(
+        Arch::Arm,
+        vec![segment(0x8000, &code, true)],
+        vec![entry(0x8001)],
+    );
+    let recovery = funktion::recover(&image);
+    let switch = function(&recovery.functions, 0x8001);
+    assert_eq!(cases(switch), [0x800d, 0x800f, 0x8011]);
+    assert_eq!(switch.blocks, 5);
+    assert_eq!(recovery.unresolved, 0);
+}
+
+/// GCC's A32 switches: `addls pc, pc, rN, lsl #2` into a run of branches,
+/// and `ldrls pc, [pc, rN, lsl #2]` from a table of addresses, each after a
+/// `cmp` and followed by the branch to the default case.
+#[test]
+fn a32_tables() {
+    let code = words(&[
+        0xe353_0002, // 0x10000: cmp r3, #2
+        0x908f_f103, // 0x10004: addls pc, pc, r3, lsl #2
+        0xea00_0002, // 0x10008: b 0x10018
+        0xe12f_ff1e, // 0x1000c: bx lr
+        0xe12f_ff1e, // 0x10010: bx lr
+        0xe12f_ff1e, // 0x10014: bx lr
+        0xe12f_ff1e, // 0x10018: bx lr
+        0xe353_0001, // 0x1001c: cmp r3, #1
+        0x979f_f103, // 0x10020: ldrls pc, [pc, r3, lsl #2]
+        0xea00_0001, // 0x10024: b 0x10030
+        0x0001_0034, // 0x10028: the table
+        0x0001_0038, // 0x1002c
+        0xe12f_ff1e, // 0x10030: bx lr
+        0xe12f_ff1e, // 0x10034: bx lr
+        0xe12f_ff1e, // 0x10038: bx lr
+    ]);
+    let image = image(
+        Arch::Arm,
+        vec![segment(0x1_0000, &code, true)],
+        vec![entry(0x1_0000), entry(0x1_001c)],
+    );
+    let recovery = funktion::recover(&image);
+    let branches = function(&recovery.functions, 0x1_0000);
+    assert_eq!(cases(branches), [0x1_000c, 0x1_0010, 0x1_0014]);
+    let addresses = function(&recovery.functions, 0x1_001c);
+    assert_eq!(cases(addresses), [0x1_0034, 0x1_0038]);
+    assert_eq!(recovery.unresolved, 0);
+}
+
 /// SPARC: a call and its delay slot are one instruction, so the call
 /// returns past the slot; `ret; restore` and `retl; nop` return.
 #[test]

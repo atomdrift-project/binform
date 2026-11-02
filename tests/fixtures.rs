@@ -534,11 +534,18 @@ fn elf_thumb_c() {
         let (same, shared) = outcome.same_blocks_without_pads();
         assert!(shared > 2600, "only {shared} functions shared with rizin");
         assert!(
-            same * 100 >= shared * 95,
+            same * 100 >= shared * 97,
             "blocks agree on {same} of {shared}"
         );
-        // Rizin's others are case code of `tbb`/`tbh` tables funktion does
-        // not read yet, and literal pools it decodes.
+        // `tbb`/`tbh` tables, bounded by the `cmp` before them.
+        let cases: usize = outcome
+            .recovery
+            .functions
+            .iter()
+            .map(|f| f.refs.iter().filter(|r| r.kind == RefKind::Case).count())
+            .sum();
+        assert!(cases > 1800, "only {cases} cases");
+        // Rizin's others are mostly literal pools it decodes as code.
         let missed = outcome.missed();
         assert!(missed.len() <= 25, "missed {}: {missed:x?}", missed.len());
     });

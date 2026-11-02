@@ -520,7 +520,7 @@ impl Work<'_> {
                                 break;
                             }
                         }
-                        Flow::JumpMemory(_) | Flow::JumpRegister(_) => {
+                        Flow::JumpMemory(_) | Flow::JumpRegister(_) | Flow::JumpTable { .. } => {
                             let table = tracker.jump(insn.flow);
                             let targets = table
                                 .map(|table| table.targets(&self.memory, self.table_entries))
@@ -666,7 +666,7 @@ impl Work<'_> {
                     _ if ends.contains(&addr) => (0, true),
                     Flow::Jump(_) => (1, false),
                     Flow::Branch(_) => (2, false),
-                    Flow::JumpMemory(_) | Flow::JumpRegister(_) => (
+                    Flow::JumpMemory(_) | Flow::JumpRegister(_) | Flow::JumpTable { .. } => (
                         cases.get(&addr).copied().unwrap_or(0).saturating_add(falls),
                         true,
                     ),

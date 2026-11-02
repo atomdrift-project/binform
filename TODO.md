@@ -4,10 +4,14 @@
 
 32-bit Arm, MIPS, s390x, SPARC and SuperH decode control flow only. Next:
 
-- **Jump tables:** the new decoders emit no `Note`s, so Thumb `tbb`/`tbh`,
-  the A32 `ldrls pc, [pc, rN, lsl #2]` table, and MIPS/s390x `jr`/`br`
-  through a loaded table stay unresolved. In GCC Thumb-2 sqlite
-  (`libe_sqlite3-linux-arm.so`) they hold coverage to about 80%.
+- **Jump tables:** Arm reads `tbb`/`tbh`, `addls pc, pc, rN, lsl #2` and
+  `ldrls pc, [pc, rN, lsl #2]` when the `cmp` that bounds them sits right
+  before (every other Arm instruction forgets all registers). MIPS
+  (`sltiu; lui/addiu; sll; addu; lw; jr`), s390x (`clgfi; sllg; lgf; agr;
+  br`) and SPARC tables are still unresolved; no fixture has them yet (Go
+  emits tables only on amd64 and arm64), so they need a C build first.
+  Thumb-1's `add pc, rm` tables (GCC's `__gnu_thumb1_case_*` helpers) are
+  not read either.
 - **Objects:** `relocate` links only x86, x86-64 and A64. Arm (`CALL`,
   `JUMP24`, `THM_CALL`), MIPS (`26`), s390x (`PLT32DBL`) and SPARC
   (`WDISP30`) objects are laid out but their calls not linked.

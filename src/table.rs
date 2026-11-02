@@ -262,6 +262,17 @@ impl Tracker {
     pub(crate) fn jump(&self, flow: Flow) -> Option<Table> {
         match flow {
             Flow::JumpMemory(mem) => self.load(mem, self.width, false),
+            Flow::JumpTable {
+                mem,
+                size,
+                base,
+                shift,
+            } => Some(Table {
+                size,
+                base: Some(base),
+                shift,
+                ..self.load(mem, size.max(1), false)?
+            }),
             Flow::JumpRegister(reg) => match self.get(reg)? {
                 Value::Entry(table) if table.base.is_some() || table.size == self.width => {
                     Some(table)
@@ -318,7 +329,10 @@ impl Table {
                 let at = self
                     .addr
                     .wrapping_add(slot.wrapping_mul(u64::from(self.scale)));
-                let entry = memory.read(at, self.size)?;
+                let entry = match self.size {
+                    0 => slot,
+                    size => memory.read(at, size)?,
+                };
                 let entry = if self.signed {
                     sign_extend(entry, self.size)
                 } else {

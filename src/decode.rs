@@ -57,6 +57,16 @@ pub(crate) enum Flow {
     /// Jump to the address in a register: a jump table, when the
     /// instructions before it say so.
     JumpRegister(u32),
+    /// Jump to `base + (entry << shift)`, `entry` the unsigned `size`-byte
+    /// value at `mem`: Thumb's `tbb` and `tbh`. A `size` of 0 makes the
+    /// entry the case value itself, for a run of branch instructions that
+    /// `add pc, pc, rN, lsl #2` indexes.
+    JumpTable {
+        mem: Mem,
+        size: u8,
+        base: u64,
+        shift: u8,
+    },
     /// Jump somewhere that cannot be followed.
     JumpIndirect,
     /// Return.
