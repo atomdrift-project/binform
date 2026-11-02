@@ -1,0 +1,58 @@
+[package]
+name = "funktion"
+version = "0.1.0"
+edition = "2024"
+# Build on any rustc within ~2 releases of current stable; edition 2024 implies
+# the MSRV-aware resolver, so this also caps dependency versions.
+rust-version = "1.94"
+authors = ["The Atomdrift Project"]
+description = "Function boundaries, basic blocks, complexity and call edges recovered from machine code"
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/atomdrift-project/funktion"
+keywords = ["binary", "disassembly", "cfg", "reverse-engineering", "malware"]
+categories = ["development-tools", "parser-implementations"]
+exclude = ["testdata/", "tools/"]
+
+[workspace]
+members = [".", "tools"]
+
+[features]
+default = ["object"]
+# Build an `Image` from ELF, PE and Mach-O bytes.
+object = ["dep:goblin", "dep:gimli"]
+
+[dependencies]
+iced-x86 = { version = "1.22", default-features = false, features = ["decoder", "std", "instr_info"] }
+goblin = { version = "0.10", optional = true, default-features = false, features = ["std", "pe32", "pe64", "elf32", "elf64", "endian_fd", "mach32", "mach64"] }
+gimli = { version = "0.32", optional = true, default-features = false, features = ["read", "std"] }
+
+[dev-dependencies]
+zstd = "0.13"
+serde_json = "1"
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+unused_must_use = "deny"
+rust_2018_idioms = { level = "deny", priority = -1 }
+unreachable_pub = "warn"
+
+[lints.clippy]
+correctness = { level = "deny", priority = -1 }
+suspicious = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+# Input is hostile: no panicking accessors or arithmetic in library code.
+indexing_slicing = "warn"
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+unreachable = "warn"
+cast_possible_truncation = "warn"
+
+[profile.test]
+opt-level = 2

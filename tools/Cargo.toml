@@ -1,0 +1,11 @@
+[package]
+name = "funktion-tools"
+version = "0.0.0"
+edition = "2024"
+publish = false
+description = "Command-line tools for funktion: dump a function table, compare with rizin"
+
+[dependencies]
+funktion = { path = ".." }
+serde_json = "1"
+

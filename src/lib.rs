@@ -1,0 +1,321 @@
+//! Recover functions from machine code: where each one starts and ends, its
+//! basic blocks, its cyclomatic complexity, and the calls and jumps it makes.
+//!
+//! The input is an [`Image`]: the mapped bytes of a binary, the addresses
+//! already known to start functions (entry points, symbols, exports, unwind
+//! tables), and the import slots calls go through. [`object::image`] builds
+//! one from ELF, PE and Mach-O bytes; callers with their own parser can fill
+//! one in directly.
+//!
+//! ```no_run
+//! # fn main() -> Result<(), funktion::object::Error> {
+//! let bytes = std::fs::read("a.out").unwrap_or_default();
+//! let image = funktion::object::image(&bytes)?;
+//! for function in funktion::recover(&image).functions {
+//!     println!("{:#x} {} blocks, complexity {}", function.entry, function.blocks, function.complexity);
+//! }
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Method
+//!
+//! Functions are found the way a recursive-descent disassembler finds them:
+//! every known start is analysed, every direct call target inside executable
+//! code becomes a function, and a linear sweep of the executable code adds the
+//! targets of calls no analysed path reached. Each function is explored along
+//! its direct jumps and branches; a jump to another function's start is a tail
+//! call, not part of the function. Basic blocks end at branches, returns,
+//! traps and calls that never return, and are split where a branch lands
+//! inside them. Complexity is McCabe's `E - N + 2P` over that graph, with `P`
+//! the blocks that leave it (returns, traps, indirect jumps).
+//!
+//! Recovery is a pure function of its input. It reads nothing but the image,
+//! never panics, and bounds its work by [`Limits`], so hostile input costs at
+//! most the configured budget.
+
+mod arm64;
+mod cfg;
+pub mod cil;
+mod decode;
+#[cfg(feature = "object")]
+pub mod object;
+mod table;
+mod x86;
+
+/// An instruction set funktion decodes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Arch {
+    /// 32-bit x86.
+    X86,
+    /// 64-bit x86.
+    X86_64,
+    /// 64-bit Arm (A64).
+    Arm64,
+}
+
+/// Bytes mapped at a virtual address.
+#[derive(Clone, Copy, Debug)]
+pub struct Segment<'a> {
+    /// Virtual address of the first byte.
+    pub addr: u64,
+    /// The mapped bytes.
+    pub bytes: &'a [u8],
+    /// Whether the bytes are code. Only code is decoded; other segments are
+    /// read for jump tables.
+    pub executable: bool,
+}
+
+/// Why an address is believed to start a function.
+#[derive(Clone, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum Origin {
+    /// The program entry point.
+    Entry,
+    /// The `n`th initializer the loader runs (ELF `DT_INIT` and init arrays).
+    Init(u32),
+    /// The `n`th finalizer (ELF `DT_FINI` and fini arrays).
+    Fini(u32),
+    /// The `n`th TLS callback (PE).
+    Tls(u32),
+    /// A symbol-table entry naming a function.
+    Symbol(String),
+    /// An exported function.
+    Export(String),
+    /// The start of a range in an unwind table (ELF `.eh_frame`, PE
+    /// `.pdata`): exact compiler output, present in stripped binaries.
+    Unwind,
+    /// Mach-O `LC_FUNCTION_STARTS`.
+    FunctionStarts,
+}
+
+/// An address believed to start a function, and why.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Seed {
+    /// The function's first instruction.
+    pub addr: u64,
+    /// Where the address came from.
+    pub origin: Origin,
+}
+
+/// A pointer slot the loader fills with an imported function's address: a PE
+/// import-address-table entry, an ELF GOT entry, a Mach-O symbol pointer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Import {
+    /// Address of the slot.
+    pub slot: u64,
+    /// The imported symbol's name, as the binary spells it.
+    pub name: String,
+}
+
+/// A binary to recover functions from.
+#[derive(Clone, Debug)]
+pub struct Image<'a> {
+    /// The instruction set of the code segments.
+    pub arch: Arch,
+    /// Every mapped segment, code and data.
+    pub segments: Vec<Segment<'a>>,
+    /// Addresses known to start functions. Duplicates are harmless.
+    pub seeds: Vec<Seed>,
+    /// Import slots. Calls through them, and through stubs that only jump
+    /// through them, are resolved to the import; calls to imports that never
+    /// return end their basic block.
+    pub imports: Vec<Import>,
+    /// The value 32-bit x86 position-independent PLT stubs address the GOT
+    /// through (`jmp [ebx + disp]`), when the binary has one.
+    pub got: Option<u64>,
+}
+
+/// Bounds on the work [`recover_with`] does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// Most functions recovered.
+    pub functions: usize,
+    /// Most instructions decoded, across the sweep and every function.
+    pub instructions: usize,
+    /// Most entries read from one jump table.
+    pub table_entries: usize,
+}
+
+impl Default for Limits {
+    fn default() -> Self {
+        Self {
+            functions: 1 << 20,
+            instructions: 1 << 27,
+            table_entries: 512,
+        }
+    }
+}
+
+/// A recovered function.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Function {
+    /// Address of the first instruction.
+    pub entry: u64,
+    /// Bytes from the lowest block start to the highest block end. Blocks
+    /// need not be contiguous, so this can exceed the bytes they cover.
+    pub size: u64,
+    /// Basic blocks.
+    pub blocks: u32,
+    /// Control-flow edges between blocks, including edges that leave the
+    /// function (tail calls) and one per jump-table entry.
+    pub edges: u32,
+    /// McCabe complexity, `edges - blocks + 2 * exits`.
+    pub complexity: u32,
+    /// Calls and jumps the function makes, in address order.
+    pub refs: Vec<Ref>,
+    /// The import slot this function only jumps through: a PLT entry, a
+    /// Mach-O stub, an import thunk.
+    pub thunk: Option<u64>,
+    /// Every way its entry was found.
+    pub found: Found,
+}
+
+/// A set of ways a function's entry was found. Several often agree; a
+/// function found one way only is where tools tend to differ.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub struct Found(u16);
+
+impl Found {
+    /// The program entry point.
+    pub const ENTRY: Self = Self(1);
+    /// An initializer, finalizer or TLS callback the loader runs.
+    pub const LOADER: Self = Self(1 << 1);
+    /// A symbol-table entry.
+    pub const SYMBOL: Self = Self(1 << 2);
+    /// An export.
+    pub const EXPORT: Self = Self(1 << 3);
+    /// An unwind-table range (ELF `.eh_frame`, PE `.pdata`).
+    pub const UNWIND: Self = Self(1 << 4);
+    /// Mach-O `LC_FUNCTION_STARTS`.
+    pub const FUNCTION_STARTS: Self = Self(1 << 5);
+    /// A direct call from a recovered function.
+    pub const CALL: Self = Self(1 << 6);
+    /// A direct call that a linear sweep of the code decoded. Without
+    /// [`Found::CALL`], no recovered function makes the call, and the bytes
+    /// may not be code at all.
+    pub const SWEEP: Self = Self(1 << 7);
+    /// A direct jump to code that sets up a stack frame, as only a
+    /// function's first instructions do: a tail call.
+    pub const TAIL_CALL: Self = Self(1 << 8);
+
+    const NAMES: [(Self, &'static str); 9] = [
+        (Self::ENTRY, "ENTRY"),
+        (Self::LOADER, "LOADER"),
+        (Self::SYMBOL, "SYMBOL"),
+        (Self::EXPORT, "EXPORT"),
+        (Self::UNWIND, "UNWIND"),
+        (Self::FUNCTION_STARTS, "FUNCTION_STARTS"),
+        (Self::CALL, "CALL"),
+        (Self::SWEEP, "SWEEP"),
+        (Self::TAIL_CALL, "TAIL_CALL"),
+    ];
+
+    /// Whether every way in `other` is in `self`.
+    #[must_use]
+    pub const fn contains(self, other: Self) -> bool {
+        self.0 & other.0 == other.0
+    }
+
+    /// Whether the set is empty.
+    #[must_use]
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    /// The names of the ways in the set, as the constants spell them.
+    pub fn names(self) -> impl Iterator<Item = &'static str> {
+        Self::NAMES
+            .into_iter()
+            .filter(move |&(way, _)| self.contains(way))
+            .map(|(_, name)| name)
+    }
+}
+
+impl core::ops::BitOr for Found {
+    type Output = Self;
+    fn bitor(self, other: Self) -> Self {
+        Self(self.0 | other.0)
+    }
+}
+
+impl core::ops::BitOrAssign for Found {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+}
+
+impl core::fmt::Debug for Found {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut names = self.names();
+        match names.next() {
+            None => f.write_str("Found(empty)"),
+            Some(first) => {
+                f.write_str(first)?;
+                names.try_for_each(|name| write!(f, " | {name}"))
+            }
+        }
+    }
+}
+
+impl From<&Origin> for Found {
+    fn from(origin: &Origin) -> Self {
+        match origin {
+            Origin::Entry => Self::ENTRY,
+            Origin::Init(_) | Origin::Fini(_) | Origin::Tls(_) => Self::LOADER,
+            Origin::Symbol(_) => Self::SYMBOL,
+            Origin::Export(_) => Self::EXPORT,
+            Origin::Unwind => Self::UNWIND,
+            Origin::FunctionStarts => Self::FUNCTION_STARTS,
+        }
+    }
+}
+
+/// A call or jump instruction and where it goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Ref {
+    /// Address of the instruction.
+    pub from: u64,
+    /// The target, or for a transfer through a fixed memory slot (an import
+    /// table entry) the address of that slot.
+    pub to: u64,
+    /// What kind of transfer it is.
+    pub kind: RefKind,
+}
+
+/// What a [`Ref`] does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum RefKind {
+    /// A call.
+    Call,
+    /// An unconditional jump.
+    Jump,
+    /// A conditional branch.
+    Branch,
+    /// One entry of a jump table, from the jump that reads it.
+    Case,
+}
+
+/// The result of [`recover`].
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Recovery {
+    /// Functions in entry-address order.
+    pub functions: Vec<Function>,
+    /// Bytes of executable code that lie in some function's instructions.
+    pub covered: u64,
+    /// Whether a [`Limits`] bound stopped recovery early.
+    pub truncated: bool,
+}
+
+/// Recover the functions of `image` under the default [`Limits`].
+#[must_use]
+pub fn recover(image: &Image<'_>) -> Recovery {
+    recover_with(image, &Limits::default())
+}
+
+/// Recover the functions of `image`, doing no more work than `limits` allow.
+#[must_use]
+pub fn recover_with(image: &Image<'_>, limits: &Limits) -> Recovery {
+    cfg::recover(image, limits)
+}

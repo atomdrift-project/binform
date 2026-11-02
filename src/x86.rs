@@ -1,0 +1,347 @@
+//! x86 and x86-64, through `iced-x86`.
+
+use crate::decode::{Flow, Insn, Mem, Note};
+use iced_x86::{
+    Code, Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind, Register,
+};
+
+pub(crate) fn decode(bitness: u32, got: Option<u64>, bytes: &[u8], addr: u64) -> Insn {
+    let instruction = Decoder::with_ip(bitness, bytes, addr, DecoderOptions::NONE).decode();
+    if instruction.is_invalid() {
+        return Insn {
+            len: 1,
+            flow: Flow::Stop,
+            note: Note::None,
+            pad: false,
+        };
+    }
+    let len = u32::try_from(instruction.len()).unwrap_or(1).max(1);
+    let flow = match instruction.flow_control() {
+        FlowControl::Next if instruction.mnemonic() == Mnemonic::Hlt => Flow::Stop,
+        FlowControl::Next => Flow::Next,
+        // A far jump leaves the code segment: nothing to follow.
+        FlowControl::UnconditionalBranch => {
+            near(&instruction).map_or(Flow::JumpIndirect, Flow::Jump)
+        }
+        FlowControl::ConditionalBranch => near(&instruction).map_or(Flow::Next, Flow::Branch),
+        FlowControl::IndirectBranch => slot(&instruction, bitness, got).map_or_else(
+            || match instruction.op0_kind() {
+                OpKind::Memory => Flow::JumpMemory(mem(&instruction, bitness)),
+                OpKind::Register => Flow::JumpRegister(register_id(instruction.op0_register())),
+                _ => Flow::JumpIndirect,
+            },
+            Flow::JumpSlot,
+        ),
+        FlowControl::Return => Flow::Return,
+        // `syscall`, `sysenter` and the virtualization calls come back to the
+        // next instruction.
+        FlowControl::Call => near(&instruction).map_or(Flow::Next, Flow::Call),
+        FlowControl::IndirectCall => {
+            slot(&instruction, bitness, got).map_or(Flow::CallIndirect, Flow::CallSlot)
+        }
+        FlowControl::Interrupt => match instruction.code() {
+            Code::Int3 | Code::Int1 => Flow::Stop,
+            _ => Flow::Next,
+        },
+        FlowControl::XbeginXabortXend => Flow::Next,
+        FlowControl::Exception => Flow::Stop,
+    };
+    // A branch reads its operand; only straight-line code changes registers
+    // a jump table depends on.
+    let note = if instruction.flow_control() == FlowControl::Next {
+        note(&instruction, bitness)
+    } else {
+        Note::None
+    };
+    let pad = matches!(
+        instruction.mnemonic(),
+        Mnemonic::Endbr32 | Mnemonic::Endbr64 | Mnemonic::Nop
+    );
+    Insn {
+        len,
+        flow,
+        note,
+        pad,
+    }
+}
+
+/// `push ebp; mov ebp, esp` and its 64-bit form, after the optional
+/// hot-patch `mov edi, edi` or an `endbr`.
+pub(crate) fn starts_frame(bitness: u32, bytes: &[u8]) -> bool {
+    let bytes = [
+        &[0xf3, 0x0f, 0x1e, 0xfa][..],
+        &[0xf3, 0x0f, 0x1e, 0xfb],
+        &[0x8b, 0xff],
+    ]
+    .into_iter()
+    .find_map(|prefix| bytes.strip_prefix(prefix))
+    .unwrap_or(bytes);
+    let frame: &[&[u8]] = if bitness == 64 {
+        &[&[0x55, 0x48, 0x89, 0xe5], &[0x55, 0x48, 0x8b, 0xec]]
+    } else {
+        &[&[0x55, 0x89, 0xe5], &[0x55, 0x8b, 0xec]]
+    };
+    frame.iter().any(|frame| bytes.starts_with(frame))
+}
+
+fn near(instruction: &Instruction) -> Option<u64> {
+    matches!(
+        instruction.op0_kind(),
+        OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
+    )
+    .then(|| instruction.near_branch_target())
+}
+
+/// What the instruction does to its first operand, when that is a register.
+/// Implicit writes (`mul`, `cpuid`, string instructions) go unnoticed; none
+/// sits between a jump-table bound and its jump.
+fn note(instruction: &Instruction, bitness: u32) -> Note {
+    if instruction.op_count() == 0 || instruction.op0_kind() != OpKind::Register {
+        return Note::None;
+    }
+    let reg = register_id(instruction.op0_register());
+    let source = instruction.op1_kind();
+    match instruction.mnemonic() {
+        Mnemonic::Cmp if is_immediate(source) => Note::Compare {
+            reg,
+            imm: instruction.immediate(1),
+        },
+        // Read their first operand without writing it.
+        Mnemonic::Cmp | Mnemonic::Test | Mnemonic::Bt | Mnemonic::Push => Note::None,
+        Mnemonic::Lea => match mem(instruction, bitness) {
+            Mem {
+                base: None,
+                index: None,
+                disp,
+                ..
+            } => Note::Address { reg, addr: disp },
+            _ => Note::Write(reg),
+        },
+        Mnemonic::Mov | Mnemonic::Movsxd if source == OpKind::Register => Note::Copy {
+            reg,
+            src: register_id(instruction.op1_register()),
+        },
+        Mnemonic::Mov | Mnemonic::Movzx | Mnemonic::Movsx | Mnemonic::Movsxd
+            if source == OpKind::Memory =>
+        {
+            match u8::try_from(instruction.memory_size().size()) {
+                Ok(size) => Note::Load {
+                    reg,
+                    mem: mem(instruction, bitness),
+                    size,
+                    signed: matches!(instruction.mnemonic(), Mnemonic::Movsx | Mnemonic::Movsxd),
+                },
+                Err(_) => Note::Write(reg),
+            }
+        }
+        Mnemonic::Add if source == OpKind::Register => Note::Add {
+            reg,
+            src: register_id(instruction.op1_register()),
+        },
+        _ => Note::Write(reg),
+    }
+}
+
+fn is_immediate(kind: OpKind) -> bool {
+    matches!(
+        kind,
+        OpKind::Immediate8
+            | OpKind::Immediate8to16
+            | OpKind::Immediate8to32
+            | OpKind::Immediate8to64
+            | OpKind::Immediate16
+            | OpKind::Immediate32
+            | OpKind::Immediate32to64
+    )
+}
+
+/// The instruction's memory operand. PC-relative addresses are resolved.
+fn mem(instruction: &Instruction, bitness: u32) -> Mem {
+    if instruction.is_ip_rel_memory_operand() {
+        return Mem {
+            base: None,
+            index: None,
+            scale: 1,
+            disp: instruction.ip_rel_memory_address(),
+        };
+    }
+    let id = |register: Register| (register != Register::None).then(|| register_id(register));
+    Mem {
+        base: id(instruction.memory_base()),
+        index: id(instruction.memory_index()),
+        scale: u8::try_from(instruction.memory_index_scale()).unwrap_or(0),
+        disp: displacement(instruction, bitness),
+    }
+}
+
+/// The fixed address a memory-indirect branch loads its target from:
+/// `[abs]`, `[rip + disp]`, or in 32-bit PIC code `[ebx + disp]` with `ebx`
+/// holding the GOT.
+fn slot(instruction: &Instruction, bitness: u32, got: Option<u64>) -> Option<u64> {
+    if instruction.op0_kind() != OpKind::Memory {
+        return None;
+    }
+    if instruction.is_ip_rel_memory_operand() {
+        return Some(instruction.ip_rel_memory_address());
+    }
+    match (instruction.memory_base(), instruction.memory_index()) {
+        (Register::None, Register::None) => Some(displacement(instruction, bitness)),
+        (Register::EBX, Register::None) if bitness == 32 => got.map(|got| {
+            let got = u32::try_from(got).unwrap_or(u32::MAX);
+            u64::from(got.wrapping_add(instruction.memory_displacement32()))
+        }),
+        _ => None,
+    }
+}
+
+fn displacement(instruction: &Instruction, bitness: u32) -> u64 {
+    if bitness == 64 {
+        instruction.memory_displacement64()
+    } else {
+        u64::from(instruction.memory_displacement32())
+    }
+}
+
+/// One id per architectural register, whatever width names it: `eax` and
+/// `rax` are the same register.
+fn register_id(register: Register) -> u32 {
+    register.full_register() as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn one(bitness: u32, bytes: &[u8], addr: u64) -> Insn {
+        decode(bitness, Some(0x5000), bytes, addr)
+    }
+
+    #[test]
+    fn control_flow() {
+        let at = 0x1000;
+        assert_eq!(one(64, &[0xe8, 0x0b, 0, 0, 0], at).flow, Flow::Call(0x1010));
+        assert_eq!(one(64, &[0xeb, 0xfe], at).flow, Flow::Jump(0x1000));
+        assert_eq!(one(64, &[0x74, 0x02], at).flow, Flow::Branch(0x1004));
+        assert_eq!(one(64, &[0xc3], at).flow, Flow::Return);
+        assert_eq!(one(64, &[0xcc], at).flow, Flow::Stop);
+        assert_eq!(one(64, &[0xf4], at).flow, Flow::Stop);
+        assert_eq!(one(64, &[0x0f, 0x0b], at).flow, Flow::Stop); // ud2
+        assert_eq!(one(64, &[0x0f, 0x05], at).flow, Flow::Next); // syscall
+        assert_eq!(one(64, &[0xff, 0xd0], at).flow, Flow::CallIndirect); // call rax
+        assert_eq!(
+            one(64, &[0xff, 0xe0], at).flow,
+            Flow::JumpRegister(register_id(Register::RAX))
+        ); // jmp rax
+        assert_eq!(one(64, &[0x48, 0x89, 0xc8], at).flow, Flow::Next); // mov rax, rcx
+        assert_eq!(one(64, &[0x06], at).flow, Flow::Stop); // invalid in 64-bit mode
+    }
+
+    #[test]
+    fn slots() {
+        // call [rip + 0x10] at 0x1000, 6 bytes long.
+        assert_eq!(
+            one(64, &[0xff, 0x15, 0x10, 0, 0, 0], 0x1000).flow,
+            Flow::CallSlot(0x1016)
+        );
+        // jmp [0x402000]
+        assert_eq!(
+            one(32, &[0xff, 0x25, 0x00, 0x20, 0x40, 0x00], 0x1000).flow,
+            Flow::JumpSlot(0x40_2000)
+        );
+        // jmp [ebx + 0xc], with the GOT at 0x5000.
+        assert_eq!(
+            one(32, &[0xff, 0xa3, 0x0c, 0, 0, 0], 0x1000).flow,
+            Flow::JumpSlot(0x500c)
+        );
+    }
+
+    #[test]
+    fn tables_and_bounds() {
+        let id = register_id;
+        let (eax, ecx, r10) = (id(Register::EAX), id(Register::ECX), id(Register::R10));
+        let mem = |base, index, scale, disp| Mem {
+            base,
+            index,
+            scale,
+            disp,
+        };
+        // jmp [eax * 4 + 0x401000]
+        assert_eq!(
+            one(32, &[0xff, 0x24, 0x85, 0x00, 0x10, 0x40, 0x00], 0x1000).flow,
+            Flow::JumpMemory(mem(None, Some(eax), 4, 0x40_1000))
+        );
+        // cmp eax, 5
+        assert_eq!(
+            one(32, &[0x83, 0xf8, 0x05], 0x1000).note,
+            Note::Compare { reg: eax, imm: 5 }
+        );
+        // movzx eax, byte [eax + 0x401200]
+        assert_eq!(
+            one(32, &[0x0f, 0xb6, 0x80, 0x00, 0x12, 0x40, 0x00], 0x1000).note,
+            Note::Load {
+                reg: eax,
+                mem: mem(Some(eax), None, 1, 0x40_1200),
+                size: 1,
+                signed: false
+            }
+        );
+        // The MSVC x64 sequence, from 0x180042726 of a SQLite DLL.
+        let at = 0x1_8004_2726;
+        // lea r10, [rip - 0x42727d] = the image base
+        assert_eq!(
+            one(64, &[0x4c, 0x8d, 0x15, 0xd3, 0xd8, 0xfb, 0xff], at).note,
+            Note::Address {
+                reg: r10,
+                addr: 0x1_8000_0000
+            }
+        );
+        // mov ecx, dword [r10 + rax*4 + 0x4289c]
+        assert_eq!(
+            one(64, &[0x41, 0x8b, 0x8c, 0x82, 0x9c, 0x28, 0x04, 0x00], at).note,
+            Note::Load {
+                reg: ecx,
+                mem: mem(Some(r10), Some(eax), 4, 0x4_289c),
+                size: 4,
+                signed: false
+            }
+        );
+        // add rcx, r10; jmp rcx
+        assert_eq!(
+            one(64, &[0x49, 0x03, 0xca], at).note,
+            Note::Add { reg: ecx, src: r10 }
+        );
+        let jump = one(64, &[0xff, 0xe1], at);
+        assert_eq!(
+            (jump.flow, jump.note),
+            (Flow::JumpRegister(ecx), Note::None)
+        );
+        // mov edi, edi; test eax, eax; sub eax, 9
+        let edi = id(Register::EDI);
+        assert_eq!(
+            one(64, &[0x89, 0xff], at).note,
+            Note::Copy { reg: edi, src: edi }
+        );
+        assert_eq!(one(64, &[0x85, 0xc0], at).note, Note::None);
+        assert_eq!(one(64, &[0x83, 0xe8, 0x09], at).note, Note::Write(eax));
+    }
+
+    #[test]
+    fn frames() {
+        assert!(starts_frame(32, &[0x55, 0x8b, 0xec, 0x83]));
+        assert!(starts_frame(32, &[0x8b, 0xff, 0x55, 0x8b, 0xec]));
+        assert!(starts_frame(
+            64,
+            &[0xf3, 0x0f, 0x1e, 0xfa, 0x55, 0x48, 0x89, 0xe5]
+        ));
+        assert!(!starts_frame(64, &[0x55, 0x8b, 0xec]));
+        assert!(!starts_frame(32, &[0x8b, 0xff, 0xc3]));
+        assert!(!starts_frame(32, &[]));
+    }
+
+    #[test]
+    fn padding() {
+        assert!(one(64, &[0xf3, 0x0f, 0x1e, 0xfa], 0).pad); // endbr64
+        assert!(one(64, &[0x90], 0).pad);
+        assert!(!one(64, &[0xc3], 0).pad);
+    }
+}
