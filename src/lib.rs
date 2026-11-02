@@ -147,6 +147,10 @@ pub enum Origin {
     /// A stub that jumps to an import: an ELF PLT entry, a Mach-O
     /// `__stubs` entry.
     Stub,
+    /// A code address the program keeps in a table of addresses: a MIPS
+    /// GOT entry, which holds every function whose address is taken
+    /// (callbacks a stripped static binary reaches no other way).
+    Pointer,
 }
 
 /// Code inside a function that no instruction branches to: a landing pad
@@ -282,8 +286,10 @@ impl Found {
     /// The program's `main`: the first argument the entry point passes to
     /// the C runtime's start routine.
     pub const MAIN: Self = Self(1 << 10);
+    /// A code address held in a table of addresses (a MIPS GOT entry).
+    pub const POINTER: Self = Self(1 << 11);
 
-    const NAMES: [(Self, &'static str); 11] = [
+    const NAMES: [(Self, &'static str); 12] = [
         (Self::ENTRY, "ENTRY"),
         (Self::LOADER, "LOADER"),
         (Self::SYMBOL, "SYMBOL"),
@@ -295,6 +301,7 @@ impl Found {
         (Self::TAIL_CALL, "TAIL_CALL"),
         (Self::STUB, "STUB"),
         (Self::MAIN, "MAIN"),
+        (Self::POINTER, "POINTER"),
     ];
 
     /// Whether every way in `other` is in `self`.
@@ -354,6 +361,7 @@ impl From<&Origin> for Found {
             Origin::Unwind => Self::UNWIND,
             Origin::FunctionStarts => Self::FUNCTION_STARTS,
             Origin::Stub => Self::STUB,
+            Origin::Pointer => Self::POINTER,
         }
     }
 }

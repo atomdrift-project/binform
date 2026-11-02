@@ -2,7 +2,7 @@
 # rizin: 6 functions; 4 shared, 4 with the same blocks (2 of 2 without landing pads)
 only rizin 0x10464 fcn.00010464: inside 0x103e0
 only rizin 0x10568 fcn.00010568: inside 0x104fc
-0x103e0 size=136 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
+0x103e0 size=136 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP | POINTER rizin=1/1
 0x10468 size=84 blocks=3 edges=2 cc=3 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
 0x104bc size=64 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
 0x104fc size=112 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1

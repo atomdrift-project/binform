@@ -482,11 +482,12 @@ fn elf_mips_go() {
         assert!(coverage(outcome) >= 99, "covers {}%", coverage(outcome));
         // Rizin starts a function in the epilogue after each `jal
         // runtime.deferreturn`, which the Go runtime resumes at and no
-        // instruction reaches. Every other function rizin finds, funktion
-        // finds or holds.
+        // instruction reaches, and in the dead epilogue after each `jal
+        // runtime.exit`. Every other function rizin finds, funktion finds or
+        // holds.
         let missed = outcome.missed();
         assert!(
-            missed.len() <= 33,
+            missed.len() <= 36,
             "missed {} of rizin's: {missed:x?}",
             missed.len()
         );
@@ -502,6 +503,13 @@ fn elf_s390x_go() {
         let named = outcome.found(Found::SYMBOL);
         assert!(named > 2000, "only {named} functions from the Go table");
         assert!(coverage(outcome) >= 97, "covers {}%", coverage(outcome));
+        // Calls to `runtime.throw`, `runtime.panicIndex` and the like never
+        // return: the padding after them is no code.
+        assert!(
+            outcome.recovery.invalid <= 11,
+            "{} invalid",
+            outcome.recovery.invalid
+        );
     });
 }
 
@@ -748,7 +756,11 @@ fn c_mips64_and_s390x() {
         // Calls to local functions go through a GOT page entry plus the low
         // bits (`ld $t9, %got_page(f)($gp); daddiu $t9, $t9, %got_ofst(f);
         // jalr $t9`): resolved, they find most functions as call targets.
-        assert!(outcome.found(Found::CALL) > 1600, "{}", outcome.found(Found::CALL));
+        assert!(
+            outcome.found(Found::CALL) > 1600,
+            "{}",
+            outcome.found(Found::CALL)
+        );
     });
     check("libe_sqlite3-linux-s390x.so", |outcome| {
         finds_all_of_rizin(outcome);
@@ -756,6 +768,32 @@ fn c_mips64_and_s390x() {
         // GCC's tables: `clijh` bounds the case, `lg` reads an 8-byte
         // offset from the table, `b 0(%rE,%rT)` adds the two.
         assert!(cases(outcome) > 2400, "only {} cases", cases(outcome));
+    });
+}
+
+/// A stripped, static uClibc MIPS-I executable (an IoT bot): `$gp` from
+/// the `.got` section, and the bot's routines found from the function
+/// pointers the GOT holds.
+#[test]
+fn mips_uclibc_static() {
+    check("bot-mips-uclibc-static", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::Mips);
+        assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
+        let pointers = outcome.found(Found::POINTER);
+        assert!(
+            pointers > 100,
+            "only {pointers} functions from GOT pointers"
+        );
+        // Rizin starts these two in a `jr` delay slot; the functions around
+        // them nothing funktion sees reaches.
+        finds_rizin_except(
+            outcome,
+            &[
+                (0x40_7274, "delay slot of 0x407270"),
+                (0x40_bd28, "delay slot of 0x40bd24"),
+            ],
+        );
+        assert_eq!(outcome.recovery.invalid, 0);
     });
 }
 

@@ -8,7 +8,7 @@ use crate::{Found, Function, Image, Limits, Origin, Recovery, Ref, RefKind};
 
 /// Functions that never return, by name. Rizin's list, so a call to one ends
 /// its basic block in both tools.
-const NORETURN: [&str; 20] = [
+const NORETURN: &[&str] = &[
     "ExitProcess",
     "ExitThread",
     "FatalExit",
@@ -29,6 +29,45 @@ const NORETURN: [&str; 20] = [
     "errc",
     "errx",
     "exit",
+    // Go's runtime: panics, fatal errors and the bounds-check failures the
+    // compiler calls (whose padding after the call is no code).
+    "runtime.abort",
+    "runtime.exit",
+    "runtime.fatal",
+    "runtime.fatalpanic",
+    "runtime.fatalthrow",
+    "runtime.gopanic",
+    "runtime.goPanicExtendIndex",
+    "runtime.goPanicExtendIndexU",
+    "runtime.goPanicExtendSlice3Acap",
+    "runtime.goPanicIndex",
+    "runtime.goPanicIndexU",
+    "runtime.goPanicSlice3Acap",
+    "runtime.goPanicSlice3Alen",
+    "runtime.goPanicSliceAcap",
+    "runtime.goPanicSliceAlen",
+    "runtime.goPanicSliceB",
+    "runtime.goexit0",
+    "runtime.panicIndex",
+    "runtime.panicIndexU",
+    "runtime.panicSlice3Acap",
+    "runtime.panicSlice3Alen",
+    "runtime.panicSlice3B",
+    "runtime.panicSlice3C",
+    "runtime.panicSliceAcap",
+    "runtime.panicSliceAlen",
+    "runtime.panicSliceB",
+    "runtime.panicSliceConvert",
+    "runtime.panicdivide",
+    "runtime.panicdottypeE",
+    "runtime.panicdottypeI",
+    "runtime.panicmem",
+    "runtime.panicmemAddr",
+    "runtime.panicnildottype",
+    "runtime.panicshift",
+    "runtime.panicunsafeslicelen",
+    "runtime.panicwrap",
+    "runtime.throw",
 ];
 
 /// C runtime start routines, and which of their arguments is `main`.

@@ -366,12 +366,23 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Image<'a>, Error> {
             .find(|symbol| symbol.name == "_gp" && symbol.value != 0)
             .map(|symbol| symbol.value)
             .or_else(|| {
+                // A static, stripped executable has neither: its `.got`
+                // section stands in (uClibc's `__start` computes `$gp` the
+                // same way, `bal; lui; addiu; addu $gp, $gp, $ra`).
                 elf.dynamic_value(elf::DT_PLTGOT)
+                    .or_else(|| sections.find(".got").map(|(addr, _)| addr))
                     .map(|got| got.wrapping_add(0x7ff0))
             })
     } else {
         None
     };
+    if mips && !object {
+        seeds.extend(
+            mips_got_pointers(elf, &sections, &memory, &imports)
+                .into_iter()
+                .map(|addr| seed(addr, Origin::Pointer)),
+        );
+    }
     drop(memory);
 
     Ok(Image {
@@ -405,6 +416,43 @@ fn mips_got_imports(elf: &Elf) -> Vec<Import> {
             slot: got.wrapping_add(entry.wrapping_mul(width)),
             name: symbol.name.clone(),
         })
+        .collect()
+}
+
+/// The code addresses a MIPS GOT holds: the functions whose address the
+/// program takes. Local entries hold 64 KiB pages (`%got_page`), which are
+/// left out, as are import slots.
+fn mips_got_pointers(
+    elf: &Elf,
+    sections: &ElfSections<'_>,
+    memory: &Memory<'_>,
+    imports: &[Import],
+) -> Vec<u64> {
+    let width: u8 = if elf.is_64 { 8 } else { 4 };
+    let range = sections
+        .find(".got")
+        .map(|(addr, sh)| (addr, sh.size))
+        .or_else(|| {
+            let got = elf.dynamic_value(elf::DT_PLTGOT)?;
+            let local = elf.dynamic_value(elf::DT_MIPS_LOCAL_GOTNO)?;
+            let first = elf.dynamic_value(elf::DT_MIPS_GOTSYM)?;
+            let globals = (elf.dynamic_symbols.len() as u64).saturating_sub(first);
+            Some((
+                got,
+                local
+                    .saturating_add(globals)
+                    .saturating_mul(u64::from(width)),
+            ))
+        });
+    let Some((start, size)) = range else {
+        return Vec::new();
+    };
+    let slots: std::collections::HashSet<u64> = imports.iter().map(|import| import.slot).collect();
+    (0..size / u64::from(width))
+        .map(|i| start.wrapping_add(i * u64::from(width)))
+        .filter(|slot| !slots.contains(slot))
+        .filter_map(|slot| memory.read(slot, width))
+        .filter(|&addr| addr & 3 == 0 && addr & 0xffff != 0 && memory.is_code(addr))
         .collect()
 }
 

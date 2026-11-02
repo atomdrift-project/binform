@@ -37,9 +37,19 @@
 - **Not supported at all:** AIX (XCOFF, and PowerPC, which funktion does
   not decode on any format); PowerPC ELF (SQLitePCLRaw has a
   `linux-ppc64le` build).
-- **Go:** calls to `runtime.gopanic`, `runtime.throw` and the like are not
-  known to never return (the list is rizin's), so padding after them shows
-  as `invalid` on s390x.
+
+- **From the exotic-binaries survey** (`C:\data\exotic_binaries`, all
+  hostile: parse only):
+  - SuperH static bots cover 18-48%.
+  - s390x static-pie (`s390x/bad-00b6e99b...`, four copies) covers 58%
+    with 1070 invalid and 2045 unresolved.
+  - MIPS R6 (`jq` 1.8.1 `mips32r6`/`mips64r6`) covers 37-50%: the R6
+    compact branches and relocated encodings are not decoded.
+  - PE for Windows CE on Arm and Thumb (machines 0x1c0, 0x1c2) is not
+    read.
+  - Some small ARMNT DLLs come out with no functions.
+  - Packed MIPS bots (no section headers, UPX-style stubs) cover under
+    35%; unpacking is out of scope.
 
 ## Other open items
 
