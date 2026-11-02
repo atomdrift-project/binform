@@ -12,9 +12,10 @@
   in `$gp` or a register computed from `$t9`); 70 of the 75 in
   `libe_sqlite3-linux-mips64.so` resolve. Left: MIPS tables bounded on a
   value reloaded from memory, non-PIC MIPS (`lui; addiu` tables, written
-  but untested on a sample), SPARC tables (they hold coverage of the sqlite
-  builds to 71-87%), and Thumb-1's `add pc, rm` tables (GCC's
-  `__gnu_thumb1_case_*` helpers).
+  but untested on a sample), and Thumb-1's `add pc, rm` tables (GCC's
+  `__gnu_thumb1_case_*` helpers). SPARC reads GCC's tables (from the GOT
+  pointer its PC thunk sets) and Sun Studio's (from `rd %pc`); the few left
+  keep their base in a stack slot.
 - **Objects:** `relocate` links calls on every set but SuperH. MIPS
   position-independent objects call through `$t9`; their `R_MIPS_JALR`
   hints turn the `jalr`/`jr` into a direct `jal`/`j`, but the `$gp`

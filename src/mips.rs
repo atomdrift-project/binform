@@ -356,6 +356,7 @@ fn writes(note: Note) -> u64 {
         | Note::Copy { reg, .. }
         | Note::Offset { reg, .. }
         | Note::Add { reg, .. }
+        | Note::Sub { reg, .. }
         | Note::Pop(reg)
         | Note::Write(reg) => 1 << (reg & 63),
     }

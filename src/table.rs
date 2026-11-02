@@ -97,10 +97,12 @@ impl Tracker {
     /// Forget what a call may have changed. A fixed address stays: a
     /// compiler keeps one across a call only in a register the callee saves,
     /// and rewrites any other before reading it.
-    pub(crate) fn call(&mut self) {
+    /// The registers in `kept`, a mask, the callee leaves as they were.
+    pub(crate) fn call(&mut self, kept: u32) {
         self.pushed = None;
-        self.values
-            .retain(|(_, value)| matches!(value, Value::Address(_)));
+        self.values.retain(|&(reg, value)| {
+            matches!(value, Value::Address(_)) || (reg < 32 && kept >> reg & 1 != 0)
+        });
     }
 
     /// The fixed address in `reg`.
@@ -137,7 +139,10 @@ impl Tracker {
             }
             Note::Compare { reg, imm } => {
                 let case = Value::Case(imm.saturating_add(1));
-                if let Some(same @ Value::Unknown(_)) = self.get(reg) {
+                // Copies share the bound: of an unknown value, or of a value
+                // loaded from memory (`ldub [%l1+8], %g1; and %g1, 0xff,
+                // %g2; cmp %g2, n`).
+                if let Some(same @ (Value::Unknown(_) | Value::Entry(_))) = self.get(reg) {
                     for (_, value) in &mut self.values {
                         if *value == same {
                             *value = case;
@@ -178,6 +183,15 @@ impl Tracker {
                 shift,
                 extend,
             } => (reg, self.add(base, index, shift, extend)),
+            Note::Sub { reg, base, index } => (
+                reg,
+                match (self.get(base), self.get(index)) {
+                    (Some(Value::Address(a)), Some(Value::Address(b))) => {
+                        Some(Value::Address(a.wrapping_sub(b) & self.mask()))
+                    }
+                    _ => None,
+                },
+            ),
             Note::Write(reg) => (reg, None),
         };
         self.values.retain(|&(held, _)| held != reg);
@@ -216,6 +230,10 @@ impl Tracker {
     /// is a target. Unshifted, either operand may be the address.
     fn add(&self, base: u32, index: u32, shift: u8, extend: Extend) -> Option<Value> {
         let (table, addr) = match (self.get(base)?, self.get(index)?) {
+            // Two addresses: an offset added to the PC (Sun Studio on SPARC).
+            (Value::Address(a), Value::Address(b)) if shift == 0 && extend == Extend::None => {
+                return Some(Value::Address(a.wrapping_add(b) & self.mask()));
+            }
             (Value::Address(addr), Value::Entry(table)) => (table, addr),
             (Value::Entry(table), Value::Address(addr)) if shift == 0 && extend == Extend::None => {
                 (table, addr)

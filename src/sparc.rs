@@ -4,15 +4,35 @@
 //! A call whose slot restores the caller's register window or return
 //! address (`call f; restore`, `mov %o7, %g1; call f; mov %g1, %o7`) makes
 //! the callee return to this function's caller: a tail call.
+//!
+//! For jump tables the decoder notes what GCC's `switch` computes: the
+//! bound (`cmp %g1, n; bgu default`), the table's address (from the GOT
+//! pointer, `sethi; call thunk; add %l7`, less a `sethi; or` offset), the
+//! scaled index (`sllx %g1, 2, %g1`) and the load of an entry relative to
+//! the table (`ldsw [%l7+%g1], %g1; jmp %l7+%g1`). A transfer's delay slot
+//! runs before its target, so its note is the transfer's, except an
+//! annulled branch's, which runs on one path only.
 
-use crate::decode::{Flow, Insn};
+use crate::decode::{Extend, Flow, Insn, Mem, Note};
 
 /// `%o7`, where `call` and `jmpl` leave the caller's address.
 const O7: u32 = 15;
 /// `%i7`: the caller's `%o7`, after a `save`.
 const I7: u32 = 31;
 
-pub(crate) fn decode(wide: bool, bytes: &[u8], addr: u64) -> Insn {
+/// What earlier instructions left that a later one needs.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct State {
+    /// A register holding another shifted left, and by how much: the index
+    /// of the load after it, scaled.
+    scaled: Option<(u32, u8)>,
+}
+
+/// The registers a call leaves as they were: the locals and ins, which
+/// live in the caller's own register window.
+pub(crate) const CALL_PRESERVED: u32 = 0xffff_0000;
+
+pub(crate) fn decode(state: &mut State, wide: bool, bytes: &[u8], addr: u64) -> Insn {
     let Some(word) = read_word(bytes) else {
         return Insn::new(4, Flow::Invalid);
     };
@@ -21,6 +41,9 @@ pub(crate) fn decode(wide: bool, bytes: &[u8], addr: u64) -> Insn {
         let mut insn = Insn::new(4, Flow::Next);
         // `nop` is `sethi 0, %g0`.
         insn.pad = word == 0x0100_0000;
+        if !insn.pad {
+            insn.note = note(state, word, wide, addr);
+        }
         return insn;
     };
     if matches!(flow, Flow::Stop | Flow::Invalid) {
@@ -35,7 +58,187 @@ pub(crate) fn decode(wide: bool, bytes: &[u8], addr: u64) -> Insn {
         Flow::CallIndirect if returns_elsewhere(slot) => Flow::JumpIndirect,
         flow => flow,
     };
-    Insn::new(8, flow)
+    let mut insn = Insn::new(8, flow);
+    // An annulled branch (bit 29) runs its slot only when taken.
+    let annulled = word >> 30 == 0 && word & 0x2000_0000 != 0;
+    if !annulled {
+        insn.note = note(state, slot, wide, addr.wrapping_add(4));
+    }
+    if matches!(flow, Flow::Call(_) | Flow::CallIndirect) {
+        *state = State::default();
+    }
+    insn
+}
+
+/// The register a PC thunk at the start of `bytes` adds `%o7` to: GCC's
+/// `__sparc_get_pc_thunk.l7` is `retl; add %o7, %l7, %l7`.
+pub(crate) fn pc_thunk(bytes: &[u8]) -> Option<u32> {
+    let (ret, add) = (read_word(bytes)?, read_word(bytes.get(4..)?)?);
+    let rd = (add >> 25) & 0x1f;
+    let (rs1, rs2) = ((add >> 14) & 0x1f, add & 0x1f);
+    let sources = (rs1 == O7 && rs2 == rd) || (rs2 == O7 && rs1 == rd);
+    (ret == 0x81c3_e008 && add & 0xc1f8_3fe0 == 0x8000_0000 && sources && rd != 0).then_some(rd)
+}
+
+/// What `word`, which transfers nowhere, tells a jump-table tracker.
+fn note(state: &mut State, word: u32, wide: bool, addr: u64) -> Note {
+    let rd = (word >> 25) & 0x1f;
+    let op3 = (word >> 19) & 0x3f;
+    let (rs1, rs2) = ((word >> 14) & 0x1f, word & 0x1f);
+    let immediate = word & 0x2000 != 0;
+    let simm = (i64::from(word & 0x1fff) ^ 0x1000) - 0x1000;
+    let wrap = |value: u64| if wide { value } else { value & 0xffff_ffff };
+    let clobber = |reg: u32| {
+        if reg == 0 {
+            Note::None
+        } else {
+            Note::Clobber(1 << reg)
+        }
+    };
+    let scaled = state.scaled;
+    let note = match word >> 30 {
+        // SETHI
+        0 if (word >> 22) & 7 == 4 && rd != 0 => Note::Address {
+            reg: rd,
+            addr: u64::from(word & 0x3f_ffff) << 10,
+        },
+        0 => Note::None,
+        // CMP (SUBcc into %g0) with a positive constant.
+        2 if rd == 0 && op3 == 0x14 && immediate && simm > 0 => Note::Compare {
+            reg: rs1,
+            imm: simm.cast_unsigned(),
+        },
+        // Others into %g0 write only the condition codes.
+        2 if rd == 0 => Note::None,
+        // RD %pc: Sun Studio's position-independent code finding itself.
+        2 if op3 == 0x28 && rs1 == 5 => Note::Address {
+            reg: rd,
+            addr: wrap(addr),
+        },
+        2 => match op3 {
+            // ADD, OR with a constant (OR fills in the bits SETHI left
+            // clear, so it adds).
+            0x00 | 0x02 if immediate && rs1 == 0 => Note::Address {
+                reg: rd,
+                addr: wrap(simm.cast_unsigned()),
+            },
+            0x00 | 0x02 if immediate => Note::Offset {
+                reg: rd,
+                src: rs1,
+                imm: simm.cast_unsigned(),
+            },
+            0x04 if immediate => Note::Offset {
+                reg: rd,
+                src: rs1,
+                imm: simm.wrapping_neg().cast_unsigned(),
+            },
+            0x00 | 0x02 if rs2 == 0 => Note::Copy { reg: rd, src: rs1 },
+            0x00 | 0x02 if rs1 == 0 => Note::Copy { reg: rd, src: rs2 },
+            0x00 => Note::Add {
+                reg: rd,
+                base: rs1,
+                index: rs2,
+                shift: 0,
+                extend: Extend::None,
+            },
+            0x04 => Note::Sub {
+                reg: rd,
+                base: rs1,
+                index: rs2,
+            },
+            // AND with a byte mask: a case value narrowed, still below
+            // any bound it had.
+            0x01 if immediate && word & 0x1fff == 0xff => Note::Copy { reg: rd, src: rs1 },
+            // SLL, SLLX by 1-3: a scaled copy.
+            0x25 if immediate && (1..=3).contains(&(word & 0x3f)) => {
+                state.scaled = Some((rd, u8::try_from(word & 3).unwrap_or(0)));
+                return Note::Copy { reg: rd, src: rs1 };
+            }
+            // SAVE, RESTORE: a new register window.
+            0x3c | 0x3d => Note::Clobber(u32::MAX),
+            // WR, floating-point operations, Tcc, FLUSH, DONE/RETRY.
+            0x30 | 0x34..=0x37 | 0x3a | 0x3b | 0x3e => Note::None,
+            _ => clobber(rd),
+        },
+        // Loads and stores.
+        3 => match op3 {
+            0x00..=0x02 | 0x08..=0x0b => {
+                let (size, signed) = match op3 {
+                    0x00 => (4, false),
+                    0x01 => (1, false),
+                    0x02 => (2, false),
+                    0x08 => (4, true),
+                    0x09 => (1, true),
+                    0x0a => (2, true),
+                    _ => (8, false),
+                };
+                let reg = |r: u32| (r != 0).then_some(r);
+                let mem = if immediate {
+                    Mem {
+                        base: reg(rs1),
+                        index: None,
+                        scale: 1,
+                        disp: simm.cast_unsigned(),
+                    }
+                } else {
+                    // The scaled register is the index.
+                    let (base, index, shift) = match scaled {
+                        Some((r, shift)) if r == rs2 => (rs1, rs2, shift),
+                        Some((r, shift)) if r == rs1 => (rs2, rs1, shift),
+                        _ => (rs1, rs2, 0),
+                    };
+                    Mem {
+                        base: reg(base),
+                        index: reg(index),
+                        scale: 1 << shift,
+                        disp: 0,
+                    }
+                };
+                if rd == 0 {
+                    Note::None
+                } else {
+                    Note::Load {
+                        reg: rd,
+                        mem,
+                        size,
+                        signed: signed && (wide || size < 4),
+                    }
+                }
+            }
+            // LDD: a pair.
+            0x03 | 0x13 => Note::Clobber((3 << rd) & !1),
+            // Stores.
+            0x04..=0x07 | 0x0e | 0x14..=0x17 | 0x1e => Note::None,
+            // LDSTUB, SWAP and the alternate-space loads; CASA, CASXA.
+            0x00..=0x1f | 0x3c | 0x3e => clobber(rd),
+            // Floating-point loads and stores, prefetches.
+            _ => Note::None,
+        },
+        _ => Note::None,
+    };
+    if let Some((reg, _)) = state.scaled
+        && writes(note) >> reg & 1 != 0
+    {
+        state.scaled = None;
+    }
+    note
+}
+
+/// The registers a note says are written, as a mask.
+fn writes(note: Note) -> u32 {
+    match note {
+        Note::None | Note::Push(_) | Note::PushRegister(_) => 0,
+        Note::Clobber(regs) => regs,
+        Note::Compare { reg, .. }
+        | Note::Address { reg, .. }
+        | Note::Load { reg, .. }
+        | Note::Copy { reg, .. }
+        | Note::Offset { reg, .. }
+        | Note::Add { reg, .. }
+        | Note::Sub { reg, .. }
+        | Note::Pop(reg)
+        | Note::Write(reg) => 1 << (reg & 31),
+    }
 }
 
 /// Whether a call's delay slot `word` makes the callee return past the
@@ -104,7 +307,12 @@ fn flow(word: u32, addr: u64, wrap: impl Fn(u64) -> u64) -> Option<Flow> {
                     Some(Flow::Return)
                 }
                 0x38 if rd == O7 => Some(Flow::CallIndirect),
-                0x38 if rd == 0 && !immediate => Some(Flow::JumpIndirect),
+                // JMP %rA+%rB: a table's base and its entry.
+                0x38 if rd == 0 && !immediate && word & 0x1f != 0 => Some(Flow::JumpAdd {
+                    base: rs1,
+                    index: word & 0x1f,
+                }),
+                0x38 if rd == 0 && !immediate => Some(Flow::JumpRegister(rs1)),
                 0x38 if rd == 0 => Some(Flow::JumpRegister(rs1)),
                 // A link into another register: a call by another name.
                 0x38 => Some(Flow::CallIndirect),
@@ -123,7 +331,96 @@ mod tests {
 
     fn one(words: &[u32], addr: u64) -> Insn {
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
-        decode(false, &bytes, addr)
+        decode(&mut State::default(), false, &bytes, addr)
+    }
+
+    /// Each instruction of `words` at `addr` on, in order.
+    fn run(words: &[u32], addr: u64) -> Vec<Insn> {
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
+        let mut state = State::default();
+        let mut out = Vec::new();
+        let mut at = 0;
+        while at < bytes.len() {
+            let insn = decode(&mut state, true, &bytes[at..], addr + at as u64);
+            out.push(insn);
+            at += insn.len as usize;
+        }
+        out
+    }
+
+    #[test]
+    fn switch_notes() {
+        let insns = run(
+            &[
+                0x80a6_a00a, // cmp %i2, 10
+                0x0ac8_0058, // bgu,pn %icc, default
+                0x0300_0ac5, // sethi 0xac5, %g1 (in the slot)
+                0x8210_6004, // or %g1, 4, %g1
+                0xb52e_b002, // sllx %i2, 2, %i2
+                0xae25_c001, // sub %l7, %g1, %l7
+                0xc245_c01a, // ldsw [%l7+%i2], %g1
+                0x81c5_c001, // jmp %l7+%g1
+                NOP,
+            ],
+            0x1000,
+        );
+        let notes: Vec<Note> = insns.iter().map(|insn| insn.note).collect();
+        assert_eq!(notes[0], Note::Compare { reg: 26, imm: 10 });
+        assert_eq!(
+            notes[1],
+            Note::Address {
+                reg: 1,
+                addr: 0x2b_1400
+            }
+        );
+        assert_eq!(
+            notes[2],
+            Note::Offset {
+                reg: 1,
+                src: 1,
+                imm: 4
+            }
+        );
+        assert_eq!(notes[3], Note::Copy { reg: 26, src: 26 });
+        assert_eq!(
+            notes[4],
+            Note::Sub {
+                reg: 23,
+                base: 23,
+                index: 1
+            }
+        );
+        assert_eq!(
+            notes[5],
+            Note::Load {
+                reg: 1,
+                mem: Mem {
+                    base: Some(23),
+                    index: Some(26),
+                    scale: 4,
+                    disp: 0
+                },
+                size: 4,
+                signed: true
+            }
+        );
+        assert_eq!(insns[6].flow, Flow::JumpAdd { base: 23, index: 1 });
+        // rd %pc, %o7
+        assert_eq!(
+            run(&[0x9f41_4000], 0x1000)[0].note,
+            Note::Address {
+                reg: 15,
+                addr: 0x1000
+            }
+        );
+        // An annulled branch's slot: no note.
+        assert_eq!(run(&[0x3280_0004, 0x8608_e0ff], 0x1000)[0].note, Note::None);
+        // retl; add %o7, %l7, %l7
+        let thunk: Vec<u8> = [0x81c3_e008_u32, 0xae03_c017]
+            .iter()
+            .flat_map(|w| w.to_be_bytes())
+            .collect();
+        assert_eq!(pc_thunk(&thunk), Some(23));
     }
 
     const NOP: u32 = 0x0100_0000;

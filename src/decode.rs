@@ -116,6 +116,8 @@ pub(crate) enum Note {
     PushRegister(u32),
     /// `reg =` the value on top of the stack.
     Pop(u32),
+    /// `reg = base - index`.
+    Sub { reg: u32, base: u32, index: u32 },
     /// `reg` changes some other way.
     Write(u32),
     /// Each register `n` whose bit `1 << n` is set changes some other way: an
@@ -167,6 +169,7 @@ pub(crate) enum Decoder {
     S390x(crate::s390x::State),
     Sparc {
         wide: bool,
+        state: crate::sparc::State,
     },
     SuperH,
 }
@@ -198,8 +201,14 @@ impl Decoder {
                 state: crate::mips::State::default(),
             },
             Arch::S390x => Self::S390x(crate::s390x::State::default()),
-            Arch::Sparc => Self::Sparc { wide: false },
-            Arch::Sparc64 => Self::Sparc { wide: true },
+            Arch::Sparc => Self::Sparc {
+                wide: false,
+                state: crate::sparc::State::default(),
+            },
+            Arch::Sparc64 => Self::Sparc {
+                wide: true,
+                state: crate::sparc::State::default(),
+            },
             Arch::SuperH => Self::SuperH,
         }
     }
@@ -212,6 +221,7 @@ impl Decoder {
             Self::Arm { state, .. } => *state = crate::arm::State::default(),
             Self::Mips { state, .. } => *state = crate::mips::State::default(),
             Self::S390x(state) => *state = crate::s390x::State::default(),
+            Self::Sparc { state, .. } => *state = crate::sparc::State::default(),
             _ => {}
         }
     }
@@ -229,7 +239,7 @@ impl Decoder {
                 state,
             } => crate::mips::decode(state, got, (*big, *wide), bytes, addr),
             Self::S390x(state) => crate::s390x::decode(state, bytes, addr),
-            Self::Sparc { wide } => crate::sparc::decode(*wide, bytes, addr),
+            Self::Sparc { wide, state } => crate::sparc::decode(state, *wide, bytes, addr),
             Self::SuperH => crate::superh::decode(bytes, addr),
         }
     }
@@ -246,7 +256,7 @@ impl Decoder {
             Self::X86 { bitness: 32, .. }
             | Self::Arm { .. }
             | Self::Mips { wide: false, .. }
-            | Self::Sparc { wide: false }
+            | Self::Sparc { wide: false, .. }
             | Self::SuperH => 4,
             Self::X86 { .. }
             | Self::Arm64(_)
@@ -280,11 +290,36 @@ impl Decoder {
 
     /// The register a 32-bit PC thunk at the start of `bytes` returns the
     /// caller's address in.
-    pub(crate) fn pc_thunk(&self, bytes: &[u8]) -> Option<u32> {
+    /// What a call at `call` to a PC thunk at the start of `bytes` leaves in
+    /// a register, returning to `next`; `None` for any other callee. On
+    /// i386 the register holds `next`; SPARC's thunk adds the call's own
+    /// address to it.
+    pub(crate) fn pc_thunk(&self, bytes: &[u8], call: u64, next: u64) -> Option<Note> {
         match self {
-            Self::X86 { bitness: 32, .. } => crate::x86::pc_thunk(bytes),
+            Self::X86 { bitness: 32, .. } => {
+                crate::x86::pc_thunk(bytes).map(|reg| Note::Address { reg, addr: next })
+            }
+            Self::Sparc { .. } => crate::sparc::pc_thunk(bytes).map(|reg| Note::Offset {
+                reg,
+                src: reg,
+                imm: call,
+            }),
             _ => None,
         }
+    }
+
+    /// The registers, as a mask, a callee leaves as they were, as far as
+    /// a jump table after the call is concerned.
+    pub(crate) const fn call_preserved(&self) -> u32 {
+        match self {
+            Self::Sparc { .. } => crate::sparc::CALL_PRESERVED,
+            _ => 0,
+        }
+    }
+
+    /// Whether a call's note (its delay slot's) is applied before the call.
+    pub(crate) const fn notes_calls(&self) -> bool {
+        matches!(self, Self::Sparc { .. })
     }
 
     /// The register that carries a call's `n`th argument (from zero) under

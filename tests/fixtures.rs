@@ -703,6 +703,9 @@ fn solaris_sparc() {
         );
         let (shared, same) = agreement(outcome);
         assert!(shared > 3350 && same >= 70, "{same}% of {shared}");
+        // Sun Studio's tables: `rd %pc` plus a constant is the table, which
+        // holds offsets from itself (`ld [%i5+%l6], %l7; jmp %l7+%l6`).
+        assert!(cases(outcome) > 1400, "only {} cases", cases(outcome));
     });
 }
 
@@ -720,6 +723,9 @@ fn linux_sparc64() {
         );
         let (shared, same) = agreement(outcome);
         assert!(shared > 3400 && same >= 95, "{same}% of {shared}");
+        // GCC's tables: the GOT pointer (`sethi; call` the PC thunk; `add`)
+        // less a constant is the table, of offsets from itself.
+        assert!(cases(outcome) > 1200, "only {} cases", cases(outcome));
     });
 }
 

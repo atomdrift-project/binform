@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::decode::{Decoder, Flow, Insn, Memory, Note};
+use crate::decode::{Decoder, Flow, Insn, Memory};
 use crate::table::Tracker;
 use crate::{Found, Function, Image, Limits, Origin, Recovery, Ref, RefKind};
 
@@ -465,22 +465,25 @@ impl Work<'_> {
                     // Branches and calls only read registers; what a call
                     // changes, `call` forgets below.
                     // A compare-and-branch bounds a case value too.
-                    if matches!(insn.flow, Flow::Next | Flow::Branch(_)) {
+                    if matches!(insn.flow, Flow::Next | Flow::Branch(_))
+                        || (self.decoder.notes_calls()
+                            && matches!(insn.flow, Flow::Call(_) | Flow::CallIndirect))
+                    {
                         tracker.note(insn.note);
                     }
                     match insn.flow {
                         Flow::Next => {}
-                        Flow::CallIndirect => tracker.call(),
+                        Flow::CallIndirect => tracker.call(self.decoder.call_preserved()),
                         Flow::Call(to) => {
                             mains.extend(self.main(entry, to, next, &tracker));
-                            tracker.call();
+                            tracker.call(self.decoder.call_preserved());
                             // A PC thunk returns the address after the call.
                             let thunk = self
                                 .memory
                                 .code(to)
-                                .and_then(|code| self.decoder.pc_thunk(code));
-                            if let Some(reg) = thunk {
-                                tracker.note(Note::Address { reg, addr: next });
+                                .and_then(|code| self.decoder.pc_thunk(code, addr, next));
+                            if let Some(note) = thunk {
+                                tracker.note(note);
                             }
                             refs.push(Ref {
                                 from: addr,
@@ -495,7 +498,7 @@ impl Work<'_> {
                         }
                         Flow::CallSlot(slot) => {
                             mains.extend(self.main(entry, slot, next, &tracker));
-                            tracker.call();
+                            tracker.call(self.decoder.call_preserved());
                             refs.push(Ref {
                                 from: addr,
                                 to: slot,
