@@ -898,6 +898,26 @@ fn powerpc_static() {
     });
 }
 
+/// 32-bit position-independent code: the GOT pointer from the function's
+/// own address (`bcl 20, 31, $+4; mflr r30`), carried across blocks, and
+/// a jump table whose address a GOT slot holds once its `RELATIVE`
+/// relocation fills it.
+#[test]
+fn powerpc_pie() {
+    check("ppc-pie", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::PowerPc);
+        assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
+        assert_eq!(outcome.cases(), 20, "pick's cases");
+        assert_eq!(outcome.recovery.unresolved, 0);
+        // `bl` over a word of data is no call, and that word no code.
+        assert_eq!(outcome.recovery.invalid, 0);
+        // musl's `_dlstart_c` reaches the next stage through the PC
+        // (`bl 1f; .long __dls2 - .; 1: mflr r6; lwz r4, 0(r6); add r4,
+        // r4, r6; mtctr r4; bctr`), which funktion does not follow.
+        finds_rizin_before(outcome, 4, &[0x107d8]);
+    });
+}
+
 /// 64-bit ELFv1: the entry point and symbols name `.opd` descriptors.
 #[test]
 fn powerpc64_elfv1() {
@@ -918,6 +938,13 @@ fn powerpc64_elfv1() {
         );
         finds_rizin_before(outcome, 8, &[]);
         assert_eq!(outcome.recovery.invalid, 0);
+        // Import stubs load their slot from the TOC (`ld r12, n(r2);
+        // mtctr r12; bctr`).
+        assert!(
+            thunks(outcome) >= 20,
+            "only {} import stubs",
+            thunks(outcome)
+        );
     });
 }
 

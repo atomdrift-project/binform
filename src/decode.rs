@@ -90,6 +90,13 @@ pub(crate) enum Note {
     Compare { reg: u32, imm: u64 },
     /// `reg = addr`.
     Address { reg: u32, addr: u64 },
+    /// `reg = addr`, the address of the code that reads the PC: no
+    /// pointer to a function (PowerPC's `bcl 20, 31, $+4; mflr r30`).
+    Pc { reg: u32, addr: u64 },
+    /// `reg =` the `size`-byte value at the fixed address `mem` names: the
+    /// address a GOT or TOC slot holds (a jump table's, in 32-bit PowerPC
+    /// PIC code: `lwz r3, n(r30)`).
+    Fetch { reg: u32, mem: Mem, size: u8 },
     /// `reg = the size-byte value at mem`, sign-extended when `signed`.
     Load {
         reg: u32,
@@ -123,6 +130,27 @@ pub(crate) enum Note {
     /// Each register `n` whose bit `1 << n` is set changes some other way: an
     /// instruction that writes several (registers numbered below 32).
     Clobber(u32),
+}
+
+impl Note {
+    /// The registers the note says are written, as a mask.
+    pub(crate) fn writes(self) -> u64 {
+        match self {
+            Self::None | Self::Push(_) | Self::PushRegister(_) => 0,
+            Self::Clobber(regs) => u64::from(regs),
+            Self::Compare { reg, .. }
+            | Self::Address { reg, .. }
+            | Self::Pc { reg, .. }
+            | Self::Fetch { reg, .. }
+            | Self::Load { reg, .. }
+            | Self::Copy { reg, .. }
+            | Self::Offset { reg, .. }
+            | Self::Add { reg, .. }
+            | Self::Sub { reg, .. }
+            | Self::Pop(reg)
+            | Self::Write(reg) => 1 << (reg & 63),
+        }
+    }
 }
 
 /// How an added register is widened before it is shifted.

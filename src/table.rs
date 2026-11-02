@@ -151,7 +151,11 @@ impl Tracker {
                 }
                 (reg, Some(case))
             }
-            Note::Address { reg, addr } => (reg, Some(Value::Address(addr))),
+            Note::Address { reg, addr } | Note::Pc { reg, addr } => {
+                (reg, Some(Value::Address(addr)))
+            }
+            // Unresolved: the walk replaces those it can read.
+            Note::Fetch { reg, .. } => (reg, None),
             Note::Load {
                 reg,
                 mem,
@@ -215,6 +219,14 @@ impl Tracker {
         self.values
             .iter()
             .find_map(|&(held, value)| (held == reg).then_some(value))
+    }
+
+    /// The fixed address `mem` names, without an index.
+    pub(crate) fn fixed(&self, mem: Mem) -> Option<u64> {
+        if mem.index.is_some() {
+            return None;
+        }
+        Some(self.address(mem.base)?.wrapping_add(mem.disp) & self.mask())
     }
 
     /// The fixed address in `reg`; zero for no register at all.
@@ -335,6 +347,11 @@ fn extended(size: u8, signed: bool, extend: Extend) -> Option<bool> {
 }
 
 impl Table {
+    /// Whether a compare bounds the case values.
+    pub(crate) fn bounded(&self) -> bool {
+        !matches!(self.cases, Cases::Unbounded)
+    }
+
     /// One-byte entries packed together: a map from case values to entries
     /// of another table.
     fn is_byte_map(&self) -> bool {

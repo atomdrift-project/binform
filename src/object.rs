@@ -429,6 +429,14 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Image<'a>, Error> {
         );
     }
     drop(memory);
+    // RELA relocations against no symbol: RELATIVE (and IRELATIVE, whose
+    // addend is a resolver's address).
+    let rebased = elf
+        .dynamic_relocations
+        .iter()
+        .filter(|reloc| reloc.symbol == 0)
+        .filter_map(|reloc| Some((reloc.offset, u64::try_from(reloc.addend?).ok()?)))
+        .collect();
 
     Ok(Image {
         arch,
@@ -438,6 +446,7 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Image<'a>, Error> {
         handlers,
         extents,
         got,
+        rebased,
     })
 }
 
@@ -755,6 +764,7 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &Pe<'_>) -> Result<Image<'a>, Error> {
         handlers: Vec::new(),
         extents,
         got: None,
+        rebased: Vec::new(),
     })
 }
 
@@ -931,6 +941,7 @@ fn macho_image<'a>(bytes: &'a [u8], macho: &MachO) -> Result<Image<'a>, Error> {
         handlers,
         extents,
         got: None,
+        rebased: Vec::new(),
     })
 }
 

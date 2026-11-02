@@ -269,6 +269,11 @@ pub struct Image<'a> {
     /// address `_gp` stands for, which GOT loads are offsets from; on 64-bit
     /// PowerPC, the TOC pointer `r2` holds (`.TOC.`).
     pub got: Option<u64>,
+    /// Slots the loader fills with an address of this binary, and the
+    /// address: ELF `RELATIVE` relocations of a position-independent
+    /// executable, whose slots hold zero in the file (a GOT slot that holds
+    /// a jump table's address, in 32-bit PowerPC PIC code).
+    pub rebased: Vec<(u64, u64)>,
 }
 
 /// Bounds on the work [`recover_with`] does.

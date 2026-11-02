@@ -260,7 +260,7 @@ fn note(state: &mut State, word: u32, got: &Got, big: bool, wide: bool) -> Note 
     {
         gp_dest = Some(reg);
     }
-    let written = writes(note) | state.indexed.map_or(0, |(sum, ..)| 1 << sum);
+    let written = note.writes() | state.indexed.map_or(0, |(sum, ..)| 1 << sum);
     let written = u32::try_from(written & 0xffff_ffff).unwrap_or(u32::MAX);
     state.gp_regs &= !written;
     state.small &= !written;
@@ -427,28 +427,11 @@ fn note_of(
     };
     // A scaled index stays until its register is written.
     if let Some((reg, _)) = state.scaled
-        && writes(note) & (1 << reg) != 0
+        && note.writes() & (1 << reg) != 0
     {
         state.scaled = None;
     }
     note
-}
-
-/// The registers a note says are written, as a mask.
-fn writes(note: Note) -> u64 {
-    match note {
-        Note::None | Note::Push(_) | Note::PushRegister(_) => 0,
-        Note::Clobber(regs) => u64::from(regs),
-        Note::Compare { reg, .. }
-        | Note::Address { reg, .. }
-        | Note::Load { reg, .. }
-        | Note::Copy { reg, .. }
-        | Note::Offset { reg, .. }
-        | Note::Add { reg, .. }
-        | Note::Sub { reg, .. }
-        | Note::Pop(reg)
-        | Note::Write(reg) => 1 << (reg & 63),
-    }
 }
 
 /// Follow what `word`, which transfers nowhere, does to `$t9`: a load from

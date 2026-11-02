@@ -38,12 +38,20 @@ only. Next:
 - **PowerPC** (ELF: 32-bit big-endian, 64-bit ELFv1 and ELFv2) decodes
   branches, `blr`/`bctr` and their linking forms, `.opd` descriptors,
   ELFv2 global entries, addresses built with `lis; addi` (as pointers, in
-  32-bit code), and GCC's TOC-relative tables (`bot-ppc-static`,
-  `bot-ppc64-elfv1`, `ppc64le-static`; `jq` 1.8.1 covers 92% 32-bit and
-  91% `ppc64el`). Left: PLT and glink stubs as imports (ELFv1's `ld r12,
-  n(r2); mtctr r12; bctr` reads as unresolved), 32-bit PIC tables (169
-  unresolved in `jq`), Go's ppc64 code (`ppc64/bad-154c...` covers 76%),
-  32-bit little-endian PowerPC, and Power10 prefixed instructions.
+  32-bit code), GCC's TOC-relative tables, and import stubs that load
+  their slot from a known address (`ld r12, n(r2); mtctr r12; bctr`, `lis;
+  lwz; mtctr; bctr`). 32-bit PIC code's GOT pointer (`bcl 20, 31, $+4;
+  mflr r30`) is carried across blocks, and a jump table's address read
+  from its GOT slot (or the slot's `RELATIVE` relocation); glibc's
+  two-level `vfprintf` tables (a byte map, then `add; lwz n(rX)`) resolve
+  too. An unbounded table stops at a target past another function's
+  start (`bot-ppc-static`, `bot-ppc64-elfv1`, `ppc64le-static`,
+  `ppc-pie`; `jq` 1.8.1 covers 96% 32-bit, with 106 unresolved jumps,
+  mostly calls through pointers, and 90% `ppc64el`, with 10). Left: jumps
+  through a register holding a known address (musl's `bl 1f; .long f -
+  .; 1: mflr r6; lwz; add; mtctr; bctr` in `ppc-pie`), Go's ppc64 code
+  (`ppc64/bad-154c...` covers 76%), 32-bit little-endian PowerPC, and
+  Power10 prefixed instructions.
 - **Not supported at all:** AIX (XCOFF).
 
 - **From the exotic-binaries survey** (`C:\data\exotic_binaries`, all

@@ -31,6 +31,7 @@ fn image(arch: Arch, segments: Vec<Segment<'_>>, seeds: Vec<Seed>) -> Image<'_> 
         handlers: Vec::new(),
         extents: Vec::new(),
         got: None,
+        rebased: Vec::new(),
     }
 }
 

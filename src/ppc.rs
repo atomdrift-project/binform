@@ -21,6 +21,17 @@ use crate::decode::{Extend, Flow, Insn, Mem, Note};
 pub(crate) struct State {
     /// The register `mtctr` last copied into `ctr`.
     ctr: Option<u32>,
+    /// The slot `ctr`'s value was loaded from: a PLT stub's (`ld r12,
+    /// n(r2); mtctr r12; bctr`).
+    ctr_slot: Option<u64>,
+    /// The last register loaded from a fixed address, and that address.
+    loaded: Option<(u32, u64)>,
+    /// The address in `lr`, after `bcl 20, 31, $+4`.
+    lr: Option<u64>,
+    /// A register holding a base plus a scaled case value (`slwi r6, r6,
+    /// 2; add r6, r27, r6`), the address a table entry is then loaded from
+    /// at an offset (`lwz r10, 0x280(r6)`): the sum, base, index and shift.
+    indexed: Option<(u32, u32, u32, u8)>,
     /// The constant in each register.
     regs: [Option<u64>; 32],
     /// A register holding another shifted left, and by how much: a scaled
@@ -64,11 +75,14 @@ pub(crate) fn decode(
         // call that never returns.
         0 if word == 0 => (Flow::Stop, false),
         0 => (Flow::Invalid, false),
-        // B, BA, BL, BLA
+        // B, BA, BL, BLA. A `bl` just past one word of data reads the PC
+        // and jumps over it (musl's `bl 1f; .long _DYNAMIC - .; 1:`); one
+        // farther may call the next function's local entry.
         18 => {
             let target = to(word & 0x03ff_fffc, 26);
+            let over = target == next.wrapping_add(4);
             (
-                if link {
+                if link && !over {
                     Flow::Call(target)
                 } else {
                     Flow::Jump(target)
@@ -96,9 +110,16 @@ pub(crate) fn decode(
             16 if link => (Flow::CallIndirect, false),
             16 => (Flow::Return, !always),
             // BCCTR: `bctr` jumps through ctr; `bctrl` calls.
-            528 if link => (Flow::CallIndirect, false),
+            528 if link => (
+                state.ctr_slot.map_or(Flow::CallIndirect, Flow::CallSlot),
+                false,
+            ),
             528 => (
-                state.ctr.map_or(Flow::JumpIndirect, Flow::JumpRegister),
+                match (state.ctr_slot, state.ctr) {
+                    (Some(slot), _) => Flow::JumpSlot(slot),
+                    (None, Some(reg)) => Flow::JumpRegister(reg),
+                    (None, None) => Flow::JumpIndirect,
+                },
                 !always,
             ),
             _ => (Flow::Next, false),
@@ -111,10 +132,15 @@ pub(crate) fn decode(
     };
     let mut note = Note::None;
     match flow {
+        // `bcl 20, 31, $+4` leaves its own address in `lr`.
+        Flow::Next if word >> 26 == 16 => state.lr = Some(next),
         Flow::Next => note = track(state, word, (wide, toc)),
         // A callee may change ctr and the volatile registers.
-        Flow::Call(_) | Flow::CallIndirect => {
+        Flow::Call(_) | Flow::CallIndirect | Flow::CallSlot(_) => {
             state.ctr = None;
+            state.ctr_slot = None;
+            state.loaded = None;
+            state.lr = None;
             for (reg, value) in state.regs.iter_mut().enumerate() {
                 if VOLATILE >> reg & 1 != 0 {
                     *value = None;
@@ -149,6 +175,23 @@ fn track(state: &mut State, word: u32, (wide, toc): (bool, Option<u64>)) -> Note
     // MTSPR ctr, rS (`mtctr rS`): SPR 9, its halves swapped in the field.
     if word & 0xfc1f_fffe == 0x7c09_03a6 {
         state.ctr = Some(rt);
+        state.ctr_slot = state
+            .loaded
+            .filter(|&(reg, _)| reg == rt)
+            .map(|(_, slot)| slot);
+        return Note::None;
+    }
+    // MFSPR rT, lr (`mflr rT`): the PC, after `bcl`. MTSPR lr, rS.
+    if word & 0xfc1f_fffe == 0x7c08_02a6 {
+        let value = state.lr;
+        if let Some(slot) = state.regs.get_mut(rt as usize) {
+            *slot = value;
+        }
+        state.loaded = state.loaded.filter(|&(reg, _)| reg != rt);
+        return value.map_or(Note::Clobber(1 << rt), |addr| Note::Pc { reg: rt, addr });
+    }
+    if word & 0xfc1f_fffe == 0x7c08_03a6 {
+        state.lr = None;
         return Note::None;
     }
     let get = |state: &State, reg: u32| match (reg, toc) {
@@ -158,6 +201,8 @@ fn track(state: &mut State, word: u32, (wide, toc): (bool, Option<u64>)) -> Note
     let imm = u64::from(word & 0xffff);
     let simm = ((i64::from(word & 0xffff) ^ 0x8000) - 0x8000).cast_unsigned();
     let scaled = state.scaled.take();
+    let loaded = state.loaded.take();
+    let indexed = state.indexed.take();
     let set = |state: &mut State, reg: u32, value: Option<u64>| {
         if let Some(slot) = state.regs.get_mut(reg as usize) {
             *slot = value;
@@ -175,6 +220,13 @@ fn track(state: &mut State, word: u32, (wide, toc): (bool, Option<u64>)) -> Note
             set(state, rt, value);
             match value {
                 Some(addr) if !(high && !wide) => Note::Address { reg: rt, addr },
+                // The tracker may know the base the decoder lost: the PIC
+                // register, set at the function's start.
+                _ if ra != 0 => Note::Offset {
+                    reg: rt,
+                    src: ra,
+                    imm: wrap(add),
+                },
                 _ => Note::Clobber(1 << rt),
             }
         }
@@ -199,15 +251,39 @@ fn track(state: &mut State, word: u32, (wide, toc): (bool, Option<u64>)) -> Note
             set(state, ra, value);
             Note::Copy { reg: ra, src: rt }
         }
-        // ADD rT, rA, rB: a table's entry plus its base.
+        // ADD rT, rA, rB: a base plus a scaled case value, which a load
+        // reads through, or a table's entry plus its base.
         31 if xo & 0x1ff == 266 => {
             set(state, rt, None);
-            Note::Add {
+            if let Some((reg, shift)) = scaled
+                && (reg == ra || reg == rb)
+            {
+                let base = if reg == rb { ra } else { rb };
+                state.indexed = Some((rt, base, reg, shift));
+                Note::None
+            } else {
+                Note::Add {
+                    reg: rt,
+                    base: ra,
+                    index: rb,
+                    shift: 0,
+                    extend: Extend::None,
+                }
+            }
+        }
+        // LBZX, LHZX rT, rA, rB: a byte map's (or a halfword table's) entry.
+        31 if matches!(xo, 87 | 279) => {
+            set(state, rt, None);
+            Note::Load {
                 reg: rt,
-                base: ra,
-                index: rb,
-                shift: 0,
-                extend: Extend::None,
+                mem: Mem {
+                    base: Some(ra).filter(|&ra| ra != 0),
+                    index: Some(rb),
+                    scale: 1,
+                    disp: 0,
+                },
+                size: if xo == 87 { 1 } else { 2 },
+                signed: false,
             }
         }
         // LWAX, LWZX, LDX rT, rA, rB, with rB the scaled case value.
@@ -256,6 +332,42 @@ fn track(state: &mut State, word: u32, (wide, toc): (bool, Option<u64>)) -> Note
                 _ => Note::Clobber(1 << ra),
             }
         }
+        // LD rT, ds(rA) and LWZ rT, d(rA): from a slot, when rA holds a
+        // fixed address (here, or as far as the tracker knows).
+        58 | 32 if (word >> 26 == 32 || word & 3 == 0) && ra != 0 => {
+            let ld = word >> 26 == 58;
+            let disp = if ld { simm & !3 } else { simm };
+            if let Some((sum, base, index, shift)) = indexed
+                && sum == ra
+            {
+                clobber(state, 1 << rt);
+                return Note::Load {
+                    reg: rt,
+                    mem: Mem {
+                        base: Some(base),
+                        index: Some(index),
+                        scale: 1 << shift,
+                        disp,
+                    },
+                    size: if ld { 8 } else { 4 },
+                    signed: false,
+                };
+            }
+            let slot = get(state, ra).map(|base| wrap(base.wrapping_add(disp)));
+            clobber(state, 1 << rt);
+            state.loaded = slot.map(|slot| (rt, slot));
+            let (base, disp) = slot.map_or((Some(ra), disp), |slot| (None, slot));
+            Note::Fetch {
+                reg: rt,
+                mem: Mem {
+                    base,
+                    index: None,
+                    scale: 1,
+                    disp,
+                },
+                size: if ld { 8 } else { 4 },
+            }
+        }
         // Stores, and their update forms, which write rA.
         36 | 38 | 44 | 47 | 52 | 54 => Note::None,
         37 | 39 | 45 | 53 | 55 => clobber(state, 1 << ra),
@@ -265,11 +377,29 @@ fn track(state: &mut State, word: u32, (wide, toc): (bool, Option<u64>)) -> Note
         // X forms either.
         _ => clobber(state, 1 << rt | 1 << ra),
     };
+    // A compare writes only a condition register.
+    let written = if matches!(note, Note::Compare { .. }) {
+        0
+    } else {
+        note.writes()
+    } | state.indexed.map_or(0, |(sum, ..)| 1 << sum);
+    if state.indexed.is_none()
+        && let Some((sum, base, index, _)) = indexed
+        && written & (1 << sum | 1 << base | 1 << index) == 0
+    {
+        state.indexed = indexed;
+    }
     if state.scaled.is_none()
         && let Some((reg, shift)) = scaled
-        && writes(note) >> reg & 1 == 0
+        && written >> reg & 1 == 0
     {
         state.scaled = Some((reg, shift));
+    }
+    if state.loaded.is_none()
+        && let Some((reg, _)) = loaded
+        && written >> reg & 1 == 0
+    {
+        state.loaded = loaded;
     }
     note
 }
@@ -282,18 +412,6 @@ fn clobber(state: &mut State, mask: u32) -> Note {
         }
     }
     Note::Clobber(mask)
-}
-
-/// The registers `note` writes, as a mask.
-fn writes(note: Note) -> u32 {
-    match note {
-        Note::Clobber(mask) => mask,
-        Note::Address { reg, .. }
-        | Note::Copy { reg, .. }
-        | Note::Add { reg, .. }
-        | Note::Load { reg, .. } => 1 << (reg & 31),
-        _ => 0,
-    }
 }
 
 /// Whether `bytes` begin a frame: `mflr r0`, which saves the return
@@ -402,8 +520,56 @@ mod tests {
         assert_eq!(insns[1].flow, Flow::JumpRegister(9));
         // bctr alone
         assert_eq!(run(&[0x4e80_0420], 0x1000)[0].flow, Flow::JumpIndirect);
-        // bcl 20, 31, $+8 over a word of data: a jump past it.
+        // bcl 20, 31, $+8 over a word of data: a jump past it; bl, too.
         assert_eq!(run(&[0x429f_0009], 0x1000)[0].flow, Flow::Jump(0x1008));
+        assert_eq!(run(&[0x4800_0009], 0x1000)[0].flow, Flow::Jump(0x1008));
+    }
+
+    #[test]
+    fn plt_stubs() {
+        // ELFv1: std r2, 40(r1); ld r12, -0x7df8(r2); mtctr r12;
+        // ld r2, -0x7df0(r2); cmpldi r2, 0; bnectr
+        let words = [
+            0xf841_0028_u32,
+            0xe982_8208,
+            0x7d89_03a6,
+            0xe842_8210,
+            0x2822_0000,
+            0x4c82_0420,
+        ];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
+        let mut state = State::default();
+        let insns: Vec<Insn> = (0..words.len())
+            .map(|i| {
+                decode(
+                    &mut state,
+                    (true, true, Some(0x1002_7f00)),
+                    &bytes[i * 4..],
+                    0x1000_0e60 + i as u64 * 4,
+                )
+            })
+            .collect();
+        assert_eq!(insns[5].flow, Flow::JumpSlot(0x1002_0108));
+        assert!(insns[5].falls);
+        // 32-bit: lis r11, 0x1002; lwz r11, 0x108(r11); mtctr r11; bctr
+        let insns = run(
+            &[0x3d60_1002, 0x816b_0108, 0x7d69_03a6, 0x4e80_0420],
+            0x1000,
+        );
+        assert_eq!(insns[3].flow, Flow::JumpSlot(0x1002_0108));
+        // A load whose register is then overwritten is no slot: lwz r11,
+        // 0x108(r11); addi r11, r11, 4; mtctr r11; bctrl
+        let insns = run(
+            &[
+                0x3d60_1002,
+                0x816b_0108,
+                0x396b_0004,
+                0x7d69_03a6,
+                0x4e80_0421,
+            ],
+            0x1000,
+        );
+        assert_eq!(insns[4].flow, Flow::CallIndirect);
     }
 
     #[test]

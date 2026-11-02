@@ -217,28 +217,11 @@ fn note(state: &mut State, word: u32, wide: bool, addr: u64) -> Note {
         _ => Note::None,
     };
     if let Some((reg, _)) = state.scaled
-        && writes(note) >> reg & 1 != 0
+        && note.writes() >> reg & 1 != 0
     {
         state.scaled = None;
     }
     note
-}
-
-/// The registers a note says are written, as a mask.
-fn writes(note: Note) -> u32 {
-    match note {
-        Note::None | Note::Push(_) | Note::PushRegister(_) => 0,
-        Note::Clobber(regs) => regs,
-        Note::Compare { reg, .. }
-        | Note::Address { reg, .. }
-        | Note::Load { reg, .. }
-        | Note::Copy { reg, .. }
-        | Note::Offset { reg, .. }
-        | Note::Add { reg, .. }
-        | Note::Sub { reg, .. }
-        | Note::Pop(reg)
-        | Note::Write(reg) => 1 << (reg & 31),
-    }
 }
 
 /// Whether a call's delay slot `word` makes the callee return past the

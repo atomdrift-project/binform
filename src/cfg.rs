@@ -108,6 +108,7 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
         truncated: false,
         entries: BTreeMap::new(),
         imports: image.imports.iter().map(|import| import.slot).collect(),
+        rebased: image.rebased.iter().copied().collect(),
         noreturn: HashSet::new(),
         thunks: HashMap::new(),
         handlers: HashMap::new(),
@@ -237,6 +238,8 @@ struct Work<'a> {
     /// Function starts known so far, and how each was found.
     entries: BTreeMap<u64, Found>,
     imports: HashSet<u64>,
+    /// Slots the loader fills with an address, and the address.
+    rebased: HashMap<u64, u64>,
     /// Slots and functions whose callers never resume.
     noreturn: HashSet<u64>,
     /// Address -> the import slot the code there only jumps through.
@@ -382,9 +385,10 @@ impl Work<'_> {
         self.decoder.reset();
         let mut found = None;
         let mut at = addr;
-        // A stub is a jump through a slot, after at most three instructions
-        // of padding or (on Arm) the address arithmetic that finds the slot.
-        for _ in 0..4 {
+        // A stub is a jump through a slot, after at most five instructions
+        // of padding or the address arithmetic that finds the slot (on
+        // 64-bit PowerPC, a TOC save and restore around the load as well).
+        for _ in 0..6 {
             let Some(bytes) = self.memory.code(at) else {
                 break;
             };
@@ -552,7 +556,19 @@ impl Work<'_> {
                                     | Flow::Jump(_)
                             ))
                     {
-                        tracker.note(insn.note);
+                        let note = match insn.note {
+                            // A slot of this binary that holds an address.
+                            Note::Fetch { reg, mem, size } => tracker
+                                .fixed(mem)
+                                .filter(|slot| !self.imports.contains(slot))
+                                .and_then(|slot| match self.memory.read(slot, size) {
+                                    Some(0) | None => self.rebased.get(&slot).copied(),
+                                    value => value,
+                                })
+                                .map_or(Note::Write(reg), |addr| Note::Address { reg, addr }),
+                            note => note,
+                        };
+                        tracker.note(note);
                     }
                     match insn.flow {
                         Flow::Next => {}
@@ -626,9 +642,24 @@ impl Work<'_> {
                         | Flow::JumpAdd { .. }
                         | Flow::JumpTable { .. } => {
                             let table = tracker.jump(insn.flow);
-                            let targets = table
+                            let mut targets = table
                                 .map(|table| table.targets(&self.memory, self.table_entries))
                                 .unwrap_or_default();
+                            // An unbounded table ends before a target past
+                            // another function's start: the next table, of
+                            // the next function (glibc's printf variants).
+                            if table.is_some_and(|table| !table.bounded()) {
+                                let crosses = |to: u64| {
+                                    let (low, high) = (addr.min(to), addr.max(to));
+                                    self.entries
+                                        .range(low.wrapping_add(1)..=high)
+                                        .next()
+                                        .is_some()
+                                };
+                                if let Some(end) = targets.iter().position(|&to| crosses(to)) {
+                                    targets.truncate(end);
+                                }
+                            }
                             cases.insert(addr, u32::try_from(targets.len()).unwrap_or(u32::MAX));
                             if targets.is_empty() {
                                 unresolved = unresolved.saturating_add(1);
