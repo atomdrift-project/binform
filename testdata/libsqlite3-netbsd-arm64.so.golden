@@ -2376,7 +2376,7 @@ only rizin 0x13bbdc fcn.0013bbdc: not code
 0xe5a30 size=480 blocks=29 edges=44 cc=19 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=29/19
 0xe5c10 size=328 blocks=27 edges=40 cc=19 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=27/19
 0xe5d60 size=356 blocks=21 edges=32 cc=13 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=21/13
-0xe5ec4 size=76 blocks=1 edges=1 cc=0 cases=0 found=SYMBOL | UNWIND rizin=1/0
+0xe5ec4 size=76 blocks=1 edges=1 cc=0 cases=0 found=SYMBOL | UNWIND | TAIL_CALL rizin=1/0
 0xe5f10 size=76 blocks=1 edges=1 cc=0 cases=0 found=SYMBOL | UNWIND rizin=1/0
 0xe5f60 size=152 blocks=7 edges=8 cc=5 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=7/4
 0xe6000 size=336 blocks=13 edges=18 cc=9 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=13/8

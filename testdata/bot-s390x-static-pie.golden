@@ -1,4 +1,4 @@
-# funktion: 230 functions, 72956 bytes of code covered, 0 landing pads, 0 cases
+# funktion: 231 functions, 73028 bytes of code covered, 0 landing pads, 0 cases
 # rizin: 4 functions; 4 shared, 2 with the same blocks (2 of 4 without landing pads)
 0xa00798 size=28 blocks=1 edges=0 cc=1 cases=0 found=LOADER | CALL | SWEEP rizin=-
 0xa007b8 size=48 blocks=1 edges=1 cc=0 cases=0 found=CALL | SWEEP rizin=-
@@ -25,7 +25,8 @@
 0xa68cf8 size=714 blocks=14 edges=18 cc=10 cases=0 found=CALL | SWEEP rizin=-
 0xa68fc8 size=2 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=-
 0xa68fd0 size=526 blocks=30 edges=43 cc=19 cases=0 found=CALL | SWEEP rizin=-
-0xa691e0 size=74 blocks=4 edges=4 cc=2 cases=0 found=SWEEP rizin=-
+0xa691e0 size=74 blocks=4 edges=4 cc=2 cases=0 found=CALL | SWEEP rizin=-
+0xa69230 size=72 blocks=1 edges=1 cc=0 cases=0 found=TAIL_CALL rizin=-
 0xa69278 size=78 blocks=1 edges=0 cc=1 cases=0 found=SWEEP rizin=-
 0xa692c8 size=156 blocks=10 edges=15 cc=7 cases=0 found=CALL | SWEEP rizin=-
 0xa69368 size=20 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=-

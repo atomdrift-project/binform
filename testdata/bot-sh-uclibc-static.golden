@@ -268,7 +268,7 @@ only rizin 0x40b288 fcn.0040b288: not code
 0x409d00 size=222 blocks=15 edges=23 cc=10 cases=0 found=CALL | SWEEP | POINTER rizin=16/10
 0x409e08 size=86 blocks=5 edges=6 cc=3 cases=0 found=CALL | SWEEP | POINTER rizin=4/2
 0x409e40 size=30 blocks=3 edges=3 cc=2 cases=0 found=SWEEP rizin=2/1
-0x409e70 size=208 blocks=13 edges=15 cc=8 cases=0 found=CALL | SWEEP | POINTER rizin=13/8
+0x409e70 size=208 blocks=13 edges=15 cc=8 cases=0 found=CALL | SWEEP | TAIL_CALL | POINTER rizin=13/8
 0x409f60 size=234 blocks=16 edges=22 cc=8 cases=0 found=CALL | SWEEP | POINTER rizin=17/9
 0x40a070 size=98 blocks=15 edges=20 cc=7 cases=0 found=CALL | SWEEP | POINTER rizin=15/7
 0x40a0d2 size=102 blocks=16 edges=22 cc=8 cases=0 found=CALL | SWEEP | POINTER rizin=17/8

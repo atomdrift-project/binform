@@ -179,6 +179,11 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
                 queue.push(entry);
             }
         }
+        for tail in explored.tails {
+            if let Some(entry) = work.add_entry(tail, Found::TAIL_CALL, limits.functions) {
+                queue.push(entry);
+            }
+        }
         for pointer in explored.pointers {
             if let Some(entry) = work.add_entry(pointer, Found::POINTER, limits.functions) {
                 queue.push(entry);
@@ -264,6 +269,8 @@ struct Explored {
     mains: Vec<u64>,
     /// Code addresses it loads: functions whose address is taken.
     pointers: Vec<u64>,
+    /// Fixed addresses it jumps to through a register: tail calls.
+    tails: Vec<u64>,
     /// Address ranges of its instructions.
     runs: Vec<(u64, u64)>,
     /// Instructions on its paths that do not decode.
@@ -476,6 +483,7 @@ impl Work<'_> {
         let mut calls = Vec::new();
         let mut mains = Vec::new();
         let mut pointers = Vec::new();
+        let mut tails = Vec::new();
         let mut ends = HashSet::new(); // calls that never return
         let mut cases: HashMap<u64, u32> = HashMap::new();
         let (mut invalid, mut unresolved) = (0_u64, 0_u64);
@@ -547,6 +555,7 @@ impl Work<'_> {
                     // A compare-and-branch bounds a case value too. A delay
                     // slot runs before a call or jump arrives.
                     if matches!(insn.flow, Flow::Next | Flow::Branch(_))
+                        || matches!(insn.note, Note::Pc { .. })
                         || (self.decoder.delay_slots()
                             && matches!(
                                 insn.flow,
@@ -558,21 +567,45 @@ impl Work<'_> {
                     {
                         let note = match insn.note {
                             // A slot of this binary that holds an address.
-                            Note::Fetch { reg, mem, size } => tracker
+                            Note::Fetch {
+                                reg,
+                                mem,
+                                size,
+                                signed,
+                            } => tracker
                                 .fixed(mem)
                                 .filter(|slot| !self.imports.contains(slot))
                                 .and_then(|slot| match self.memory.read(slot, size) {
                                     Some(0) | None => self.rebased.get(&slot).copied(),
                                     value => value,
                                 })
+                                .map(|value| {
+                                    let shift = 64 - 8 * u32::from(size.clamp(1, 8));
+                                    if signed {
+                                        ((value << shift).cast_signed() >> shift).cast_unsigned()
+                                    } else {
+                                        value
+                                    }
+                                })
                                 .map_or(Note::Write(reg), |addr| Note::Address { reg, addr }),
                             note => note,
                         };
                         tracker.note(note);
                     }
-                    match insn.flow {
+                    // A register holding a fixed address of code: a call
+                    // there. The walk below sees which.
+                    let flow = match insn.flow {
+                        Flow::CallRegister(reg) => tracker
+                            .held(reg)
+                            .filter(|&to| self.memory.is_code(to))
+                            .map_or(Flow::CallIndirect, Flow::Call),
+                        flow => flow,
+                    };
+                    match flow {
                         Flow::Next => {}
-                        Flow::CallIndirect => tracker.call(self.decoder.call_preserved()),
+                        Flow::CallIndirect | Flow::CallRegister(_) => {
+                            tracker.call(self.decoder.call_preserved());
+                        }
                         Flow::Call(to) => {
                             mains.extend(self.main(entry, to, next, &tracker));
                             tracker.call(self.decoder.call_preserved());
@@ -633,6 +666,27 @@ impl Work<'_> {
                                 to: slot,
                                 kind: RefKind::Jump,
                             });
+                            if !insn.falls {
+                                break;
+                            }
+                        }
+                        // A register holding a fixed address of code: a
+                        // tail call, as code of this function would be
+                        // reached by a direct branch (musl's PowerPC start
+                        // code computes the next stage's address from the
+                        // PC; s390x `larl %r1, f; br %r1`).
+                        Flow::JumpRegister(reg)
+                            if tracker
+                                .held(reg)
+                                .is_some_and(|to| to != entry && self.memory.is_code(to)) =>
+                        {
+                            let to = tracker.held(reg).unwrap_or_default();
+                            refs.push(Ref {
+                                from: addr,
+                                to,
+                                kind: RefKind::Jump,
+                            });
+                            tails.push(to);
                             if !insn.falls {
                                 break;
                             }
@@ -736,6 +790,7 @@ impl Work<'_> {
             calls,
             mains,
             pointers,
+            tails,
             runs: runs(&insns),
             invalid,
             unresolved,

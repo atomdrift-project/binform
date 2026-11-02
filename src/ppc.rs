@@ -19,8 +19,6 @@ use crate::decode::{Extend, Flow, Insn, Mem, Note};
 /// What earlier instructions left that a later one needs.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct State {
-    /// The register `mtctr` last copied into `ctr`.
-    ctr: Option<u32>,
     /// The slot `ctr`'s value was loaded from: a PLT stub's (`ld r12,
     /// n(r2); mtctr r12; bctr`).
     ctr_slot: Option<u64>,
@@ -42,6 +40,16 @@ pub(crate) struct State {
 /// The registers a call may change: r0 and r3-r12.
 const VOLATILE: u32 = 0x1ff9;
 
+/// The number `lr` goes by in notes, past the general registers: the
+/// tracker carries the PC a `bcl` or `bl` over data leaves there to the
+/// `mflr` in the block it jumps to.
+const LR: u32 = 40;
+
+/// The number `ctr` goes by in notes: `mtctr` copies a register there, and
+/// `bctr` jumps to (`bctrl` calls) what it holds, even when the register
+/// changed in between (`mtctr r4; mr r4, r5; bctrl`) or in another block.
+const CTR: u32 = 41;
+
 /// `nop` (`ori 0, 0, 0`).
 const NOP: u32 = 0x6000_0000;
 
@@ -54,6 +62,16 @@ pub(crate) fn decode(
     let Some(word) = read_word(big, bytes) else {
         return Insn::new(4, Flow::Invalid);
     };
+    // Power10's prefixed instructions: a prefix word, then the instruction
+    // it extends. None transfers control.
+    if word >> 26 == 1 {
+        let Some(suffix) = bytes.get(4..).and_then(|rest| read_word(big, rest)) else {
+            return Insn::new(4, Flow::Invalid);
+        };
+        let mut insn = Insn::new(8, Flow::Next);
+        insn.note = prefixed(state, word, suffix, addr);
+        return insn;
+    }
     let wrap = |target: u64| if wide { target } else { target & 0xffff_ffff };
     let link = word & 1 != 0;
     let absolute = word & 2 != 0;
@@ -111,15 +129,15 @@ pub(crate) fn decode(
             16 => (Flow::Return, !always),
             // BCCTR: `bctr` jumps through ctr; `bctrl` calls.
             528 if link => (
-                state.ctr_slot.map_or(Flow::CallIndirect, Flow::CallSlot),
+                state
+                    .ctr_slot
+                    .map_or(Flow::CallRegister(CTR), Flow::CallSlot),
                 false,
             ),
             528 => (
-                match (state.ctr_slot, state.ctr) {
-                    (Some(slot), _) => Flow::JumpSlot(slot),
-                    (None, Some(reg)) => Flow::JumpRegister(reg),
-                    (None, None) => Flow::JumpIndirect,
-                },
+                state
+                    .ctr_slot
+                    .map_or(Flow::JumpRegister(CTR), Flow::JumpSlot),
                 !always,
             ),
             _ => (Flow::Next, false),
@@ -133,11 +151,24 @@ pub(crate) fn decode(
     let mut note = Note::None;
     match flow {
         // `bcl 20, 31, $+4` leaves its own address in `lr`.
-        Flow::Next if word >> 26 == 16 => state.lr = Some(next),
+        Flow::Next if word >> 26 == 16 => {
+            state.lr = Some(next);
+            note = Note::Pc {
+                reg: LR,
+                addr: next,
+            };
+        }
+        // So does a `bl` or `bcl` over data, for the block past it.
+        Flow::Jump(_) if link => {
+            *state = State::default();
+            note = Note::Pc {
+                reg: LR,
+                addr: next,
+            };
+        }
         Flow::Next => note = track(state, word, (wide, toc)),
         // A callee may change ctr and the volatile registers.
-        Flow::Call(_) | Flow::CallIndirect | Flow::CallSlot(_) => {
-            state.ctr = None;
+        Flow::Call(_) | Flow::CallIndirect | Flow::CallRegister(_) | Flow::CallSlot(_) => {
             state.ctr_slot = None;
             state.loaded = None;
             state.lr = None;
@@ -174,12 +205,11 @@ fn track(state: &mut State, word: u32, (wide, toc): (bool, Option<u64>)) -> Note
     let xo = (word >> 1) & 0x3ff;
     // MTSPR ctr, rS (`mtctr rS`): SPR 9, its halves swapped in the field.
     if word & 0xfc1f_fffe == 0x7c09_03a6 {
-        state.ctr = Some(rt);
         state.ctr_slot = state
             .loaded
             .filter(|&(reg, _)| reg == rt)
             .map(|(_, slot)| slot);
-        return Note::None;
+        return Note::Copy { reg: CTR, src: rt };
     }
     // MFSPR rT, lr (`mflr rT`): the PC, after `bcl`. MTSPR lr, rS.
     if word & 0xfc1f_fffe == 0x7c08_02a6 {
@@ -188,11 +218,14 @@ fn track(state: &mut State, word: u32, (wide, toc): (bool, Option<u64>)) -> Note
             *slot = value;
         }
         state.loaded = state.loaded.filter(|&(reg, _)| reg != rt);
-        return value.map_or(Note::Clobber(1 << rt), |addr| Note::Pc { reg: rt, addr });
+        return value.map_or(Note::Copy { reg: rt, src: LR }, |addr| Note::Pc {
+            reg: rt,
+            addr,
+        });
     }
     if word & 0xfc1f_fffe == 0x7c08_03a6 {
         state.lr = None;
-        return Note::None;
+        return Note::Copy { reg: LR, src: rt };
     }
     let get = |state: &State, reg: u32| match (reg, toc) {
         (2, Some(toc)) if wide => Some(toc),
@@ -332,11 +365,13 @@ fn track(state: &mut State, word: u32, (wide, toc): (bool, Option<u64>)) -> Note
                 _ => Note::Clobber(1 << ra),
             }
         }
-        // LD rT, ds(rA) and LWZ rT, d(rA): from a slot, when rA holds a
-        // fixed address (here, or as far as the tracker knows).
-        58 | 32 if (word >> 26 == 32 || word & 3 == 0) && ra != 0 => {
-            let ld = word >> 26 == 58;
-            let disp = if ld { simm & !3 } else { simm };
+        // LD rT, ds(rA), LWA rT, ds(rA) and LWZ rT, d(rA): from a slot,
+        // when rA holds a fixed address (here, or as far as the tracker
+        // knows). musl's start code reads an offset with `lwa`.
+        58 | 32 if (word >> 26 == 32 || word & 3 != 1) && ra != 0 => {
+            let ld = word >> 26 == 58 && word & 3 == 0;
+            let lwa = word >> 26 == 58 && word & 3 == 2;
+            let disp = if word >> 26 == 58 { simm & !3 } else { simm };
             if let Some((sum, base, index, shift)) = indexed
                 && sum == ra
             {
@@ -350,7 +385,7 @@ fn track(state: &mut State, word: u32, (wide, toc): (bool, Option<u64>)) -> Note
                         disp,
                     },
                     size: if ld { 8 } else { 4 },
-                    signed: false,
+                    signed: lwa,
                 };
             }
             let slot = get(state, ra).map(|base| wrap(base.wrapping_add(disp)));
@@ -366,6 +401,7 @@ fn track(state: &mut State, word: u32, (wide, toc): (bool, Option<u64>)) -> Note
                     disp,
                 },
                 size: if ld { 8 } else { 4 },
+                signed: lwa,
             }
         }
         // Stores, and their update forms, which write rA.
@@ -402,6 +438,48 @@ fn track(state: &mut State, word: u32, (wide, toc): (bool, Option<u64>)) -> Note
         state.loaded = loaded;
     }
     note
+}
+
+/// What the prefixed instruction `prefix`, `suffix` at `addr` leaves in a
+/// register: a PC-relative address (`pla rT, f@pcrel`, the `paddi` form
+/// with R set), or a load from one (`pld rT, f@got@pcrel`: a GOT slot, as
+/// a Power10 PLT stub's `pld r12; mtctr r12; bctr` reads).
+fn prefixed(state: &mut State, prefix: u32, suffix: u32, addr: u64) -> Note {
+    let (kind, relative) = ((prefix >> 24) & 3, prefix >> 20 & 1 != 0);
+    let (opcode, rt, ra) = (suffix >> 26, (suffix >> 21) & 0x1f, (suffix >> 16) & 0x1f);
+    // The 34-bit immediate: 18 bits in the prefix, 16 in the suffix.
+    let imm = (i64::from(prefix & 0x3_ffff) << 16 | i64::from(suffix & 0xffff)) << 30 >> 30;
+    let target = (relative && ra == 0).then(|| addr.wrapping_add_signed(imm));
+    state.loaded = None;
+    match (kind, opcode, target) {
+        // PADDI (MLS:D-form): `pla`, `pli`.
+        (2, 14, Some(addr)) => {
+            if let Some(slot) = state.regs.get_mut(rt as usize) {
+                *slot = Some(addr);
+            }
+            Note::Address { reg: rt, addr }
+        }
+        // PLD (8LS:D-form), PLWZ (MLS:D-form).
+        (0, 57, Some(slot)) | (2, 32, Some(slot)) => {
+            let note = Note::Fetch {
+                reg: rt,
+                mem: Mem {
+                    base: None,
+                    index: None,
+                    scale: 1,
+                    disp: slot,
+                },
+                size: if opcode == 57 { 8 } else { 4 },
+                signed: false,
+            };
+            clobber(state, 1 << rt);
+            state.loaded = Some((rt, slot));
+            note
+        }
+        // Prefixed stores write no register.
+        (0, 61 | 62 | 54 | 60, _) | (2, 36 | 38 | 44 | 52 | 54, _) => Note::None,
+        _ => clobber(state, 1 << rt),
+    }
 }
 
 /// Forget the registers in `mask`.
@@ -502,7 +580,7 @@ mod tests {
                 Flow::Return,
                 Flow::Return,
                 Flow::CallIndirect,
-                Flow::CallIndirect,
+                Flow::CallRegister(CTR),
                 Flow::Stop,
                 Flow::Next,
                 Flow::Branch(0x1014),
@@ -517,9 +595,10 @@ mod tests {
     fn jumps_through_ctr() {
         // mtctr r9; bctr
         let insns = run(&[0x7d29_03a6, 0x4e80_0420], 0x1000);
-        assert_eq!(insns[1].flow, Flow::JumpRegister(9));
-        // bctr alone
-        assert_eq!(run(&[0x4e80_0420], 0x1000)[0].flow, Flow::JumpIndirect);
+        assert_eq!(insns[0].note, Note::Copy { reg: CTR, src: 9 });
+        assert_eq!(insns[1].flow, Flow::JumpRegister(CTR));
+        // bctrl
+        assert_eq!(run(&[0x4e80_0421], 0x1000)[0].flow, Flow::CallRegister(CTR));
         // bcl 20, 31, $+8 over a word of data: a jump past it; bl, too.
         assert_eq!(run(&[0x429f_0009], 0x1000)[0].flow, Flow::Jump(0x1008));
         assert_eq!(run(&[0x4800_0009], 0x1000)[0].flow, Flow::Jump(0x1008));
@@ -569,7 +648,43 @@ mod tests {
             ],
             0x1000,
         );
-        assert_eq!(insns[4].flow, Flow::CallIndirect);
+        assert_eq!(insns[4].flow, Flow::CallRegister(CTR));
+    }
+
+    #[test]
+    fn prefixed() {
+        // pld r12, 0x2000(0), 1 (`f@got@pcrel`); mtctr r12; bctr: a Power10
+        // PLT stub.
+        let words = [0x0410_0000_u32, 0xe580_2000, 0x7d89_03a6, 0x4e80_0420];
+        let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
+        let mut state = State::default();
+        let mut at = 0;
+        let mut insns = Vec::new();
+        while at < bytes.len() {
+            let insn = decode(
+                &mut state,
+                (true, true, None),
+                &bytes[at..],
+                0x1000 + at as u64,
+            );
+            at += insn.len as usize;
+            insns.push(insn);
+        }
+        assert_eq!(insns[0].len, 8);
+        assert_eq!(insns.len(), 3);
+        assert_eq!(insns[2].flow, Flow::JumpSlot(0x3000));
+        // pla r3, -0x10 (prefix 0x0613ffff, suffix 0x3860fff0): an address
+        // behind the instruction.
+        let insns = run(&[0x0613_ffff, 0x3860_fff0], 0x1000);
+        assert_eq!(
+            insns[0].note,
+            Note::Address {
+                reg: 3,
+                addr: 0xff0
+            }
+        );
+        // A prefix cut short does not decode.
+        assert_eq!(run(&[0x0410_0000], 0x1000)[0].flow, Flow::Invalid);
     }
 
     #[test]
@@ -667,7 +782,8 @@ mod tests {
                 extend: Extend::None
             }
         );
-        assert_eq!(insns[7].flow, Flow::JumpRegister(9));
+        assert_eq!(insns[6].note, Note::Copy { reg: CTR, src: 9 });
+        assert_eq!(insns[7].flow, Flow::JumpRegister(CTR));
     }
 
     #[test]

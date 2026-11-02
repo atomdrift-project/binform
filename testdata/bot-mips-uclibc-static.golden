@@ -149,7 +149,7 @@ only rizin 0x40d228 fcn.0040d228: inside 0x40d1c0
 0x40ab50 size=128 blocks=3 edges=3 cc=2 cases=0 found=CALL | SWEEP | POINTER rizin=1/0
 0x40abd0 size=120 blocks=3 edges=3 cc=2 cases=0 found=CALL | SWEEP | POINTER rizin=-
 0x40ac50 size=84 blocks=3 edges=3 cc=2 cases=0 found=CALL | SWEEP | POINTER rizin=-
-0x40acb0 size=492 blocks=15 edges=23 cc=10 cases=0 found=CALL | SWEEP | POINTER rizin=18/10
+0x40acb0 size=492 blocks=15 edges=23 cc=10 cases=0 found=CALL | SWEEP | TAIL_CALL | POINTER rizin=18/10
 0x40aea0 size=180 blocks=8 edges=10 cc=6 cases=0 found=CALL | SWEEP | POINTER rizin=-
 0x40af60 size=396 blocks=13 edges=17 cc=6 cases=0 found=CALL | SWEEP | POINTER rizin=-
 0x40b0f0 size=472 blocks=17 edges=22 cc=9 cases=0 found=CALL | SWEEP | POINTER rizin=5/2

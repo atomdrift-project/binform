@@ -1456,7 +1456,7 @@
 0xa60f0 size=48 blocks=3 edges=2 cc=3 cases=0 found=SYMBOL | CALL | SWEEP rizin=-
 0xa6120 size=44 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL rizin=-
 0xa6150 size=132 blocks=4 edges=4 cc=2 cases=0 found=SYMBOL rizin=-
-0xa61e0 size=264 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL rizin=-
+0xa61e0 size=264 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | TAIL_CALL rizin=-
 0xa62f0 size=2 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | CALL | SWEEP rizin=-
 0xa6300 size=36 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | CALL | SWEEP rizin=-
 0xa6330 size=24 blocks=1 edges=1 cc=0 cases=0 found=SYMBOL | CALL | SWEEP rizin=-
@@ -1467,33 +1467,33 @@
 0xa64f0 size=144 blocks=5 edges=4 cc=5 cases=0 found=SYMBOL | CALL | SWEEP rizin=-
 0xa6590 size=14 blocks=1 edges=1 cc=0 cases=0 found=SYMBOL | CALL | SWEEP rizin=-
 0xa65a0 size=556 blocks=55 edges=54 cc=55 cases=0 found=SYMBOL | CALL | SWEEP rizin=-
-0xa67d0 size=204 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL rizin=-
-0xa68a0 size=204 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL rizin=-
-0xa6970 size=204 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL rizin=-
-0xa6a40 size=210 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL rizin=-
-0xa6b20 size=210 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL rizin=-
-0xa6c00 size=210 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL rizin=-
-0xa6ce0 size=210 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL rizin=-
-0xa6dc0 size=210 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL rizin=-
-0xa6ea0 size=220 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL rizin=-
-0xa6f80 size=220 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL rizin=-
-0xa7060 size=220 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL rizin=-
-0xa7140 size=222 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL rizin=-
-0xa7220 size=228 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL rizin=-
-0xa7310 size=228 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL rizin=-
-0xa7400 size=228 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL rizin=-
-0xa74f0 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL rizin=-
-0xa7620 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL rizin=-
-0xa7750 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL rizin=-
-0xa7880 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL rizin=-
-0xa79b0 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL rizin=-
-0xa7ae0 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL rizin=-
-0xa7c10 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL rizin=-
-0xa7d40 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL rizin=-
-0xa7e70 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL rizin=-
-0xa7fa0 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL rizin=-
-0xa80d0 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL rizin=-
-0xa8200 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL rizin=-
+0xa67d0 size=204 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa68a0 size=204 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa6970 size=204 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa6a40 size=210 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa6b20 size=210 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa6c00 size=210 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa6ce0 size=210 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa6dc0 size=210 blocks=8 edges=10 cc=4 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa6ea0 size=220 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa6f80 size=220 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa7060 size=220 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa7140 size=222 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa7220 size=228 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa7310 size=228 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa7400 size=228 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa74f0 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa7620 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa7750 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa7880 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa79b0 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa7ae0 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa7c10 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa7d40 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa7e70 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa7fa0 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa80d0 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | TAIL_CALL rizin=-
+0xa8200 size=292 blocks=9 edges=12 cc=5 cases=0 found=SYMBOL | TAIL_CALL rizin=-
 0xa8330 size=2 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | CALL | SWEEP rizin=-
 0xa8340 size=188 blocks=4 edges=5 cc=3 cases=0 found=SYMBOL | CALL | SWEEP rizin=-
 0xa8400 size=42 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | CALL | SWEEP rizin=-
@@ -1573,7 +1573,7 @@
 0xa9b00 size=6 blocks=1 edges=1 cc=0 cases=0 found=SYMBOL | CALL | SWEEP rizin=-
 0xa9b10 size=42 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL rizin=-
 0xa9b40 size=42 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL rizin=-
-0xa9b70 size=6 blocks=1 edges=1 cc=0 cases=0 found=SYMBOL rizin=-
+0xa9b70 size=6 blocks=1 edges=1 cc=0 cases=0 found=SYMBOL | TAIL_CALL rizin=-
 0xa9b80 size=6 blocks=1 edges=1 cc=0 cases=0 found=SYMBOL | CALL | SWEEP rizin=-
 0xa9b90 size=6 blocks=1 edges=1 cc=0 cases=0 found=SYMBOL | CALL | SWEEP rizin=-
 0xa9ba0 size=6 blocks=1 edges=1 cc=0 cases=0 found=SYMBOL | CALL | SWEEP rizin=-

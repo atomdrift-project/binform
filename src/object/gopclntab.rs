@@ -9,11 +9,12 @@
 //! - Go 1.2-1.15 (`0xfffffffb`): after the 8-byte header, the function
 //!   count, then (entry, offset) pairs of pointers; each offset finds the
 //!   function's record, whose name offset counts from the table's start.
-//! - Go 1.16-1.17 (`0xfffffff0`): the header holds the count and the
+//! - Go 1.16-1.17 (`0xfffffffa`): the header holds the count and the
 //!   offsets of the name table and of the function table; entries are
 //!   pointers.
-//! - Go 1.18 and later (`0xfffffffa`, `0xfffffff1`): as 1.16, with the
-//!   text start in the header, and entries 32-bit offsets from it.
+//! - Go 1.18 and later (`0xfffffff0`, and `0xfffffff1` from 1.20): as
+//!   1.16, with the text start in the header, and entries 32-bit offsets
+//!   from it.
 //!
 //! Obfuscators (garble) overwrite the magic number. A table found by its
 //! section's name is read with any magic whose header is a Go 1.18 one: its
@@ -26,7 +27,7 @@ const MOST: usize = 1 << 21;
 const LONGEST: usize = 1 << 12;
 
 /// The magic numbers of the layouts, oldest first.
-pub(super) const MAGICS: [u32; 4] = [0xffff_fffb, 0xffff_fff0, 0xffff_fffa, 0xffff_fff1];
+pub(super) const MAGICS: [u32; 4] = [0xffff_fffb, 0xffff_fffa, 0xffff_fff0, 0xffff_fff1];
 
 /// Every function in `table` as (entry, name), in entry order, up to the
 /// first entry out of order. `text` is the start of the code, which entries
@@ -78,7 +79,7 @@ fn functions_of(
     };
     let (names, functab, entry_size, base) = match magic {
         0xffff_fffb => (0, u64::try_from(8 + ptr).ok()?, ptr, 0),
-        0xffff_fff0 => (word(2)?, word(6)?, ptr, 0),
+        0xffff_fffa => (word(2)?, word(6)?, ptr, 0),
         _ if MAGICS.contains(&magic) || (named && ordered()) => {
             let start = match word(2)? {
                 0 => text?,
@@ -141,7 +142,7 @@ fn uint_at(bytes: &[u8], at: usize, size: usize, big: bool) -> Option<u64> {
 mod tests {
     use super::*;
 
-    /// A Go 1.20 table with two functions, `main.main` and `main.f`, at
+    /// A Go 1.20 (and 1.18) table with two functions, `main.main` and `main.f`, at
     /// 0x10 and 0x40 past a text start the header leaves out.
     #[test]
     fn go_1_20() {
@@ -166,6 +167,10 @@ mod tests {
             (0x40_1040, "main.f".to_owned()),
         ];
         assert_eq!(functions(&table, Some(0x40_1000), false, false), both);
+        // Go 1.18 and 1.19 lay it out the same under their own magic.
+        let mut go_1_18 = table.clone();
+        go_1_18[0] = 0xf0;
+        assert_eq!(functions(&go_1_18, Some(0x40_1000), false, false), both);
         assert!(
             functions(&table, None, false, false).is_empty(),
             "no text start"

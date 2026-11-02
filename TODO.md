@@ -47,11 +47,23 @@ only. Next:
   too. An unbounded table stops at a target past another function's
   start (`bot-ppc-static`, `bot-ppc64-elfv1`, `ppc64le-static`,
   `ppc-pie`; `jq` 1.8.1 covers 96% 32-bit, with 106 unresolved jumps,
-  mostly calls through pointers, and 90% `ppc64el`, with 10). Left: jumps
-  through a register holding a known address (musl's `bl 1f; .long f -
-  .; 1: mflr r6; lwz; add; mtctr; bctr` in `ppc-pie`), Go's ppc64 code
-  (`ppc64/bad-154c...` covers 76%), 32-bit little-endian PowerPC, and
-  Power10 prefixed instructions.
+  mostly calls through pointers, and 91% `ppc64el`, with 11). `lr` and
+  `ctr` travel through the tracker, so musl's `bl 1f; .long f - .; 1:
+  mflr r6; lwz; add; mtctr r4; mr r4, r5; bctrl` calls `f`. Go's ppc64
+  code covers 98% (`ppc64/bad-154c...`, once its Go 1.18 `.gopclntab`
+  was read: the 1.16 and 1.18 magic numbers had been swapped, which also
+  cost `s390x/pkg-esbuild` and `mips/pkg-turbo` a fifth of their code).
+  Power10's eight-byte prefixed instructions decode, with `pla` addresses
+  and `pld` GOT slots PC-relative (`ppc64le-power10-pie`). Left: 32-bit
+  little-endian PowerPC (no sample), and `_start_c` not known to never
+  return, so the data word after the call to it reads as an invalid
+  instruction.
+- **Register jumps and calls to known addresses** (every set): a jump
+  through a register the tracker holds a code address in is a tail call
+  (s390x `larl; br`, MIPS `lui; addiu; jr`, SuperH literal-pool `jmp`,
+  Go's `reflect.call` dispatch); PowerPC's `bctrl` likewise calls it.
+  Other sets' register calls (`jalr`, `blx`, `call rax`) still decode as
+  `CallIndirect`, with no register to look up.
 - **Not supported at all:** AIX (XCOFF).
 
 - **From the exotic-binaries survey** (`C:\data\exotic_binaries`, all

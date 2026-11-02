@@ -49,6 +49,9 @@ pub(crate) enum Flow {
     CallSlot(u64),
     /// Call through a register or computed address.
     CallIndirect,
+    /// Call to the address in a register: a direct call, when the walk
+    /// knows that address (PowerPC's `mtctr; bctrl`).
+    CallRegister(u32),
     /// Jump through the pointer stored at a fixed address.
     JumpSlot(u64),
     /// Jump through the pointer stored at a computed address: a jump table,
@@ -95,8 +98,13 @@ pub(crate) enum Note {
     Pc { reg: u32, addr: u64 },
     /// `reg =` the `size`-byte value at the fixed address `mem` names: the
     /// address a GOT or TOC slot holds (a jump table's, in 32-bit PowerPC
-    /// PIC code: `lwz r3, n(r30)`).
-    Fetch { reg: u32, mem: Mem, size: u8 },
+    /// PIC code: `lwz r3, n(r30)`), sign-extended when `signed`.
+    Fetch {
+        reg: u32,
+        mem: Mem,
+        size: u8,
+        signed: bool,
+    },
     /// `reg = the size-byte value at mem`, sign-extended when `signed`.
     Load {
         reg: u32,

@@ -36,7 +36,7 @@ only rizin 0x1011e78 fcn.01011e78: inside 0x1011e70
 0x1010624 size=604 blocks=31 edges=43 cc=18 cases=0 found=CALL | SWEEP rizin=-
 0x101088c size=148 blocks=4 edges=5 cc=3 cases=0 found=CALL | SWEEP rizin=-
 0x101092c size=128 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=-
-0x10109b8 size=112 blocks=1 edges=0 cc=1 cases=0 found=SWEEP rizin=-
+0x10109b8 size=112 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=-
 0x1010a30 size=184 blocks=8 edges=10 cc=4 cases=0 found=CALL | SWEEP rizin=-
 0x1010af4 size=248 blocks=5 edges=6 cc=3 cases=0 found=CALL | SWEEP rizin=-
 0x1010bf8 size=460 blocks=23 edges=32 cc=13 cases=0 found=CALL | SWEEP rizin=-

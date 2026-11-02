@@ -913,8 +913,32 @@ fn powerpc_pie() {
         assert_eq!(outcome.recovery.invalid, 0);
         // musl's `_dlstart_c` reaches the next stage through the PC
         // (`bl 1f; .long __dls2 - .; 1: mflr r6; lwz r4, 0(r6); add r4,
-        // r4, r6; mtctr r4; bctr`), which funktion does not follow.
-        finds_rizin_before(outcome, 4, &[0x107d8]);
+        // r4, r6; mtctr r4; mr r4, r5; bctrl`), its address carried
+        // through `lr` and `ctr`.
+        let entries = outcome.entries();
+        assert!(
+            entries
+                .get(&0x107d8)
+                .is_some_and(|f| f.found.contains(Found::CALL)),
+            "__dls2 missed"
+        );
+        finds_rizin_before(outcome, 4, &[]);
+    });
+}
+
+/// Power10: eight-byte prefixed instructions, a jump table addressed
+/// PC-relative (`pla`), and musl's start code jumping through `ctr` to an
+/// address computed from `lr` and an `lwa`.
+#[test]
+fn powerpc64le_power10() {
+    check("ppc64le-power10-pie", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::PowerPc64El);
+        assert!(coverage(outcome) >= 80, "covers {}%", coverage(outcome));
+        assert_eq!(outcome.cases(), 20, "pick's cases");
+        assert_eq!(outcome.recovery.unresolved, 0);
+        // The data word after the call to `_start_c`, which never returns.
+        assert!(outcome.recovery.invalid <= 1);
+        finds_rizin_before(outcome, 8, &[]);
     });
 }
 
