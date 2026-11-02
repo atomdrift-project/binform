@@ -25,18 +25,15 @@ fn main() -> ExitCode {
             None => line.parse().ok(),
         };
         let Some(offset) = offset else { continue };
-        let body = bytes
-            .get(offset..)
-            .and_then(funktion::cil::body)
-            .map(|b| {
-                json!({
-                    "size": b.size,
-                    "instructions": b.instructions,
-                    "blocks": b.blocks,
-                    "edges": b.edges,
-                    "complexity": b.complexity,
-                })
-            });
+        let body = bytes.get(offset..).and_then(funktion::cil::body).map(|b| {
+            json!({
+                "size": b.size,
+                "instructions": b.instructions,
+                "blocks": b.blocks,
+                "edges": b.edges,
+                "complexity": b.complexity,
+            })
+        });
         println!("{}", json!({"offset": offset, "body": body}));
     }
     ExitCode::SUCCESS

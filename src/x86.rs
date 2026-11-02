@@ -1,6 +1,6 @@
 //! x86 and x86-64, through `iced-x86`.
 
-use crate::decode::{Flow, Insn, Mem, Note};
+use crate::decode::{Extend, Flow, Insn, Mem, Note};
 use iced_x86::{
     Code, Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind, Register,
 };
@@ -16,6 +16,17 @@ pub(crate) fn decode(bitness: u32, got: Option<u64>, bytes: &[u8], addr: u64) ->
         };
     }
     let len = u32::try_from(instruction.len()).unwrap_or(1).max(1);
+    let next = addr.wrapping_add(u64::from(len));
+    // A call to the next instruction only pushes its address: 32-bit
+    // position-independent code reads the address back with a `pop`.
+    if instruction.flow_control() == FlowControl::Call && near(&instruction) == Some(next) {
+        return Insn {
+            len,
+            flow: Flow::Next,
+            note: Note::Push(next),
+            pad: false,
+        };
+    }
     let flow = match instruction.flow_control() {
         FlowControl::Next if instruction.mnemonic() == Mnemonic::Hlt => Flow::Stop,
         FlowControl::Next => Flow::Next,
@@ -92,22 +103,58 @@ fn near(instruction: &Instruction) -> Option<u64> {
     .then(|| instruction.near_branch_target())
 }
 
+/// The register a 32-bit PC thunk (`mov reg, [esp]; ret`) at the start of
+/// `bytes` returns the caller's address in.
+pub(crate) fn pc_thunk(bytes: &[u8]) -> Option<u32> {
+    const REGISTERS: [Register; 8] = [
+        Register::EAX,
+        Register::ECX,
+        Register::EDX,
+        Register::EBX,
+        Register::ESP,
+        Register::EBP,
+        Register::ESI,
+        Register::EDI,
+    ];
+    match *bytes.get(..4)? {
+        [0x8b, modrm, 0x24, 0xc3] if modrm & 0xc7 == 0x04 => REGISTERS
+            .get(usize::from(modrm >> 3 & 7))
+            .copied()
+            .map(register_id),
+        _ => None,
+    }
+}
+
+/// The register of the System V x86-64 convention's `n`th integer argument.
+pub(crate) fn argument(n: usize) -> Option<u32> {
+    [Register::RDI, Register::RSI, Register::RDX, Register::RCX]
+        .get(n)
+        .map(|&register| register_id(register))
+}
+
 /// What the instruction does to its first operand, when that is a register.
 /// Implicit writes (`mul`, `cpuid`, string instructions) go unnoticed; none
 /// sits between a jump-table bound and its jump.
 fn note(instruction: &Instruction, bitness: u32) -> Note {
+    if instruction.mnemonic() == Mnemonic::Push && is_immediate(instruction.op0_kind()) {
+        return Note::Push(instruction.immediate(0));
+    }
     if instruction.op_count() == 0 || instruction.op0_kind() != OpKind::Register {
         return Note::None;
     }
     let reg = register_id(instruction.op0_register());
     let source = instruction.op1_kind();
+    // A 32-bit write in 64-bit code truncates an address.
+    let whole = bitness == 32 || instruction.op0_register().size() == 8;
     match instruction.mnemonic() {
         Mnemonic::Cmp if is_immediate(source) => Note::Compare {
             reg,
             imm: instruction.immediate(1),
         },
+        Mnemonic::Push => Note::PushRegister(reg),
+        Mnemonic::Pop => Note::Pop(reg),
         // Read their first operand without writing it.
-        Mnemonic::Cmp | Mnemonic::Test | Mnemonic::Bt | Mnemonic::Push => Note::None,
+        Mnemonic::Cmp | Mnemonic::Test | Mnemonic::Bt => Note::None,
         Mnemonic::Lea => match mem(instruction, bitness) {
             Mem {
                 base: None,
@@ -115,8 +162,30 @@ fn note(instruction: &Instruction, bitness: u32) -> Note {
                 disp,
                 ..
             } => Note::Address { reg, addr: disp },
+            Mem {
+                base: Some(src),
+                index: None,
+                disp,
+                ..
+            } if whole => Note::Offset {
+                reg,
+                src,
+                imm: disp,
+            },
             _ => Note::Write(reg),
         },
+        Mnemonic::Add if is_immediate(source) && whole => Note::Offset {
+            reg,
+            src: reg,
+            imm: instruction.immediate(1),
+        },
+        // A 32-bit move zero-extends: the value is whole either way.
+        Mnemonic::Mov if is_immediate(source) && instruction.op0_register().size() >= 4 => {
+            Note::Address {
+                reg,
+                addr: instruction.immediate(1),
+            }
+        }
         Mnemonic::Mov | Mnemonic::Movsxd if source == OpKind::Register => Note::Copy {
             reg,
             src: register_id(instruction.op1_register()),
@@ -136,7 +205,10 @@ fn note(instruction: &Instruction, bitness: u32) -> Note {
         }
         Mnemonic::Add if source == OpKind::Register => Note::Add {
             reg,
-            src: register_id(instruction.op1_register()),
+            base: reg,
+            index: register_id(instruction.op1_register()),
+            shift: 0,
+            extend: Extend::None,
         },
         _ => Note::Write(reg),
     }
@@ -308,7 +380,13 @@ mod tests {
         // add rcx, r10; jmp rcx
         assert_eq!(
             one(64, &[0x49, 0x03, 0xca], at).note,
-            Note::Add { reg: ecx, src: r10 }
+            Note::Add {
+                reg: ecx,
+                base: ecx,
+                index: r10,
+                shift: 0,
+                extend: Extend::None
+            }
         );
         let jump = one(64, &[0xff, 0xe1], at);
         assert_eq!(
@@ -323,6 +401,37 @@ mod tests {
         );
         assert_eq!(one(64, &[0x85, 0xc0], at).note, Note::None);
         assert_eq!(one(64, &[0x83, 0xe8, 0x09], at).note, Note::Write(eax));
+    }
+
+    /// The two ways 32-bit position-independent code finds its own address.
+    #[test]
+    fn program_counter() {
+        let ebx = register_id(Register::EBX);
+        // __x86.get_pc_thunk.bx: mov ebx, [esp]; ret
+        assert_eq!(pc_thunk(&[0x8b, 0x1c, 0x24, 0xc3]), Some(ebx));
+        assert_eq!(pc_thunk(&[0x8b, 0x1c, 0x24, 0x90]), None);
+        // call +0 at 0x1000; pop ebx; add ebx, 0x1234
+        let call = one(32, &[0xe8, 0, 0, 0, 0], 0x1000);
+        assert_eq!((call.flow, call.note), (Flow::Next, Note::Push(0x1005)));
+        assert_eq!(one(32, &[0x5b], 0x1005).note, Note::Pop(ebx));
+        assert_eq!(
+            one(32, &[0x81, 0xc3, 0x34, 0x12, 0, 0], 0x1006).note,
+            Note::Offset {
+                reg: ebx,
+                src: ebx,
+                imm: 0x1234
+            }
+        );
+        // push 0x8048400 (main, to __libc_start_main)
+        assert_eq!(
+            one(32, &[0x68, 0x00, 0x84, 0x04, 0x08], 0x1000).note,
+            Note::Push(0x804_8400)
+        );
+        // add eax, 1 in 64-bit code truncates.
+        assert_eq!(
+            one(64, &[0x83, 0xc0, 0x01], 0x1000).note,
+            Note::Write(register_id(Register::EAX))
+        );
     }
 
     #[test]

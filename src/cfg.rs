@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::decode::{Decoder, Flow, Insn, Memory};
+use crate::decode::{Decoder, Flow, Insn, Memory, Note};
 use crate::table::Tracker;
 use crate::{Found, Function, Image, Limits, Origin, Recovery, Ref, RefKind};
 
@@ -31,14 +31,33 @@ const NORETURN: [&str; 20] = [
     "exit",
 ];
 
-/// Whether `name` is a function that never returns. Mach-O prefixes C names
-/// with `_`; decorated 32-bit Windows names end in `@N`.
-fn never_returns(name: &str) -> bool {
+/// C runtime start routines, and which of their arguments is `main`.
+const STARTS: [(&str, usize); 3] = [
+    ("__libc_start_main", 0),
+    ("__uClibc_main", 0),
+    // Bionic: `__libc_init(raw_args, onexit, main, structors)`.
+    ("__libc_init", 2),
+];
+
+/// `name` as C spells it: Mach-O prefixes C names with `_`; decorated 32-bit
+/// Windows names end in `@N`.
+fn c_names(name: &str) -> [&str; 2] {
     let name = name.split('@').next().unwrap_or(name);
-    NORETURN.contains(&name)
-        || name
-            .strip_prefix('_')
-            .is_some_and(|name| NORETURN.contains(&name))
+    [name, name.strip_prefix('_').unwrap_or(name)]
+}
+
+/// Whether `name` is a function that never returns.
+fn never_returns(name: &str) -> bool {
+    c_names(name).iter().any(|name| NORETURN.contains(name))
+}
+
+/// Which argument is `main`, when `name` is a C runtime start routine.
+fn main_argument(name: &str) -> Option<usize> {
+    c_names(name).iter().find_map(|name| {
+        STARTS
+            .iter()
+            .find_map(|&(start, argument)| (start == *name).then_some(argument))
+    })
 }
 
 pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
@@ -52,17 +71,32 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
         imports: image.imports.iter().map(|import| import.slot).collect(),
         noreturn: HashSet::new(),
         thunks: HashMap::new(),
+        handlers: HashMap::new(),
+        starts: HashMap::new(),
+        explored: HashSet::new(),
     };
+    for handler in &image.handlers {
+        work.handlers
+            .entry(handler.function)
+            .or_default()
+            .push(handler.addr);
+    }
     for import in &image.imports {
         if never_returns(&import.name) {
             work.noreturn.insert(import.slot);
         }
+        if let Some(argument) = main_argument(&import.name) {
+            work.starts.insert(import.slot, argument);
+        }
     }
     for seed in &image.seeds {
-        if let Origin::Symbol(name) | Origin::Export(name) = &seed.origin
-            && never_returns(name)
-        {
-            work.noreturn.insert(seed.addr);
+        if let Origin::Symbol(name) | Origin::Export(name) = &seed.origin {
+            if never_returns(name) {
+                work.noreturn.insert(seed.addr);
+            }
+            if let Some(argument) = main_argument(name) {
+                work.starts.insert(seed.addr, argument);
+            }
         }
     }
 
@@ -79,7 +113,8 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
     let mut queue: Vec<u64> = work.entries.keys().rev().copied().collect();
     let mut done = HashSet::new();
     while let Some(entry) = queue.pop() {
-        if !done.insert(entry) {
+        // A start another function absorbed is gone from the entries.
+        if !work.entries.contains_key(&entry) || !done.insert(entry) {
             continue;
         }
         if work.truncated {
@@ -89,6 +124,11 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
         for target in explored.calls {
             if work.add_entry(target, Found::CALL, limits.functions) {
                 queue.push(target);
+            }
+        }
+        for main in explored.mains {
+            if work.add_entry(main, Found::MAIN, limits.functions) {
+                queue.push(main);
             }
         }
         runs.extend(explored.runs);
@@ -139,6 +179,13 @@ struct Work<'a> {
     noreturn: HashSet<u64>,
     /// Address -> the import slot the code there only jumps through.
     thunks: HashMap<u64, Option<u64>>,
+    /// Function start -> its landing pads.
+    handlers: HashMap<u64, Vec<u64>>,
+    /// C runtime start routines (functions and import slots) -> which
+    /// argument is `main`.
+    starts: HashMap<u64, usize>,
+    /// Entries explored so far.
+    explored: HashSet<u64>,
 }
 
 /// One explored function, and what it found beyond itself.
@@ -146,6 +193,8 @@ struct Explored {
     function: Function,
     /// Direct call targets.
     calls: Vec<u64>,
+    /// What it passes a C runtime start routine as `main`.
+    mains: Vec<u64>,
     /// Address ranges of its instructions.
     runs: Vec<(u64, u64)>,
 }
@@ -251,6 +300,46 @@ impl Work<'_> {
         found
     }
 
+    /// The `main` a call to `target` (a function or an import slot) at the
+    /// end of the instruction before `next` passes, when `target` is a C
+    /// runtime start routine: one named so, or, unnamed, the routine the
+    /// program's entry point calls just before a trap (`call
+    /// __libc_start_main; hlt`), when `main` travels in a register.
+    fn main(&mut self, entry: u64, target: u64, next: u64, tracker: &Tracker) -> Option<u64> {
+        let named = match self.starts.get(&target) {
+            Some(&argument) => Some(argument),
+            None if self.starts.is_empty() => None,
+            None => self
+                .thunk(target)
+                .and_then(|slot| self.starts.get(&slot).copied()),
+        };
+        let argument = match named {
+            Some(argument) => argument,
+            None => {
+                let start = self
+                    .entries
+                    .get(&entry)
+                    .is_some_and(|f| f.contains(Found::ENTRY));
+                if !start || self.decoder.argument(0).is_none() {
+                    return None;
+                }
+                // A copy decodes it: the walk decodes it again.
+                let bytes = self.memory.code(next)?;
+                if self.decoder.clone().decode(bytes, next).flow != Flow::Stop {
+                    return None;
+                }
+                0
+            }
+        };
+        let main = match self.decoder.argument(argument) {
+            Some(reg) => tracker.held(reg),
+            // On the stack: the last push is the first argument.
+            None if argument == 0 => tracker.pushed(),
+            None => None,
+        }?;
+        self.memory.is_code(main).then_some(main)
+    }
+
     fn never_returns(&mut self, target: u64) -> bool {
         self.noreturn.contains(&target)
             || self
@@ -259,23 +348,51 @@ impl Work<'_> {
     }
 
     fn explore(&mut self, entry: u64) -> Explored {
+        self.explored.insert(entry);
         let mut insns: BTreeMap<u64, Insn> = BTreeMap::new();
         let mut leaders = BTreeSet::from([entry]);
         // Block starts still to walk, with the register values on the path
-        // that found them.
-        let mut pending = vec![(entry, Tracker::default())];
+        // that found them. Landing pads sit beneath the entry, so the body
+        // claims its own code first; each starts a block nothing branches to.
+        let fresh = Tracker::new(self.decoder.address_width());
+        let mut pending = Vec::new();
+        for &pad in self.handlers.get(&entry).into_iter().flatten().rev() {
+            if !self.entries.contains_key(&pad) && self.memory.is_code(pad) && leaders.insert(pad) {
+                pending.push((pad, fresh.clone()));
+            }
+        }
+        pending.push((entry, fresh));
         let mut refs = Vec::new();
         let mut calls = Vec::new();
+        let mut mains = Vec::new();
         let mut ends = HashSet::new(); // calls that never return
         let mut cases: HashMap<u64, u32> = HashMap::new();
 
         while let Some((start, mut tracker)) = pending.pop() {
             let mut addr = start;
             self.decoder.reset();
+            // Whether the last instruction walked runs into `addr`, other
+            // than by returning from a call (which may never return).
+            let mut falls = false;
             loop {
-                if insns.contains_key(&addr) || (addr != entry && self.entries.contains_key(&addr))
-                {
+                if insns.contains_key(&addr) {
                     break;
+                }
+                if addr != entry
+                    && let Some(&found) = self.entries.get(&addr)
+                {
+                    // Code that runs straight into a start known only from
+                    // unwind data continues there: a compiler that
+                    // shrink-wraps a function gives its parts their own
+                    // unwind entries. Anything else there is another
+                    // function.
+                    if !(falls && found == Found::UNWIND) || self.explored.contains(&addr) {
+                        break;
+                    }
+                    self.entries.remove(&addr);
+                    if refs.iter().any(|r: &Ref| r.to == addr) {
+                        leaders.insert(addr);
+                    }
                 }
                 let Some(bytes) = self.memory.code(addr) else {
                     break;
@@ -284,6 +401,11 @@ impl Work<'_> {
                     break;
                 };
                 insns.insert(addr, insn);
+                // Padding after a call that never returns runs into
+                // nothing.
+                if !insn.pad {
+                    falls = matches!(insn.flow, Flow::Next | Flow::Branch(_));
+                }
                 let next = addr.wrapping_add(u64::from(insn.len));
                 let target = |to: u64,
                               tracker: &Tracker,
@@ -295,12 +417,25 @@ impl Work<'_> {
                         pending.push((to, tracker.clone()));
                     }
                 };
-                tracker.note(insn.note);
+                // Branches and calls only read registers; what a call
+                // changes, `call` forgets below.
+                if insn.flow == Flow::Next {
+                    tracker.note(insn.note);
+                }
                 match insn.flow {
                     Flow::Next => {}
                     Flow::CallIndirect => tracker.call(),
                     Flow::Call(to) => {
+                        mains.extend(self.main(entry, to, next, &tracker));
                         tracker.call();
+                        // A PC thunk returns the address after the call.
+                        let thunk = self
+                            .memory
+                            .code(to)
+                            .and_then(|code| self.decoder.pc_thunk(code));
+                        if let Some(reg) = thunk {
+                            tracker.note(Note::Address { reg, addr: next });
+                        }
                         refs.push(Ref {
                             from: addr,
                             to,
@@ -313,6 +448,7 @@ impl Work<'_> {
                         }
                     }
                     Flow::CallSlot(slot) => {
+                        mains.extend(self.main(entry, slot, next, &tracker));
                         tracker.call();
                         refs.push(Ref {
                             from: addr,
@@ -352,7 +488,7 @@ impl Work<'_> {
                         break;
                     }
                     Flow::JumpMemory(_) | Flow::JumpRegister(_) => {
-                        let table = tracker.jump(insn.flow, self.decoder.address_width());
+                        let table = tracker.jump(insn.flow);
                         let targets = table
                             .map(|table| table.targets(&self.memory, self.table_entries))
                             .unwrap_or_default();
@@ -396,6 +532,7 @@ impl Work<'_> {
                 found: Found::default(),
             },
             calls,
+            mains,
             runs: runs(&insns),
         }
     }

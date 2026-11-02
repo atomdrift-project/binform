@@ -49,6 +49,7 @@ version = "0.0.0"
 dependencies = [
  "funktion",
  "serde_json",
+ "zstd",
 ]
 
 [[package]]

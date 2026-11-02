@@ -38,6 +38,8 @@ mod arm64;
 mod cfg;
 pub mod cil;
 mod decode;
+use std::borrow::Cow;
+
 #[cfg(feature = "object")]
 pub mod object;
 mod table;
@@ -56,12 +58,13 @@ pub enum Arch {
 }
 
 /// Bytes mapped at a virtual address.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Segment<'a> {
     /// Virtual address of the first byte.
     pub addr: u64,
-    /// The mapped bytes.
-    pub bytes: &'a [u8],
+    /// The mapped bytes: borrowed from the file, or owned when a loader
+    /// would have changed them (an object file's relocations applied).
+    pub bytes: Cow<'a, [u8]>,
     /// Whether the bytes are code. Only code is decoded; other segments are
     /// read for jump tables.
     pub executable: bool,
@@ -88,6 +91,19 @@ pub enum Origin {
     Unwind,
     /// Mach-O `LC_FUNCTION_STARTS`.
     FunctionStarts,
+    /// A stub that jumps to an import: an ELF PLT entry, a Mach-O
+    /// `__stubs` entry.
+    Stub,
+}
+
+/// Code inside a function that no instruction branches to: a landing pad
+/// the unwinder enters to run a destructor or a `catch`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Handler {
+    /// The start of the function the handler belongs to.
+    pub function: u64,
+    /// The handler's first instruction.
+    pub addr: u64,
 }
 
 /// An address believed to start a function, and why.
@@ -122,6 +138,8 @@ pub struct Image<'a> {
     /// through them, are resolved to the import; calls to imports that never
     /// return end their basic block.
     pub imports: Vec<Import>,
+    /// Landing pads, explored as part of the functions they belong to.
+    pub handlers: Vec<Handler>,
     /// The value 32-bit x86 position-independent PLT stubs address the GOT
     /// through (`jmp [ebx + disp]`), when the binary has one.
     pub got: Option<u64>,
@@ -199,8 +217,13 @@ impl Found {
     /// A direct jump to code that sets up a stack frame, as only a
     /// function's first instructions do: a tail call.
     pub const TAIL_CALL: Self = Self(1 << 8);
+    /// A stub that jumps to an import (an ELF PLT entry, a Mach-O stub).
+    pub const STUB: Self = Self(1 << 9);
+    /// The program's `main`: the first argument the entry point passes to
+    /// the C runtime's start routine.
+    pub const MAIN: Self = Self(1 << 10);
 
-    const NAMES: [(Self, &'static str); 9] = [
+    const NAMES: [(Self, &'static str); 11] = [
         (Self::ENTRY, "ENTRY"),
         (Self::LOADER, "LOADER"),
         (Self::SYMBOL, "SYMBOL"),
@@ -210,6 +233,8 @@ impl Found {
         (Self::CALL, "CALL"),
         (Self::SWEEP, "SWEEP"),
         (Self::TAIL_CALL, "TAIL_CALL"),
+        (Self::STUB, "STUB"),
+        (Self::MAIN, "MAIN"),
     ];
 
     /// Whether every way in `other` is in `self`.
@@ -268,6 +293,7 @@ impl From<&Origin> for Found {
             Origin::Export(_) => Self::EXPORT,
             Origin::Unwind => Self::UNWIND,
             Origin::FunctionStarts => Self::FUNCTION_STARTS,
+            Origin::Stub => Self::STUB,
         }
     }
 }

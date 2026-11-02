@@ -67,10 +67,39 @@ pub(crate) enum Note {
     },
     /// `reg = src`.
     Copy { reg: u32, src: u32 },
-    /// `reg += src`.
-    Add { reg: u32, src: u32 },
+    /// `reg = src + imm`.
+    Offset { reg: u32, src: u32, imm: u64 },
+    /// `reg = base + (extend(index) << shift)`.
+    Add {
+        reg: u32,
+        base: u32,
+        index: u32,
+        shift: u8,
+        extend: Extend,
+    },
+    /// Pushes a fixed address: `push imm`, or a call to the next
+    /// instruction, which only pushes its own address.
+    Push(u64),
+    /// Pushes the value in `reg`.
+    PushRegister(u32),
+    /// `reg =` the value on top of the stack.
+    Pop(u32),
     /// `reg` changes some other way.
     Write(u32),
+    /// Each register `n` whose bit `1 << n` is set changes some other way: an
+    /// instruction that writes several (registers numbered below 32).
+    Clobber(u32),
+}
+
+/// How an added register is widened before it is shifted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Extend {
+    /// Used whole.
+    None,
+    /// Its low `n` bytes, zero-extended.
+    Zero(u8),
+    /// Its low `n` bytes, sign-extended.
+    Sign(u8),
 }
 
 /// The memory operand `[base + index * scale + disp]`. A PC-relative operand
@@ -84,6 +113,7 @@ pub(crate) struct Mem {
 }
 
 /// An instruction decoder for one image's architecture.
+#[derive(Clone)]
 pub(crate) enum Decoder {
     X86 { bitness: u32, got: Option<u64> },
     Arm64(Box<crate::arm64::State>),
@@ -136,6 +166,25 @@ impl Decoder {
         }
     }
 
+    /// The register a 32-bit PC thunk at the start of `bytes` returns the
+    /// caller's address in.
+    pub(crate) fn pc_thunk(&self, bytes: &[u8]) -> Option<u32> {
+        match self {
+            Self::X86 { bitness: 32, .. } => crate::x86::pc_thunk(bytes),
+            Self::X86 { .. } | Self::Arm64(_) => None,
+        }
+    }
+
+    /// The register that carries a call's `n`th argument (from zero) under
+    /// the System V and A64 conventions; `None` when it goes on the stack.
+    pub(crate) fn argument(&self, n: usize) -> Option<u32> {
+        match self {
+            Self::X86 { bitness: 64, .. } => crate::x86::argument(n),
+            Self::X86 { .. } => None,
+            Self::Arm64(_) => u32::try_from(n).ok().filter(|&n| n < 8),
+        }
+    }
+
     /// Whether `bytes` begin by setting up a frame pointer, as only a
     /// function's first instructions do.
     pub(crate) fn starts_frame(&self, bytes: &[u8]) -> bool {
@@ -149,15 +198,27 @@ impl Decoder {
 /// The mapped segments of an image, searchable by address.
 pub(crate) struct Memory<'a> {
     /// Sorted by address.
-    segments: Vec<Segment<'a>>,
+    segments: Vec<Span<'a>>,
+}
+
+/// One segment's bytes, borrowed from the image.
+#[derive(Clone, Copy)]
+pub(crate) struct Span<'a> {
+    pub(crate) addr: u64,
+    pub(crate) bytes: &'a [u8],
+    pub(crate) executable: bool,
 }
 
 impl<'a> Memory<'a> {
-    pub(crate) fn new(segments: &[Segment<'a>]) -> Self {
-        let mut segments: Vec<Segment<'a>> = segments
+    pub(crate) fn new(segments: &'a [Segment<'_>]) -> Self {
+        let mut segments: Vec<Span<'a>> = segments
             .iter()
             .filter(|segment| !segment.bytes.is_empty())
-            .copied()
+            .map(|segment| Span {
+                addr: segment.addr,
+                bytes: &segment.bytes,
+                executable: segment.executable,
+            })
             .collect();
         segments.sort_by_key(|segment| segment.addr);
         Self { segments }
@@ -205,7 +266,7 @@ impl<'a> Memory<'a> {
         )
     }
 
-    pub(crate) fn code_segments(&self) -> impl Iterator<Item = &Segment<'a>> {
+    pub(crate) fn code_segments(&self) -> impl Iterator<Item = &Span<'a>> {
         self.segments.iter().filter(|segment| segment.executable)
     }
 }

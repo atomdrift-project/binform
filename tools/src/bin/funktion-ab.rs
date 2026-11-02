@@ -1,7 +1,7 @@
 //! Compare funktion with rizin, file by file.
 //!
 //! ```text
-//! funktion-ab [--rizin PATH] [--script CMDS] [--timeout SECS] [--jobs N] PATH...
+//! funktion-ab [--rizin PATH] [--script CMDS] [--timeout SECS] [--jobs N] [--save DIR] PATH...
 //! ```
 //!
 //! Directories are walked. Each supported executable is analysed by both
@@ -13,6 +13,9 @@
 //! Without `--script`, rizin runs the analysis a production consumer would:
 //! `aa; aac` for PE on x86, `aaa` when nothing but entry points names a
 //! function, and `aa; aac; aap` otherwise.
+//!
+//! `--save DIR` also writes what rizin found in each file to
+//! `DIR/NAME.rizin.json.zst`, for the fixture tests to compare against.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
@@ -30,6 +33,7 @@ struct Options {
     script: Option<String>,
     timeout: Duration,
     jobs: usize,
+    save: Option<PathBuf>,
     paths: Vec<PathBuf>,
 }
 
@@ -39,6 +43,7 @@ fn options() -> Result<Options, String> {
         script: None,
         timeout: Duration::from_secs(600),
         jobs: std::thread::available_parallelism().map_or(4, |n| n.get()),
+        save: None,
         paths: Vec::new(),
     };
     let mut args = std::env::args().skip(1);
@@ -52,6 +57,7 @@ fn options() -> Result<Options, String> {
                 options.timeout = Duration::from_secs(secs);
             }
             "--jobs" => options.jobs = value()?.parse().map_err(|e| format!("--jobs: {e}"))?,
+            "--save" => options.save = Some(PathBuf::from(value()?)),
             _ if arg.starts_with("--") => return Err(format!("unknown option {arg}")),
             _ => options.paths.push(PathBuf::from(arg)),
         }
@@ -220,6 +226,11 @@ fn compare(options: &Options, file: &Path) -> Option<Value> {
         report["rizin"] = Value::Null;
         return Some(report);
     };
+    if let Some(dir) = &options.save {
+        if let Err(error) = save(dir, file, &script, &rows) {
+            eprintln!("funktion-ab: saving {}: {error}", file.display());
+        }
+    }
 
     let mut rizin_shape = Shape::default();
     let mut by_entry: HashMap<u64, RizinFunction> = HashMap::new();
@@ -247,12 +258,21 @@ fn compare(options: &Options, file: &Path) -> Option<Value> {
         );
     }
     let (mut shared, mut same_blocks, mut same_complexity, mut same_size) = (0, 0, 0, 0);
+    // Rizin does not walk landing pads: a function with one has blocks it
+    // lacks, so those are compared apart.
+    let padded: HashSet<u64> = image.handlers.iter().map(|h| h.function).collect();
+    let (mut shared_padded, mut same_blocks_padded) = (0, 0);
     // Functions only funktion found, by how it found them.
     let mut only_native: BTreeMap<String, usize> = BTreeMap::new();
     for function in &recovery.functions {
         if let Some(theirs) = by_entry.get(&function.entry) {
             shared += 1;
-            same_blocks += usize::from(theirs.blocks == u64::from(function.blocks));
+            let same = theirs.blocks == u64::from(function.blocks);
+            if padded.contains(&function.entry) {
+                shared_padded += 1;
+                same_blocks_padded += usize::from(same);
+            }
+            same_blocks += usize::from(same);
             same_complexity += usize::from(theirs.complexity == u64::from(function.complexity));
             same_size += usize::from(theirs.size == function.size);
         } else {
@@ -268,6 +288,21 @@ fn compare(options: &Options, file: &Path) -> Option<Value> {
         .map(|(&entry, theirs)| (entry, theirs.name.as_str()))
         .collect();
     only_rizin.sort_unstable();
+    // Those that start inside a function funktion recovered (its first to
+    // last byte): a fragment of it, to rizin, or a function it overlaps.
+    let mut extents: Vec<(u64, u64)> = recovery
+        .functions
+        .iter()
+        .map(|f| (f.entry, f.entry.saturating_add(f.size)))
+        .collect();
+    extents.sort_unstable();
+    let inside = only_rizin
+        .iter()
+        .filter(|&&(entry, _)| {
+            let i = extents.partition_point(|&(start, _)| start <= entry);
+            i > 0 && entry < extents[i - 1].1
+        })
+        .count();
     report["rizin"] = rizin_shape.json();
     report["shared"] = json!(shared);
     report["only_rizin"] = json!(by_entry.len() - shared);
@@ -280,7 +315,39 @@ fn compare(options: &Options, file: &Path) -> Option<Value> {
     report["same_blocks"] = json!(same_blocks);
     report["same_complexity"] = json!(same_complexity);
     report["same_size"] = json!(same_size);
+    report["shared_padded"] = json!(shared_padded);
+    report["same_blocks_padded"] = json!(same_blocks_padded);
+    report["only_rizin_inside"] = json!(inside);
     Some(report)
+}
+
+/// Write rizin's functions in `file` as `[offset, name, size, blocks,
+/// complexity]` rows, one per line, sorted by offset and compressed.
+fn save(dir: &Path, file: &Path, script: &str, rows: &[Value]) -> std::io::Result<()> {
+    let mut functions: Vec<(u64, String, u64, u64, u64)> = rows
+        .iter()
+        .map(|row| {
+            let get = |key: &str| row.get(key).and_then(Value::as_u64).unwrap_or(0);
+            let name = row.get("name").and_then(Value::as_str).unwrap_or_default();
+            (
+                get("offset"),
+                name.to_owned(),
+                get("size"),
+                get("nbbs"),
+                get("cc"),
+            )
+        })
+        .collect();
+    functions.sort_unstable();
+    let mut text = format!("{{\"script\": {},\n\"functions\": [\n", json!(script));
+    for (i, function) in functions.iter().enumerate() {
+        let comma = if i + 1 < functions.len() { "," } else { "" };
+        text.push_str(&format!("{}{comma}\n", json!(function)));
+    }
+    text.push_str("]}\n");
+    let name = file.file_name().unwrap_or_default().to_string_lossy();
+    let path = dir.join(format!("{name}.rizin.json.zst"));
+    std::fs::write(path, zstd::encode_all(text.as_bytes(), 19)?)
 }
 
 fn is_code(image: &funktion::Image<'_>, addr: u64) -> bool {
@@ -390,6 +457,21 @@ fn summarize(reports: &[Value]) {
         ratio(sum("same_blocks"), shared),
         ratio(sum("same_complexity"), shared),
         ratio(sum("same_size"), shared)
+    );
+    let padded = sum("shared_padded");
+    eprintln!(
+        "  without landing pads: same blocks {:.1}% of {}; with them (rizin skips pads): {:.1}% of {padded}",
+        ratio(
+            sum("same_blocks") - sum("same_blocks_padded"),
+            shared - padded
+        ),
+        shared - padded,
+        ratio(sum("same_blocks_padded"), padded),
+    );
+    eprintln!(
+        "only rizin: {} entries, {} of them inside a function funktion recovered",
+        sum("only_rizin"),
+        sum("only_rizin_inside")
     );
     let mut found: BTreeMap<String, u64> = BTreeMap::new();
     for report in &compared {

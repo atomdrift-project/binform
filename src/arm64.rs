@@ -1,8 +1,9 @@
-//! A64. Only control flow is decoded, plus the `adrp`/`add`/`ldr` sequence
-//! that stubs load a slot's address with; every other instruction falls
-//! through.
+//! A64. Control flow is decoded, plus the `adrp`/`add`/`ldr` sequence that
+//! stubs load a slot's address with, and for jump tables the compares,
+//! addresses, loads and adds that build a target. Every other instruction
+//! falls through, forgetting the registers it may write.
 
-use crate::decode::{Flow, Insn, Note};
+use crate::decode::{Extend, Flow, Insn, Mem, Note};
 
 /// What the instructions since the last reset left in each general register.
 #[derive(Clone, Copy, Debug, Default)]
@@ -26,10 +27,15 @@ pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
             pad: false,
         };
     };
+    let flow = flow(state, word, addr);
     Insn {
         len: 4,
-        flow: flow(state, word, addr),
-        note: Note::None,
+        flow,
+        note: if flow == Flow::Next {
+            note(state, word)
+        } else {
+            Note::None
+        },
         // NOP, BTI, PACIASP and the rest of the hint space.
         pad: word & 0xffff_f01f == 0xd503_201f,
     }
@@ -83,7 +89,7 @@ fn flow(state: &mut State, word: u32, addr: u64) -> Flow {
         // pointer-authenticating forms.
         let slot = state.loaded.get(rn).copied().flatten();
         return match (word >> 21) & 0xf {
-            0 | 8 => slot.map_or(Flow::JumpIndirect, Flow::JumpSlot),
+            0 | 8 => slot.map_or(Flow::JumpRegister((word >> 5) & 0x1f), Flow::JumpSlot),
             1 | 9 => slot.map_or(Flow::CallIndirect, Flow::CallSlot),
             2 | 4 | 5 => Flow::Return,
             _ => Flow::Stop,
@@ -93,11 +99,15 @@ fn flow(state: &mut State, word: u32, addr: u64) -> Flow {
         // BRK, HLT, UDF
         return Flow::Stop;
     }
-    if word & 0x9f00_0000 == 0x9000_0000 {
-        // ADRP
+    if word & 0x1f00_0000 == 0x1000_0000 {
+        // ADR, ADRP
         let imm = (((word >> 5) & 0x7_ffff) << 2) | ((word >> 29) & 0x3);
-        let page = (addr & !0xfff).wrapping_add((sign_extend(imm, 21) << 12) as u64);
-        set(state, rd, Some(page), None);
+        let value = if word & 0x8000_0000 == 0 {
+            addr.wrapping_add(sign_extend(imm, 21) as u64)
+        } else {
+            (addr & !0xfff).wrapping_add((sign_extend(imm, 21) << 12) as u64)
+        };
+        set(state, rd, Some(value), None);
     } else if word & 0xff80_0000 == 0x9100_0000 {
         // ADD (immediate, 64-bit)
         let shift = if word & 0x0040_0000 == 0 { 0 } else { 12 };
@@ -111,6 +121,170 @@ fn flow(state: &mut State, word: u32, addr: u64) -> Flow {
         set(state, rd, None, base.map(|base| base.wrapping_add(offset)));
     }
     Flow::Next
+}
+
+/// What the instruction tells a jump-table read, once [`flow`] has updated
+/// `state`.
+fn note(state: &State, word: u32) -> Note {
+    let reg = |shift: u32| (word >> shift) & 0x1f;
+    let (rd, rn, rm) = (reg(0), reg(5), reg(16));
+    if word & 0x1f00_0000 == 0x1000_0000 {
+        // ADR, ADRP
+        return match state.value.get(rd as usize).copied().flatten() {
+            Some(addr) => Note::Address { reg: rd, addr },
+            None => Note::Write(rd),
+        };
+    }
+    if word & 0xff80_0000 == 0x9100_0000 {
+        // ADD (immediate, 64-bit)
+        let shift = if word & 0x0040_0000 == 0 { 0 } else { 12 };
+        return Note::Offset {
+            reg: rd,
+            src: rn,
+            imm: u64::from((word >> 10) & 0xfff) << shift,
+        };
+    }
+    if word & 0x7f80_001f == 0x7100_001f {
+        // CMP (immediate): SUBS to the zero register.
+        let shift = if word & 0x0040_0000 == 0 { 0 } else { 12 };
+        return Note::Compare {
+            reg: rn,
+            imm: u64::from((word >> 10) & 0xfff) << shift,
+        };
+    }
+    if word & 0x7fe0_ffe0 == 0x2a00_03e0 {
+        // MOV (register): ORR from the zero register.
+        return Note::Copy { reg: rd, src: rm };
+    }
+    if word & 0xffe0_0000 == 0x8b00_0000 {
+        // ADD (shifted register, 64-bit, LSL)
+        let shift = (word >> 10) & 0x3f;
+        return match u8::try_from(shift) {
+            Ok(shift) if shift <= 4 => Note::Add {
+                reg: rd,
+                base: rn,
+                index: rm,
+                shift,
+                extend: Extend::None,
+            },
+            _ => Note::Write(rd),
+        };
+    }
+    if word & 0xffe0_0000 == 0x8b20_0000 && (word >> 10) & 7 <= 4 {
+        // ADD (extended register, 64-bit)
+        let extend = match (word >> 13) & 7 {
+            0 => Extend::Zero(1),
+            1 => Extend::Zero(2),
+            2 => Extend::Zero(4),
+            4 => Extend::Sign(1),
+            5 => Extend::Sign(2),
+            6 => Extend::Sign(4),
+            _ => Extend::None,
+        };
+        return Note::Add {
+            reg: rd,
+            base: rn,
+            index: rm,
+            shift: ((word >> 10) & 7) as u8,
+            extend,
+        };
+    }
+    if word & 0x3f20_0c00 == 0x3820_0800 {
+        // LDR, LDRB, LDRH, LDRS* (register offset); STR and PRFM.
+        let size = (word >> 30) as u8;
+        let opc = (word >> 22) & 3;
+        if opc == 0 {
+            return Note::None;
+        }
+        if (opc == 2 && size == 3) || (opc == 3 && size >= 2) {
+            // PRFM, and unallocated encodings.
+            return Note::Write(rd);
+        }
+        let shift = if word & 0x1000 == 0 { 0 } else { size };
+        return Note::Load {
+            reg: rd,
+            mem: Mem {
+                base: Some(rn),
+                index: Some(rm),
+                scale: 1 << shift,
+                disp: 0,
+            },
+            size: 1 << size,
+            signed: opc >= 2,
+        };
+    }
+    if word & 0x0a00_0000 == 0x0800_0000 {
+        return writes(load_store_writes(word));
+    }
+    if word & 0xffc0_0000 == 0xd500_0000 {
+        // System: MRS and SYSL write their register; the rest write none.
+        return if word & 0x0020_0000 == 0 {
+            Note::None
+        } else {
+            Note::Write(rd)
+        };
+    }
+    if word & 0xffe0_001f == 0xd400_0001 {
+        // SVC: the kernel answers in x0.
+        return Note::Write(0);
+    }
+    // Data processing, and SIMD and floating point. A vector destination
+    // shares its number with a general register; forgetting that register
+    // costs at most a table.
+    if word & 0x1c00_0000 == 0x1000_0000
+        || word & 0x0e00_0000 == 0x0a00_0000
+        || word & 0x0e00_0000 == 0x0e00_0000
+    {
+        return Note::Write(rd);
+    }
+    Note::None
+}
+
+/// A note for an instruction that writes the registers in the mask.
+fn writes(regs: u32) -> Note {
+    match regs.count_ones() {
+        0 => Note::None,
+        1 => Note::Write(regs.trailing_zeros()),
+        _ => Note::Clobber(regs),
+    }
+}
+
+/// The general registers a load or store may write, as a mask: the loaded
+/// registers, and the base register when the address is written back.
+/// Forms not told apart here count every register they name.
+fn load_store_writes(word: u32) -> u32 {
+    let reg = |shift: u32| 1_u32 << ((word >> shift) & 0x1f);
+    let (rt, rn, rt2, rs) = (reg(0), reg(5), reg(10), reg(16));
+    let opc = (word >> 22) & 3;
+    match (word >> 27) & 7 {
+        // Pairs: offset, post-index, pre-index.
+        0b101 => {
+            let loads = word & 0x0040_0000 != 0;
+            let writeback = matches!((word >> 23) & 3, 1 | 3);
+            (if loads { rt | rt2 } else { 0 }) | (if writeback { rn } else { 0 })
+        }
+        // Literal loads.
+        0b011 if word & 0x0100_0000 == 0 => rt,
+        // One register.
+        0b111 => {
+            let low = (word >> 10) & 3;
+            let (loads, writeback) = if word & 0x0100_0000 != 0 {
+                // Unsigned offset.
+                (opc != 0, false)
+            } else if word & 0x0020_0000 == 0 {
+                // Unscaled, post-index, unprivileged, pre-index.
+                (opc != 0, low & 1 != 0)
+            } else {
+                match low {
+                    0 => (true, false),     // atomic memory operations
+                    2 => (opc != 0, false), // register offset
+                    _ => (true, low == 3),  // pointer-authenticated
+                }
+            };
+            (if loads { rt } else { 0 }) | (if writeback { rn } else { 0 })
+        }
+        _ => rt | rn | rt2 | rs,
+    }
 }
 
 fn set(state: &mut State, register: usize, value: Option<u64>, loaded: Option<u64>) {
@@ -169,7 +343,7 @@ mod tests {
         assert_eq!(one(0x3600_0080, 0x1000), Flow::Branch(0x1010)); // tbz w0, #0, +16
         assert_eq!(one(0xd65f_03c0, 0x1000), Flow::Return); // ret
         assert_eq!(one(0xd65f_0bff, 0x1000), Flow::Return); // retaa
-        assert_eq!(one(0xd61f_0200, 0x1000), Flow::JumpIndirect); // br x16
+        assert_eq!(one(0xd61f_0200, 0x1000), Flow::JumpRegister(16)); // br x16
         assert_eq!(one(0xd63f_0200, 0x1000), Flow::CallIndirect); // blr x16
         assert_eq!(one(0xd420_0000, 0x1000), Flow::Stop); // brk #0
         assert_eq!(one(0x0000_0000, 0x1000), Flow::Stop); // udf #0
@@ -187,6 +361,100 @@ mod tests {
             .collect();
         // adrp x16, #0x1000 at 0x10000 is page 0x11000; the slot is 8 bytes in.
         assert_eq!(flows, [Flow::Next, Flow::Next, Flow::JumpSlot(0x1_1008)]);
+    }
+
+    fn notes(words: &[u32], addr: u64) -> Vec<Note> {
+        let mut state = State::default();
+        (0_u64..)
+            .zip(words)
+            .map(|(i, word)| decode(&mut state, &word.to_le_bytes(), addr + 4 * i).note)
+            .collect()
+    }
+
+    /// GCC's sparse switch: byte entries, sign-extended and scaled as they
+    /// are added to an anchor.
+    #[test]
+    fn switch_notes() {
+        let words = [
+            0x7100_241f, // cmp w0, #9
+            0x9000_0001, // adrp x1, 0x10000
+            0x9100_4021, // add x1, x1, #0x10
+            0x3860_4821, // ldrb w1, [x1, w0, uxtw]
+            0x1000_0082, // adr x2, +0x10
+            0x8b21_8841, // add x1, x2, w1, sxtb #2
+        ];
+        assert_eq!(
+            notes(&words, 0x1_0000),
+            [
+                Note::Compare { reg: 0, imm: 9 },
+                Note::Address {
+                    reg: 1,
+                    addr: 0x1_0000
+                },
+                Note::Offset {
+                    reg: 1,
+                    src: 1,
+                    imm: 0x10
+                },
+                Note::Load {
+                    reg: 1,
+                    mem: Mem {
+                        base: Some(1),
+                        index: Some(0),
+                        scale: 1,
+                        disp: 0
+                    },
+                    size: 1,
+                    signed: false
+                },
+                Note::Address {
+                    reg: 2,
+                    addr: 0x1_0020
+                },
+                Note::Add {
+                    reg: 1,
+                    base: 2,
+                    index: 1,
+                    shift: 2,
+                    extend: Extend::Sign(1)
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn writes_are_noted() {
+        // ldp x19, x20, [sp], #16: two loads and the base written back.
+        assert_eq!(
+            notes(&[0xa8c1_53f3], 0),
+            [Note::Clobber(1 << 19 | 1 << 20 | 1 << 31)]
+        );
+        // str x0, [sp, #8]: writes nothing.
+        assert_eq!(notes(&[0xf900_07e0], 0), [Note::None]);
+        // ldr x16, [x16, #8]; mov x0, x1; movz x3, #1
+        assert_eq!(
+            notes(&[0xf940_0610, 0xaa01_03e0, 0xd280_0023], 0),
+            [
+                Note::Write(16),
+                Note::Copy { reg: 0, src: 1 },
+                Note::Write(3)
+            ]
+        );
+        // ldrsw x9, [x10, x9, lsl #2]
+        assert_eq!(
+            notes(&[0xb8a9_7949], 0),
+            [Note::Load {
+                reg: 9,
+                mem: Mem {
+                    base: Some(10),
+                    index: Some(9),
+                    scale: 4,
+                    disp: 0
+                },
+                size: 4,
+                signed: true
+            }]
+        );
     }
 
     #[test]

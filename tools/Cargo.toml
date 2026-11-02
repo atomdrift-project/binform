@@ -8,4 +8,5 @@ description = "Command-line tools for funktion: dump a function table, compare w
 [dependencies]
 funktion = { path = ".." }
 serde_json = "1"
+zstd = "0.13"
 

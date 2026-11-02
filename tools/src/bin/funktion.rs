@@ -62,6 +62,7 @@ fn dump(path: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
         "arch": format!("{:?}", image.arch),
         "seeds": image.seeds.len(),
         "imports": image.imports.len(),
+        "handlers": image.handlers.iter().map(|h| json!([h.function, h.addr])).collect::<Vec<_>>(),
         "covered": recovery.covered,
         "truncated": recovery.truncated,
         "functions": functions,
