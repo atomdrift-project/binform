@@ -706,6 +706,10 @@ fn solaris_sparc() {
         // Sun Studio's tables: `rd %pc` plus a constant is the table, which
         // holds offsets from itself (`ld [%i5+%l6], %l7; jmp %l7+%l6`).
         assert!(cases(outcome) > 1400, "only {} cases", cases(outcome));
+        // Constant pools (`___const_seg_*` objects in `.text`) are data:
+        // `___const_seg_900004301` at 0xaa70 held a call target before.
+        let entries: Vec<u64> = outcome.recovery.functions.iter().map(|f| f.entry).collect();
+        assert!(!entries.contains(&0xaad4) && !entries.contains(&0xa5708));
     });
 }
 
@@ -741,6 +745,10 @@ fn c_mips64_and_s390x() {
         // `daddiu` is the table, `dsll; daddu; ld` reads an offset from
         // `_gp`, which `$gp` or a register holding it adds back.
         assert!(cases(outcome) > 2600, "only {} cases", cases(outcome));
+        // Calls to local functions go through a GOT page entry plus the low
+        // bits (`ld $t9, %got_page(f)($gp); daddiu $t9, $t9, %got_ofst(f);
+        // jalr $t9`): resolved, they find most functions as call targets.
+        assert!(outcome.found(Found::CALL) > 1600, "{}", outcome.found(Found::CALL));
     });
     check("libe_sqlite3-linux-s390x.so", |outcome| {
         finds_all_of_rizin(outcome);

@@ -37,6 +37,9 @@ const RA: u32 = 31;
 pub(crate) struct State {
     /// The GOT slot `$t9` was loaded from.
     t9: Option<u64>,
+    /// The address in `$t9`: a local GOT entry (a page) plus its low bits
+    /// (`ld $t9, %got_page(f)($gp); daddiu $t9, $t9, %got_ofst(f)`).
+    target: Option<u64>,
     /// A register holding another shifted left, and by how much.
     scaled: Option<(u32, u8)>,
     /// A register holding a base plus a scaled index: the address the load
@@ -85,7 +88,11 @@ impl Got {
 
     /// The `size`-byte word at `gp + offset`.
     fn word(&self, offset: i64, size: usize, big: bool) -> Option<u64> {
-        let addr = self.gp?.wrapping_add_signed(offset);
+        self.read(self.gp?.wrapping_add_signed(offset), size, big)
+    }
+
+    /// The `size`-byte word at `addr`, within `$gp`'s reach.
+    fn read(&self, addr: u64, size: usize, big: bool) -> Option<u64> {
         let raw = self.pieces.iter().find_map(|(start, bytes)| {
             let at = usize::try_from(addr.checked_sub(*start)?).ok()?;
             bytes.get(at..at.checked_add(size)?)
@@ -107,12 +114,11 @@ pub(crate) fn decode(
     bytes: &[u8],
     addr: u64,
 ) -> Insn {
-    let gp = got.gp;
     let Some(word) = read_word(big, bytes) else {
         return Insn::new(4, Flow::Invalid);
     };
     let Some(flow) = flow(word, addr, wide) else {
-        track(state, word, gp, wide);
+        track(state, word, got, (big, wide));
         let mut insn = Insn::new(4, Flow::Next);
         // `nop` (`sll $0, $0, 0`) and `ssnop`.
         insn.pad = word == 0 || word == 0x40;
@@ -125,24 +131,38 @@ pub(crate) fn decode(
     if flow == Flow::Stop {
         return Insn::new(4, flow);
     }
-    let flow = match (flow, state.t9) {
-        (Flow::CallIndirect, Some(slot)) if word >> 26 == 0 && (word >> 21) & 0x1f == T9 => {
-            Flow::CallSlot(slot)
-        }
-        (Flow::JumpRegister(T9), Some(slot)) => Flow::JumpSlot(slot),
+    let through_t9 = word >> 26 == 0 && (word >> 21) & 0x1f == T9;
+    let flow = match (flow, state.t9, state.target) {
+        (Flow::CallIndirect, _, Some(to)) if through_t9 => Flow::Call(to),
+        (Flow::JumpRegister(T9), _, Some(to)) => Flow::Jump(to),
+        (Flow::CallIndirect, Some(slot), _) if through_t9 => Flow::CallSlot(slot),
+        (Flow::JumpRegister(T9), Some(slot), _) => Flow::JumpSlot(slot),
         _ => flow,
     };
     // A transfer with no slot after it is cut short: the slot is not code.
     let Some(slot) = bytes.get(4..8).and_then(|slot| read_word(big, slot)) else {
         return Insn::new(4, Flow::Invalid);
     };
-    // A callee changes `$t9`.
+    // The slot runs before the target: GCC puts a table's low address
+    // bits there (`jalr $t9; daddiu $a3, $a3, %got_ofst(table)`).
     let mut insn = Insn::new(8, flow);
+    track(state, slot, got, (big, wide));
+    insn.note = note(state, slot, got, big, wide);
+    // A callee changes `$t9` and the other caller-saved registers; `_gp`
+    // stays in the saved ones (`$s0`-`$s7`, `$fp`).
     if matches!(flow, Flow::Call(_) | Flow::CallSlot(_) | Flow::CallIndirect) {
+        *state = State {
+            gp_regs: state.gp_regs & 0x40ff_0000,
+            ..State::default()
+        };
+    }
+    // Past a transfer that does not fall through, code is reached from
+    // elsewhere: what the slot left (`b out; ld $t9, ...`) is not there.
+    if !matches!(
+        flow,
+        Flow::Next | Flow::Branch(_) | Flow::Call(_) | Flow::CallSlot(_) | Flow::CallIndirect
+    ) {
         *state = State::default();
-    } else {
-        track(state, slot, gp, wide);
-        insn.note = note(state, slot, got, big, wide);
     }
     insn
 }
@@ -366,7 +386,8 @@ fn writes(note: Note) -> u64 {
 /// a fixed offset off a register other than the stack's is a GOT load
 /// (whichever register holds `_gp`); anything else that may write `$t9`
 /// forgets it.
-fn track(state: &mut State, word: u32, gp: Option<u64>, wide: bool) {
+fn track(state: &mut State, word: u32, got: &Got, (big, wide): (bool, bool)) {
+    let gp = got.gp;
     let opcode = word >> 26;
     let (rs, rt, rd) = (
         (word >> 21) & 0x1f,
@@ -380,6 +401,20 @@ fn track(state: &mut State, word: u32, gp: Option<u64>, wide: bool) {
             .filter(|_| !matches!(rs, ZERO | SP | FP))
             .map(|gp| gp.wrapping_add_signed(offset))
             .map(|slot| if wide { slot } else { slot & 0xffff_ffff });
+        state.target = None;
+        return;
+    }
+    // ADDIU, DADDIU $t9, $t9: a local GOT entry's page plus the offset.
+    if matches!(opcode, 0x09 | 0x19) && rs == T9 && rt == T9 {
+        let offset = (i64::from(word & 0xffff) ^ 0x8000) - 0x8000;
+        let size = if wide { 8 } else { 4 };
+        state.target = state
+            .t9
+            .and_then(|slot| got.read(slot, size, big))
+            .filter(|&page| page != 0)
+            .map(|page| page.wrapping_add_signed(offset))
+            .map(|to| if wide { to } else { to & 0xffff_ffff });
+        state.t9 = None;
         return;
     }
     let writes = match opcode {
@@ -393,6 +428,7 @@ fn track(state: &mut State, word: u32, gp: Option<u64>, wide: bool) {
     };
     if writes {
         state.t9 = None;
+        state.target = None;
     }
 }
 
@@ -577,6 +613,17 @@ mod tests {
             0x2_7ff0,
         );
         assert_eq!(flows[2], Flow::CallIndirect);
+        // The same with the GOT entry known: a page, so a direct call.
+        let got = Got {
+            gp: Some(0x2_7ff0),
+            pieces: vec![(0x2_0018, vec![0, 1, 0, 0].into())].into(),
+        };
+        let words = [0x8f99_8028, 0x2739_0008, 0x0320_f809, 0];
+        let calls: Vec<Flow> = insns(&words, 0x1000, &got)
+            .iter()
+            .map(|insn| insn.flow)
+            .collect();
+        assert_eq!(calls[2], Flow::Call(0x1_0008));
         // lw $t9, 16($sp): a spilled pointer, not a GOT slot.
         let flows = run(&[0x8fb9_0010, 0x0320_f809, 0], 0x1000, 0x2_7ff0);
         assert_eq!(flows[1], Flow::CallIndirect);

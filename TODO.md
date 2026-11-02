@@ -24,8 +24,8 @@
 - **Imports:** SuperH and MIPS PLT stubs (MIPS `-mplt` executables) are
   seeded by the header only; their layouts vary by ABI.
   MIPS GOT calls (`lw $t9, n(rX); jalr $t9`) are read when the load is
-  right before the call; GCC's local form (`lw $t9, %got(f)($gp); addiu
-  $t9, $t9, %lo(f)`) is not.
+  right before the call, and GCC's local form (`ld $t9, %got_page(f)($gp);
+  daddiu $t9, $t9, %got_ofst(f)`) when the GOT is in the file.
 - **Not read:** big-endian Arm and SuperH, 31-bit s390,
   `.ARM.exidx` unwind entries, and LSDAs on big-endian sets
   (`eh::landing_pads` reads little-endian).
@@ -34,9 +34,6 @@
   neither funktion nor rizin decodes: OpenWrt 24.10's `busybox` and
   `libsqlite3` for `mips_24kc` come out as a few dozen functions with
   thousands of unresolved jumps.
-- **Data in code:** Sun Studio puts constant pools (`___const_seg_*`
-  objects) in `.text`; the sweep can start functions inside them. Object
-  symbols in executable sections could fence them off.
 - **Not supported at all:** AIX (XCOFF, and PowerPC, which funktion does
   not decode on any format); PowerPC ELF (SQLitePCLRaw has a
   `linux-ppc64le` build).

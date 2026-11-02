@@ -19,6 +19,7 @@ const SHT_REL: u32 = 9;
 const SHT_DYNSYM: u32 = 11;
 pub(super) const SHF_ALLOC: u64 = 2;
 pub(super) const SHF_EXECINSTR: u64 = 4;
+pub(super) const STT_OBJECT: u8 = 1;
 pub(super) const STT_FUNC: u8 = 2;
 pub(super) const SHN_UNDEF: u16 = 0;
 pub(super) const SHN_ABS: u16 = 0xfff1;
@@ -94,6 +95,7 @@ pub(super) struct Symbol {
     pub(super) kind: u8,
     pub(super) shndx: u16,
     pub(super) value: u64,
+    pub(super) size: u64,
 }
 
 pub(super) struct Reloc {
@@ -317,16 +319,27 @@ impl Elf {
         let entsize = if entsize >= least { entsize } else { least };
         table(offset, entsize, size / entsize, least)
             .map_while(|at| {
-                let (info, shndx, value) = if self.is_64 {
-                    (r.u8(at + 4)?, r.u16(at + 6)?, r.u64(at + 8)?)
+                let (info, shndx, value, size) = if self.is_64 {
+                    (
+                        r.u8(at + 4)?,
+                        r.u16(at + 6)?,
+                        r.u64(at + 8)?,
+                        r.u64(at + 16)?,
+                    )
                 } else {
-                    (r.u8(at + 12)?, r.u16(at + 14)?, u64::from(r.u32(at + 4)?))
+                    (
+                        r.u8(at + 12)?,
+                        r.u16(at + 14)?,
+                        u64::from(r.u32(at + 4)?),
+                        u64::from(r.u32(at + 8)?),
+                    )
                 };
                 Some(Symbol {
                     name: string(r, strings, r.u32(at)?),
                     kind: info & 0xf,
                     shndx,
                     value,
+                    size,
                 })
             })
             .collect()

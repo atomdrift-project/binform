@@ -147,6 +147,55 @@ fn elf_arch(elf: &Elf) -> Result<Arch, Error> {
     Ok(arch)
 }
 
+/// `segments` with the `ranges` (start, end) that lie wholly inside
+/// executable ones split out of them as data.
+fn fence<'a>(segments: Vec<Segment<'a>>, mut ranges: Vec<(u64, u64)>) -> Vec<Segment<'a>> {
+    ranges.sort_unstable();
+    let mut out = Vec::with_capacity(segments.len());
+    for segment in segments {
+        let len = segment.bytes.len() as u64;
+        let end = segment.addr.saturating_add(len);
+        let inside: Vec<(u64, u64)> = ranges
+            .iter()
+            .copied()
+            .filter(|&(from, to)| segment.executable && from >= segment.addr && to <= end)
+            .collect();
+        if inside.is_empty() {
+            out.push(segment);
+            continue;
+        }
+        let piece = |from: u64, to: u64, executable: bool| {
+            let range = usize::try_from(from - segment.addr).unwrap_or(0)
+                ..usize::try_from(to - segment.addr).unwrap_or(0);
+            Segment {
+                addr: from,
+                bytes: match &segment.bytes {
+                    Cow::Borrowed(bytes) => Cow::Borrowed(bytes.get(range).unwrap_or_default()),
+                    Cow::Owned(bytes) => Cow::Owned(bytes.get(range).unwrap_or_default().to_vec()),
+                },
+                executable,
+            }
+        };
+        let mut at = segment.addr;
+        for (from, to) in inside {
+            // Overlapping objects: what is left of this one.
+            let from = from.max(at);
+            if to <= from {
+                continue;
+            }
+            if from > at {
+                out.push(piece(at, from, true));
+            }
+            out.push(piece(from, to, false));
+            at = to;
+        }
+        if at < end {
+            out.push(piece(at, end, true));
+        }
+    }
+    out
+}
+
 const DT_INIT: u64 = 12;
 const DT_FINI: u64 = 13;
 const DT_INIT_ARRAY: u64 = 25;
@@ -197,7 +246,16 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Image<'a>, Error> {
             })
             .collect();
         let addrs = elf.sections.iter().map(|sh| sh.addr).collect();
-        (addrs, segments, Vec::new())
+        // Sun Studio puts constant pools (`___const_seg_*`, jump tables
+        // among them) in `.text`, as data objects: they are not code.
+        let pools: Vec<(u64, u64)> = elf
+            .symbols
+            .iter()
+            .filter(|symbol| symbol.kind == elf::STT_OBJECT && symbol.size > 0)
+            .filter(|symbol| symbol.shndx != elf::SHN_UNDEF)
+            .map(|symbol| (symbol.value, symbol.value.saturating_add(symbol.size)))
+            .collect();
+        (addrs, fence(segments, pools), Vec::new())
     };
     if !segments
         .iter()
@@ -823,6 +881,38 @@ fn uleb128s(data: &[u8]) -> impl Iterator<Item = u64> + '_ {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fences_data_out_of_code() {
+        let bytes = [0_u8; 32];
+        let code = Segment {
+            addr: 0x1000,
+            bytes: Cow::Borrowed(&bytes),
+            executable: true,
+        };
+        let parts: Vec<(u64, usize, bool)> = fence(
+            vec![code],
+            vec![
+                (0x1008, 0x1010),
+                (0x100c, 0x1014),
+                (0x1018, 0x1020),
+                (0x101c, 0x1030),
+            ],
+        )
+        .iter()
+        .map(|segment| (segment.addr, segment.bytes.len(), segment.executable))
+        .collect();
+        assert_eq!(
+            parts,
+            [
+                (0x1000, 8, true),
+                (0x1008, 8, false),
+                (0x1010, 4, false),
+                (0x1014, 4, true),
+                (0x1018, 8, false)
+            ]
+        );
+    }
 
     #[test]
     fn uleb128() {

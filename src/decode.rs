@@ -317,9 +317,10 @@ impl Decoder {
         }
     }
 
-    /// Whether a call's note (its delay slot's) is applied before the call.
-    pub(crate) const fn notes_calls(&self) -> bool {
-        matches!(self, Self::Sparc { .. })
+    /// Whether transfers have delay slots, whose note a call's or jump's
+    /// is: it applies before the target.
+    pub(crate) const fn delay_slots(&self) -> bool {
+        matches!(self, Self::Sparc { .. } | Self::Mips { .. })
     }
 
     /// The register that carries a call's `n`th argument (from zero) under

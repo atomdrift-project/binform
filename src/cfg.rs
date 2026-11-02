@@ -464,10 +464,17 @@ impl Work<'_> {
                         };
                     // Branches and calls only read registers; what a call
                     // changes, `call` forgets below.
-                    // A compare-and-branch bounds a case value too.
+                    // A compare-and-branch bounds a case value too. A delay
+                    // slot runs before a call or jump arrives.
                     if matches!(insn.flow, Flow::Next | Flow::Branch(_))
-                        || (self.decoder.notes_calls()
-                            && matches!(insn.flow, Flow::Call(_) | Flow::CallIndirect))
+                        || (self.decoder.delay_slots()
+                            && matches!(
+                                insn.flow,
+                                Flow::Call(_)
+                                    | Flow::CallIndirect
+                                    | Flow::CallSlot(_)
+                                    | Flow::Jump(_)
+                            ))
                     {
                         tracker.note(insn.note);
                     }
