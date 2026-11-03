@@ -751,6 +751,39 @@ fn csky_static() {
     });
 }
 
+/// M*Core, decoded as the C-SKY ABIv1 it grew into: the same literal
+/// pools, `jsri` calls and `bt`/`br` reach. rizin reads it big-endian and
+/// finds noise, so only coverage and alignment are claimed.
+#[test]
+fn mcore_static() {
+    check("bot-mcore-static", |outcome| {
+        assert_eq!(outcome.image.arch, Some(crate::Arch::MCore));
+        // The rest is literal pools.
+        assert!(coverage(outcome) >= 75, "covers {}%", coverage(outcome));
+        let functions = &outcome.recovery.functions;
+        assert!(functions.len() >= 280, "only {} functions", functions.len());
+        // _start, and `main`, which it loads from its pool for uClibc.
+        let entries: Vec<u64> = functions.iter().map(|f| f.entry).collect();
+        assert!(entries.contains(&0x80e0) && entries.contains(&0x1_b228));
+        assert!(entries.iter().all(|entry| entry % 2 == 0));
+    });
+}
+
+/// eBPF: one program, named by its symbol, covered whole.
+#[test]
+fn ebpf_object() {
+    check("ebpf-lirc-grundig", |outcome| {
+        assert_eq!(outcome.image.arch, Some(crate::Arch::Bpf));
+        assert_eq!(coverage(outcome), 100);
+        assert_eq!(outcome.recovery.invalid, 0);
+        let [function] = outcome.recovery.functions.as_slice() else {
+            panic!("{} functions", outcome.recovery.functions.len());
+        };
+        assert_eq!(function.name.as_deref(), Some("bpf_decoder"));
+        assert!(function.blocks >= 40, "{} blocks", function.blocks);
+    });
+}
+
 /// Xtensa: two- and three-byte instructions, a literal pool of words that
 /// sit before the `l32r`s that read them, PC-relative `call`s, and
 /// windowed functions that open with `entry`. The sweep finds the pool

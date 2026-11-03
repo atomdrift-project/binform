@@ -206,7 +206,9 @@ only. Next:
   their stubs are unlinked; switch tables through `addx4; l32i; jx` leave
   a handful of jumps unresolved; no call0 ABI or big-endian Xtensa.
 - **Not supported at all:** AIX (XCOFF), and these corpus sets:
-  Nios II, M*Core, BPF, and IA-64, MIPS-FPU and PowerPC PE files.
+  Nios II, IA-64, MIPS-FPU and PowerPC PE files, and big-endian M*Core
+  and eBPF. (Little-endian M*Core decodes as C-SKY ABIv1, 79% of
+  `bot-mcore-static`; eBPF objects as `isa/bpf.rs`, whole programs.)
 
 - **From the exotic-binaries survey** (`C:\data\exotic_binaries`, all
   hostile: parse only):
@@ -298,11 +300,41 @@ In scan's pipeline stng already runs without rizin; only the stng CLI
    the table. **Done, and rizin is gone from extraction:** binform runs
    on every binary with no function inventory and fills the import,
    export and section views goblin left empty; nothing falls back
-   (see PLAN step 6). Cache key: binform's policy alone. Left: delete
-   the no-op `filefacts::rizin` shim once cleave stops calling it. binform's own ELF/PE/Mach-O reader may disagree with goblin on
+   (see PLAN step 6). Cache key: binform's policy alone. **rizin shim
+   deleted. Done:** `filefacts::rizin` is gone (module, `rizin.rs`, every
+   `OpenOptions::rizin*` method, `rizin_fingerprint`→`recovery_fingerprint`,
+   `rizin_recovery_incomplete`→`recovery_incomplete`), and cleave is fully
+   severed — no `rizin`/`skip_rizin`/`rizin_timeout` settings, no
+   `kill_all_rizin_groups`, the archive-member rizin-skip subsystem removed,
+   `--disable rizin` kept only as an accepted-but-ignored flag. Verified by a
+   temporary local `[patch]` (reverted): filefacts and cleave build and test
+   green, with zero new regressions (the one recovery-dependent test,
+   cleave's `direct_syscall_projection`, relied on rizin's linear sweep of a
+   headerless section and was made realistic — see
+   `memory/rizin-sever-headerless-recovery-gap`). Left: cleave consumes
+   filefacts by git pin, so bump that pin after filefacts is pushed.
+   **Function inventory now prefers binform over goblin. Done:** the ELF
+   extractor no longer lets a bare `.symtab` stand in ahead of binform (that
+   was the last goblin-preferred-over-binform leg, a vestige of the rizin
+   decision). binform is primary — it names functions from the symbol-table
+   seeds it reads and adds complexity and a call graph a `.symtab` cannot —
+   and the symtab fallback (`static_function_fallback`, coverage heuristic and
+   `required` param dropped) stands in only when binform recovered nothing (an
+   undecoded arch) with no pclntab. Go's pclntab still pre-empts binform (its
+   generic recovery over-extends Go `.text`), and .NET/CLR likewise; PE and
+   Mach-O were already binform-primary (no symtab→Function path). Shifts
+   `binary.*_function_count`/complexity for unstripped non-Go binaries —
+   recalibrate in the A/B (step 3). binform's
+   own ELF/PE/Mach-O reader may disagree with goblin on
    hostile files: log the disagreements, and consider filling `Binary`
-   from goblin later. Check that the universal Mach-O slice binform
-   picks matches `native_arch_only`.
+   from goblin later. **Universal slice: done** — binform ranks x86-64,
+   arm64, i386 (`preferred_slice`), the slice rizin read on the x86-64
+   scanners, deterministic on any host. **rizin parity: done** — the files
+   rizin covered and binform did not were eBPF and M*Core (now decoded) and
+   ARMNT forwarder DLLs (data rizin took for code; nothing to match), and
+   the native fill skips empty import/export names as rizin's did. Also: `pe.rizin_importless_*` metric key
+   names still say "rizin" — a schema-versioned rename (key catalog + cleave
+   consumers + cache key) left for a deliberate pass.
 3. **A/B.** `binform-ab` over the corpus for the aggregates, then a
    trait diff through scan's normal pipeline. Block counts differ from
    rizin's and are often more accurate (and rizin cannot decode OpenRISC,

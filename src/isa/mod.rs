@@ -4,6 +4,7 @@
 pub(crate) mod arc;
 pub(crate) mod arm;
 pub(crate) mod arm64;
+pub(crate) mod bpf;
 pub(crate) mod csky;
 pub(crate) mod loongarch;
 pub(crate) mod m68k;
@@ -251,6 +252,7 @@ pub(crate) enum Decoder {
     },
     CSky(Box<crate::isa::csky::State>),
     Xtensa(Box<crate::isa::xtensa::State>),
+    Bpf,
 }
 
 impl Decoder {
@@ -321,7 +323,8 @@ impl Decoder {
                 v2: arch == Arch::ArcV2,
                 state: Box::default(),
             },
-            Arch::CSky => Self::CSky(Box::default()),
+            Arch::CSky | Arch::MCore => Self::CSky(Box::default()),
+            Arch::Bpf => Self::Bpf,
             Arch::Xtensa => Self::Xtensa(Box::default()),
         }
     }
@@ -381,6 +384,7 @@ impl Decoder {
             Self::Arc { v2, state } => crate::isa::arc::decode(state, bytes, addr, *v2),
             Self::CSky(state) => crate::isa::csky::decode(state, bytes, addr),
             Self::Xtensa(state) => crate::isa::xtensa::decode(state, bytes, addr),
+            Self::Bpf => crate::isa::bpf::decode(bytes, addr),
         }
     }
 
@@ -414,7 +418,8 @@ impl Decoder {
             | Self::Sparc { .. }
             | Self::PowerPc { .. }
             | Self::RiscV { .. }
-            | Self::LoongArch(_) => 8,
+            | Self::LoongArch(_)
+            | Self::Bpf => 8,
         }
     }
 
@@ -438,6 +443,7 @@ impl Decoder {
             | Self::LoongArch(_)
             | Self::OpenRisc(_)
             | Self::MicroBlaze { .. } => 4,
+            Self::Bpf => 8,
         }
     }
 

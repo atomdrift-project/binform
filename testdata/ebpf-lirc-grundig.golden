@@ -1,0 +1,3 @@
+# binform: 1 functions, 1008 bytes of code covered, 0 landing pads, 0 cases
+# rizin: 1 functions; 1 shared, 0 with the same blocks (0 of 1 without landing pads)
+0x8000040 size=1008 blocks=51 edges=81 cc=32 cases=0 found=SYMBOL rizin=1/1

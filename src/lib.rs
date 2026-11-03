@@ -121,6 +121,13 @@ pub enum Arch {
     CSky,
     /// Tensilica Xtensa (windowed ABI), little-endian.
     Xtensa,
+    /// Motorola M*Core (RCE), little-endian: the set C-SKY ABIv1 descends
+    /// from, decoded as such.
+    MCore,
+    /// eBPF, little-endian: the Linux kernel's in-kernel virtual machine.
+    /// Programs are relocatable objects, one function per program section
+    /// and its static subprograms.
+    Bpf,
 }
 
 impl Arch {
@@ -189,6 +196,7 @@ impl Arch {
             | Self::Arc
             | Self::ArcV2
             | Self::CSky
+            | Self::MCore
             | Self::Xtensa => 4,
             Self::X86_64
             | Self::Arm64
@@ -201,7 +209,8 @@ impl Arch {
             | Self::PowerPc64
             | Self::PowerPc64El
             | Self::RiscV64
-            | Self::LoongArch64 => 8,
+            | Self::LoongArch64
+            | Self::Bpf => 8,
         }
     }
 }

@@ -129,7 +129,7 @@ binform/
   src/isa/              one decoder per instruction set, used by functions and calls
     mod.rs              Insn, Flow, Note, Mem: the per-ISA contract; Arch → decoder `match`
     x86.rs arm.rs arm64.rs mips.rs ppc.rs riscv.rs loongarch.rs s390x.rs sparc.rs
-    superh.rs m68k.rs openrisc.rs microblaze.rs arc.rs csky.rs xtensa.rs
+    superh.rs m68k.rs openrisc.rs microblaze.rs arc.rs csky.rs xtensa.rs bpf.rs
   src/calls/            call & syscall sites with argument values
     mod.rs              the walk and public types; state.rs register/stack model
     x86.rs arm.rs       per-ISA value semantics
@@ -223,8 +223,10 @@ The original notes:
   import and delay-import directories (ordinals kept); exports with
   forwarders skipped; `.NET`-only images parse with empty functions.
 - Mach-O: sections from segments; imports from binds and lazy binds;
-  exports from the export trie; universal files choose one slice (today's
-  rule, matched against filefacts' `native_arch_only`).
+  exports from the export trie; universal files choose one slice: x86-64,
+  else arm64, else i386, else the first (`preferred_slice`). Fixed rather
+  than the host's, as filefacts' old `native_arch_only` was; the scanners
+  ran on x86-64, so they read the same slice.
 
 Test: `binform-ab parse` over `testdata/`, stng's binaries and
 `exotic_binaries`, diffing against `iSj`/`iij`/`iEj` name-by-name. Accept
@@ -285,12 +287,18 @@ Mach-O binary whose function view is empty, with no admission policy,
 and fills the section, import and export views of a PE goblin cannot
 read. A/B over both corpora (328 files): 104 s against rizin's 462 s;
 function metrics for 55 files rizin's admission policy skipped; lost for
-9 (6 ARMNT forwarder DLLs whose "functions" rizin decoded from data, and
-the eBPF and M*Core files). What remains is `filefacts::rizin` and the
+9: 6 ARMNT forwarder DLLs whose "functions" rizin decoded from data (no
+code to recover), and the eBPF and M*Core files, since recovered: eBPF
+has `isa/bpf.rs`, and M*Core (little-endian) is decoded as the C-SKY ABIv1
+it grew into (rizin read it big-endian and found noise; see the
+`bot-mcore-static` and `ebpf-lirc-grundig` fixtures). Every item goblin
+used to hand to rizin — functions, calls and the empty import, export and
+section views — now comes from binform, with nothing rizin recovered left
+unrecovered. What remains is `filefacts::rizin` and the
 `OpenOptions::rizin*` settings, now no-ops, kept until cleave drops them.
 
 The original note: Instruction sets binform
-lacks (BPF, M*Core, Nios II, IA-64, …) get a `isa/` file when a sample
+lacks (Nios II, IA-64, …) get a `isa/` file when a sample
 turns up, not a fallback; until then such a file has layout and no
 functions, as resource-only DLLs do today.
 

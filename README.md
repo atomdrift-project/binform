@@ -7,7 +7,7 @@ I/O: recovery is a function of its input, never panics, and bounds its work by
 configurable `Limits`, because the input is assumed hostile.
 
 It covers x86/x86-64, Arm/Thumb, AArch64, MIPS, PowerPC, RISC-V, LoongArch,
-s390x, SPARC, SuperH, m68k, OpenRISC, MicroBlaze, ARC, C-SKY and Xtensa, in
+s390x, SPARC, SuperH, m68k, OpenRISC, MicroBlaze, ARC, C-SKY, M*Core, Xtensa and eBPF, in
 ELF, PE and Mach-O binaries. The API is three pure functions over plain
 structs, and a caller pays only for what it calls: `parse` reads the
 headers into a `Binary` (format, entry point, sections, imports and
