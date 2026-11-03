@@ -685,6 +685,28 @@ fn arcv2_dynamic() {
     });
 }
 
+/// C-SKY ABIv1: literal pools between functions, calls through the GOT
+/// base plus an offset, and far branches that read the PC. Every function
+/// GCC emits is word-aligned: a halfword-aligned entry would be a pool
+/// word or a far branch taken for a function.
+#[test]
+fn csky_static() {
+    check("bot-csky-static", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::CSky);
+        // The rest is literal pools.
+        assert!(coverage(outcome) >= 85, "covers {}%", coverage(outcome));
+        assert!(outcome.recovery.invalid <= 1);
+        let functions = &outcome.recovery.functions;
+        assert!(functions.len() >= 440, "only {} functions", functions.len());
+        let odd: Vec<u64> = functions
+            .iter()
+            .map(|f| f.entry)
+            .filter(|entry| entry % 4 != 0)
+            .collect();
+        assert!(odd.is_empty(), "halfword-aligned entries {odd:x?}");
+    });
+}
+
 /// OpenRISC: delay slots everywhere, `l.jal` that only reads the PC, and
 /// integers built like addresses that fall inside code.
 #[test]

@@ -162,9 +162,30 @@ only. Next:
   millicode keeps `r0` and the flags), so the `bad-0073ff` family resolves
   no cases; no ARCompact PLT, big-endian ARC or object relocations.
   Rizin 0.8.2 decodes ARCompact only, and reads ARCv2 as x86.
-- **Not supported at all:** AIX (XCOFF), and these corpus sets: C-SKY,
-  Xtensa, Nios II, M*Core, BPF, and IA-64, MIPS-FPU and PowerPC PE
-  files.
+- **C-SKY** (ELF, ABIv1: CK510/CK610, little-endian) decodes the 16-bit
+  set: `br`/`bt`/`bf`/`bsr`, `jmp`/`jsr` through registers held
+  constant, `jmpi`/`jsri` through pool words, `rts`/`rte`, and GCC's trap
+  (`bsr .`). Literal pools sit after each function's last jump: the
+  sweep steps over the words `lrw`/`jmpi`/`jsri` read, and no function
+  inferred from a call or an address starts in one. Code that follows
+  an unconditional end and pools, and starts with `subi r0, n` or `stm`,
+  starts a function (uncalled ones in a static binary). PIC code's GOT
+  base (`bsr 1f; 1: lrw r14, [offset]; addu r14, r15`) is learned once
+  and held in `r14` at every block start, so `lrw r7, [offset]; addu r7,
+  r14; jsr r7` resolves. A pool word the next instruction adds to the PC
+  (the GOT base, a far branch: `bsr 1f; lrw r1, [offset]; addu r1, r15;
+  ...; jmp r1`) is an offset, not an address. A far branch's
+  `subi r0, 8; stw r15, (r0, 0); bsr 1f` is no frame. An address only
+  taken must be word-aligned, as GCC's functions are. On the bots with
+  symbols (blanked), every function found is a symbol's and 11 of 463 are
+  missed (uncalled leaves such as `__sigdelset`, `call_frame_dummy`);
+  coverage is 88-90% (the rest is pools), one invalid each (a `bkpt`
+  trap), and the only unresolved jump is `_dl_linux_resolve`'s
+  (`bot-csky-static`). Left: ABIv2 (CK807/CK810, 32-bit instructions),
+  which no corpus sample uses; GCC's jump tables were not seen (switches
+  compile to compare chains). Rizin 0.8.2 has no C-SKY support.
+- **Not supported at all:** AIX (XCOFF), and these corpus sets: Xtensa,
+  Nios II, M*Core, BPF, and IA-64, MIPS-FPU and PowerPC PE files.
 
 - **From the exotic-binaries survey** (`C:\data\exotic_binaries`, all
   hostile: parse only):

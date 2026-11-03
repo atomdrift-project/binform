@@ -39,6 +39,7 @@ mod arm;
 mod arm64;
 mod cfg;
 pub mod cil;
+mod csky;
 mod decode;
 mod loongarch;
 mod m68k;
@@ -123,6 +124,8 @@ pub enum Arch {
     Arc,
     /// Synopsys ARCv2 (ARC EM, HS), little-endian.
     ArcV2,
+    /// C-SKY ABIv1 (CK510, CK610), little-endian.
+    CSky,
 }
 
 impl Arch {
@@ -189,7 +192,8 @@ impl Arch {
             | Self::MicroBlaze
             | Self::MicroBlazeEl
             | Self::Arc
-            | Self::ArcV2 => 4,
+            | Self::ArcV2
+            | Self::CSky => 4,
             Self::X86_64
             | Self::Arm64
             | Self::Mips64

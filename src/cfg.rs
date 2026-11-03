@@ -120,6 +120,7 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
         returns: HashMap::new(),
         return_budget: limits.instructions / 4,
         thunks: HashMap::new(),
+        pools: HashSet::new(),
         handlers: HashMap::new(),
         starts: HashMap::new(),
         explored: HashSet::new(),
@@ -385,6 +386,9 @@ struct Work<'a> {
     return_budget: usize,
     /// Address -> the import slot the code there only jumps through.
     thunks: HashMap<u64, Option<u64>>,
+    /// The literal-pool words the sweep stepped over: data, where no
+    /// function an address or call names starts.
+    pools: HashSet<u64>,
     /// Function start -> its landing pads.
     handlers: HashMap<u64, Vec<u64>>,
     /// C runtime start routines (functions and import slots) -> which
@@ -455,6 +459,15 @@ impl Work<'_> {
         if !self.memory.is_code(addr) {
             return None;
         }
+        let inferred = Found::CALL | Found::SWEEP | Found::TAIL_CALL | Found::POINTER;
+        if inferred.contains(how) && self.pools.contains(&(addr & !3)) {
+            return None;
+        }
+        // An address only taken, never called, is a function's when it is
+        // as aligned as functions are.
+        if how == Found::POINTER && !addr.is_multiple_of(self.decoder.function_alignment()) {
+            return None;
+        }
         if self.entries.len() >= most {
             self.truncated = true;
             return None;
@@ -482,6 +495,13 @@ impl Work<'_> {
             self.decoder.reset();
             let mut offset = 0_usize;
             let mut window = usize::MAX;
+            // Literal-pool words ahead, which hold data.
+            let mut pools = BTreeSet::new();
+            // Whether only padding and pools have followed a pool or the
+            // end of a block: the code after that starts a function when
+            // it sets up a frame (one nothing calls, in a static binary).
+            // Only on sets with pools, whose frames are distinctive.
+            let mut after_end = false;
             while let Some(rest) = bytes.get(offset..).filter(|rest| !rest.is_empty()) {
                 if offset / WINDOW != window {
                     window = offset / WINDOW;
@@ -493,12 +513,36 @@ impl Work<'_> {
                     }
                 }
                 let addr = base.wrapping_add(offset as u64) | mode;
+                while pools.first().is_some_and(|&pool| pool + 4 <= addr) {
+                    pools.pop_first();
+                }
+                if let Some(&pool) = pools.first().filter(|&&pool| pool <= addr) {
+                    self.pools.insert(pool);
+                    offset = offset.saturating_add(usize::try_from(step).unwrap_or(1));
+                    self.decoder.reset();
+                    after_end = true;
+                    continue;
+                }
+                if let Some(pool) = self.decoder.literal(rest, addr) {
+                    pools.insert(pool);
+                }
                 let Some(insn) = self.decode(rest, addr) else {
                     return;
                 };
-                if self.decoder.starts_function(rest) {
+                if self.decoder.starts_function(rest)
+                    || (after_end
+                        && addr.is_multiple_of(self.decoder.function_alignment())
+                        && self.decoder.starts_frame(rest))
+                {
                     self.add_entry(addr, Found::SWEEP, most);
                 }
+                after_end = (after_end && insn.pad)
+                    || (!pools.is_empty() || !self.pools.is_empty())
+                        && matches!(
+                            insn.flow,
+                            Flow::Return | Flow::Jump(_) | Flow::JumpRegister(_) | Flow::Stop
+                        )
+                        && !insn.falls;
                 match insn.flow {
                     Flow::Call(target) => {
                         self.add_entry(target, Found::SWEEP, most);

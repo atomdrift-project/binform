@@ -232,6 +232,7 @@ pub(crate) enum Decoder {
         v2: bool,
         state: Box<crate::arc::State>,
     },
+    CSky(Box<crate::csky::State>),
 }
 
 impl Decoder {
@@ -302,6 +303,7 @@ impl Decoder {
                 v2: image.arch == Arch::ArcV2,
                 state: Box::default(),
             },
+            Arch::CSky => Self::CSky(Box::default()),
         }
     }
 
@@ -322,6 +324,7 @@ impl Decoder {
             Self::OpenRisc(state) => **state = crate::openrisc::State::default(),
             Self::MicroBlaze { state, .. } => **state = crate::microblaze::State::default(),
             Self::Arc { state, .. } => **state = crate::arc::State::default(),
+            Self::CSky(state) => state.reset(),
             _ => {}
         }
     }
@@ -354,6 +357,7 @@ impl Decoder {
             Self::OpenRisc(state) => crate::openrisc::decode(state, bytes, addr),
             Self::MicroBlaze { big, state } => crate::microblaze::decode(state, bytes, addr, *big),
             Self::Arc { v2, state } => crate::arc::decode(state, bytes, addr, *v2),
+            Self::CSky(state) => crate::csky::decode(state, bytes, addr),
         }
     }
 
@@ -376,7 +380,8 @@ impl Decoder {
             | Self::M68k(_)
             | Self::OpenRisc(_)
             | Self::MicroBlaze { .. }
-            | Self::Arc { .. } => 4,
+            | Self::Arc { .. }
+            | Self::CSky(_) => 4,
             Self::RiscV { config, .. } if !config.wide => 4,
             Self::X86 { .. }
             | Self::Arm64(_)
@@ -399,7 +404,8 @@ impl Decoder {
             | Self::Arm { thumb: true, .. }
             | Self::RiscV { .. }
             | Self::M68k(_)
-            | Self::Arc { .. } => 2,
+            | Self::Arc { .. }
+            | Self::CSky(_) => 2,
             Self::Arm64(_)
             | Self::Arm { .. }
             | Self::Mips { .. }
@@ -408,6 +414,16 @@ impl Decoder {
             | Self::LoongArch(_)
             | Self::OpenRisc(_)
             | Self::MicroBlaze { .. } => 4,
+        }
+    }
+
+    /// The alignment an address taken must have to be a function's: C-SKY's
+    /// GCC aligns functions to words, and a halfword-aligned integer in its
+    /// literal pools is no function. Elsewhere, any (a Thumb pointer is odd).
+    pub(crate) fn function_alignment(&self) -> u64 {
+        match self {
+            Self::CSky(_) => 4,
+            _ => 1,
         }
     }
 
@@ -466,6 +482,7 @@ impl Decoder {
                 | Self::OpenRisc(_)
                 | Self::MicroBlaze { .. }
                 | Self::Arc { .. }
+                | Self::CSky(_)
         )
     }
 
@@ -510,7 +527,18 @@ impl Decoder {
             Self::OpenRisc(_) => crate::openrisc::starts_frame(bytes),
             Self::MicroBlaze { big, .. } => crate::microblaze::starts_frame(bytes, *big),
             Self::Arc { v2, .. } => crate::arc::starts_frame(bytes, *v2),
+            Self::CSky(_) => crate::csky::starts_frame(bytes),
             _ => false,
+        }
+    }
+
+    /// The literal-pool word the instruction at the start of `bytes`, at
+    /// `addr`, reads, ahead of it: data, not code, to a linear sweep (C-SKY
+    /// keeps its pools between functions, after the last jump).
+    pub(crate) fn literal(&self, bytes: &[u8], addr: u64) -> Option<u64> {
+        match self {
+            Self::CSky(_) => crate::csky::literal(bytes, addr),
+            _ => None,
         }
     }
 
