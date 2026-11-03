@@ -1,6 +1,7 @@
 //! Print what binform reads from each file named on the command line, one
-//! JSON object per file: its functions (`binform [functions] FILE...`), or
-//! its layout (`binform parse FILE...`).
+//! JSON object per file: its functions (`binform [functions] FILE...`), its
+//! layout (`binform parse FILE...`), or its call and syscall sites
+//! (`binform calls FILE...`).
 
 use std::process::ExitCode;
 
@@ -11,6 +12,7 @@ fn main() -> ExitCode {
     let verb = match paths.first().map(String::as_str) {
         Some("parse") => layout,
         Some("functions") => dump,
+        Some("calls") => calls,
         _ => {
             paths.insert(0, String::new());
             dump
@@ -18,7 +20,7 @@ fn main() -> ExitCode {
     };
     paths.remove(0);
     if paths.is_empty() {
-        eprintln!("usage: binform [parse|functions] FILE...");
+        eprintln!("usage: binform [parse|functions|calls] FILE...");
         return ExitCode::from(2);
     }
     let mut status = ExitCode::SUCCESS;
@@ -85,6 +87,43 @@ fn dump(path: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
         "unresolved": recovery.unresolved,
         "truncated": recovery.truncated,
         "functions": functions,
+    }))
+}
+
+fn calls(path: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+    let bytes = std::fs::read(path)?;
+    let bin = binform::parse(&bytes)?;
+    let funcs = binform::functions(&bin, &binform::Limits::DEFAULT);
+    let value = |v: &binform::Value| match v {
+        binform::Value::Unknown => serde_json::Value::Null,
+        binform::Value::Int(n) => json!(n),
+        binform::Value::Mem { addr, bytes } => json!({
+            "addr": addr,
+            "bytes": bytes.iter().map(|b| b.map(serde_json::Value::from)
+                .unwrap_or(serde_json::Value::Null)).collect::<Vec<_>>(),
+        }),
+    };
+    let sites: Vec<serde_json::Value> = binform::calls(&bin, &funcs)
+        .iter()
+        .map(|c| {
+            let (kind, name) = match c.target {
+                binform::Target::Syscall(n) => ("syscall", json!({"number": n, "name": bin.syscall(n)})),
+                binform::Target::Import(i) => ("import", json!(bin.imports.get(i).map(|m| &m.name))),
+                binform::Target::Addr(a) => ("call", json!(a)),
+                binform::Target::Unknown => ("indirect", serde_json::Value::Null),
+            };
+            json!({
+                "addr": c.addr,
+                "kind": kind,
+                "target": name,
+                "args": c.args.iter().map(value).collect::<Vec<_>>(),
+            })
+        })
+        .collect();
+    Ok(json!({
+        "path": path,
+        "arch": bin.arch.map(|arch| format!("{arch:?}")),
+        "calls": sites,
     }))
 }
 

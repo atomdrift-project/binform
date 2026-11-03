@@ -8,18 +8,25 @@ configurable `Limits`, because the input is assumed hostile.
 
 It covers x86/x86-64, Arm/Thumb, AArch64, MIPS, PowerPC, RISC-V, LoongArch,
 s390x, SPARC, SuperH, m68k, OpenRISC, MicroBlaze, ARC, C-SKY and Xtensa, in
-ELF, PE and Mach-O binaries. The API is two pure functions over plain
+ELF, PE and Mach-O binaries. The API is three pure functions over plain
 structs, and a caller pays only for what it calls: `parse` reads the
 headers into a `Binary` (format, entry point, sections, imports and
-exports, by rizin's rules), and `functions` recovers its functions. A
-binary of an instruction set binform does not decode still parses: it has
-a layout, no `arch`, and no functions.
+exports, by rizin's rules), `functions` recovers its functions, and
+`calls` yields every call and syscall site with the values its arguments
+carry. A binary of an instruction set binform does not decode still
+parses: it has a layout, no `arch`, and no functions.
 
 ```rust
 let bytes = std::fs::read("a.out")?;
 let bin = binform::parse(&bytes)?;
-for f in binform::functions(&bin, &binform::Limits::DEFAULT).functions {
+let funcs = binform::functions(&bin, &binform::Limits::DEFAULT);
+for f in &funcs.functions {
     println!("{:#x} {} blocks, complexity {}", f.entry, f.blocks, f.complexity);
+}
+for call in binform::calls(&bin, &funcs) {
+    if let binform::Target::Syscall(n) = call.target {
+        println!("{:#x} syscall {:?} {:?}", call.addr, bin.syscall(n), call.args);
+    }
 }
 ```
 
@@ -34,16 +41,13 @@ where two tools use it:
   calls), the call graph its API-hash detector correlates, and the
   constant arguments at each syscall.
 - **[stng](https://github.com/atomdrift-project/stng)** extracts strings
-  for malware analysis. It needs the addresses code builds (`lea`,
-  `adrp; add`, `auipc; addi`, `l32r`) to place strings, the immediates
-  stored to the stack to rebuild stack strings, and the xor instructions
-  near a string to find XOR keys.
+  for malware analysis. It needs the function inventory, and aims its own
+  XOR decoding at the string extents it finds natively.
 
-Both shelled out to [rizin](https://rizin.re) for these and are moving to
-binform in-process. filefacts keeps rizin, for now, as a fallback for the
-functions of an instruction set binform does not decode, and for a
-recovery a work budget cut short or that found no function in
-substantial code.
+Both shelled out to [rizin](https://rizin.re) for these. Both have moved
+off it: filefacts calls binform for every binary without a function
+inventory, and for the sections, imports and exports of a PE goblin cannot
+read; stng no longer runs rizin at all.
 
 ### The line
 
@@ -53,8 +57,8 @@ same answer whoever asks, belongs here:
 
 - instruction boundaries, functions, blocks, complexity, calls and jumps;
 - the constant that reaches an instruction: an address built into a
-  register, the number and arguments at a syscall or call, an immediate
-  stored to a stack slot, a xor instruction.
+  register, the number and arguments at a syscall or call, including the
+  bytes behind a pointer argument (a `sockaddr` built on the stack).
 
 Anything that needs domain meaning or emulation stays with the caller:
 what a syscall number is called and implies (filefacts' tables and trait

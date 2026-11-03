@@ -34,15 +34,18 @@
 
 #[doc(hidden)]
 pub mod diagnostics;
+mod calls;
 mod functions;
 mod isa;
 mod layout;
+mod syscalls;
 #[cfg(test)]
 mod tests;
 
 use std::borrow::Cow;
 use std::ops::Range;
 
+pub use calls::{Call, Target, Value, calls};
 pub use layout::{Error, parse};
 
 /// binform's version, for cache keys: a cache of its answers is stale when
@@ -407,6 +410,17 @@ impl Binary<'_> {
             let delta = addr.wrapping_sub(s.addr);
             (delta < s.file_size).then(|| s.offset.wrapping_add(delta))
         })
+    }
+
+    /// The name of syscall `number` in this binary's OS and architecture:
+    /// Linux's, for an ELF file. `None` for a number the OS does not name,
+    /// and for PE and Mach-O files, whose syscall numbers are not stable.
+    #[must_use]
+    pub fn syscall(&self, number: u64) -> Option<&'static str> {
+        match (self.format, self.arch) {
+            (Format::Elf, Some(arch)) => syscalls::name(arch, number),
+            _ => None,
+        }
     }
 
     /// The name of the import whose slot is at `slot`: what a [`Ref`] that

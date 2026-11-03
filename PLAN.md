@@ -57,7 +57,7 @@ pub const VERSION: &str;                                          // for cache k
 
 pub fn parse(bytes: &[u8]) -> Result<Binary<'_>, Error>;
 pub fn functions(bin: &Binary<'_>, limits: &Limits) -> Functions;
-pub fn search(bin: &Binary<'_>, fns: &Functions) -> Hits;
+pub fn calls(bin: &Binary<'_>, fns: &Functions) -> Vec<Call>;    // call & syscall sites
 
 pub struct Binary<'a> {
     pub format: Format,              // Elf, Pe, MachO
@@ -85,9 +85,10 @@ pub struct Function { pub entry: u64, pub name: Option<String>, pub size: u64,
                       pub blocks: u32, pub complexity: u32, pub refs: Vec<Ref> }
 pub struct Ref { pub from: u64, pub to: u64, pub kind: RefKind }   // Call, Jump, Branch, Case
 
-pub struct Hits { pub xor: Vec<u64>, pub lea: Vec<(u64, u64)>,     // (insn, pointer)
-                  pub connect: Vec<Sockaddr> }
-pub struct Sockaddr { pub ip: [u8; 4], pub port: u16, pub at: u64 }
+pub struct Call { pub addr: u64, pub target: Target, pub args: Vec<Value> }
+pub enum Target { Syscall(u64), Import(usize), Addr(u64), Unknown }
+pub enum Value  { Unknown, Int(u64),
+                  Mem { addr: Option<u64>, bytes: Vec<Option<u8>> } }  // ptr + bytes behind it
 
 pub struct Limits { pub functions: usize, pub instructions: usize, pub table_entries: usize }
 impl Limits { pub const DEFAULT: Self; pub const QUICK: Self; }
@@ -98,6 +99,7 @@ impl Binary<'_>   { pub fn import(&self, slot: u64) -> Option<&str>;
                     pub fn offset(&self, addr: u64) -> Option<u64>; }   // vaddr → file
 impl Functions    { pub fn function(&self, entry: u64) -> Option<&Function>;
                     pub fn name(&self, bin: &Binary, to: u64) -> Option<&str>; }
+impl Binary<'_>   { pub fn syscall(&self, number: u64) -> Option<&'static str>; }  // arch+OS table
 ```
 
 Removed from today's funktion: the public hand-fillable `Image` (no
@@ -124,13 +126,16 @@ binform/
   src/functions/        functions
     mod.rs              seeds from Binary, sweep, queue, walk, Functions assembly
     table.rs            jump tables
-  src/isa/              one decoder per instruction set, used by functions and search
+  src/isa/              one decoder per instruction set, used by functions and calls
     mod.rs              Insn, Flow, Note, Mem: the per-ISA contract; Arch → decoder `match`
     x86.rs arm.rs arm64.rs mips.rs ppc.rs riscv.rs loongarch.rs s390x.rs sparc.rs
     superh.rs m68k.rs openrisc.rs microblaze.rs arc.rs csky.rs xtensa.rs
-  src/search.rs         xor / lea / connect over recovered functions
+  src/calls/            call & syscall sites with argument values
+    mod.rs              the walk and public types; state.rs register/stack model
+    x86.rs arm.rs       per-ISA value semantics
+  src/syscalls.rs       Linux syscall names by arch (generated; tools/syscalls.py)
   tools/
-    binform             `binform [parse|functions|search] FILE...` → JSON, one object per file
+    binform             `binform [parse|functions|calls] FILE...` → JSON, one object per file
     binform-ab          each verb against rizin's command over a corpus; `--save` fixtures
   testdata/             real binaries (compressed) + golden JSON per verb; hostile ones parse-only
   src/tests/            unit-level: fixtures.rs (golden diff, `BINFORM_BLESS=1` to accept),
@@ -144,8 +149,8 @@ filefacts::open(bytes)
   goblin                         native facts, unchanged
   binform::parse                 every executable; replaces iSj/iij/iEj when goblin found none
   binform::functions             when the admission policy says so; metrics, Function and Call symbols
-  binform::search                when stng will run; → stng::ExternalHints { xor_key_offsets, connect_addrs }
-  stng::extract_strings_from_object(object, bytes, opts.with_hints(hints))
+  binform::calls                 syscall/connect sites → elf.syscalls_* facts, decoded sockaddr, network IOCs
+  stng::extract_strings_from_object(object, bytes, opts)   // no hints; stng aims XOR natively
 ```
 
 - filefacts → binform, filefacts → stng, stng CLI → binform. stng's library
@@ -247,21 +252,44 @@ as one string) that the comparison exposed. Test: diff the CLI's JSON
 over stng's testdata before and after; the only losses are `imp.`/`func.`
 respellings and sub-8-byte junk.
 
-### 5. search
+### 5. calls  (done)
 
-Over the functions already recovered (no second sweep): xor instructions,
-`lea`-class address builds (`lea`, `adrp; add`, `auipc; addi`, `l32r`,
-…) with the pointer they build, and `connect` in the entry function
-(`sockaddr_in` stores: port and address immediates). Reuses `isa/`'s
-constant tracker; adds one `Note::Xor` per decoder, x86/x86-64/AArch64/Arm
-first. Test: `binform-ab search` against `/at xor`, `/at lea`+`aoj` and
-the `pdf` parse on stng's XOR and connect samples; stng's golden TSV
-unchanged with hints from binform instead of rizin. Then filefacts fills
-`ExternalHints`, and stng CLI deletes `cli/rizin.rs`.
+`calls(bin, fns)` yields every call and syscall site in the recovered
+functions, with its arguments' values: a constant, or a pointer and the
+bytes behind it (from the file for a mapped address, from a per-function
+stack model for a frame pointer). A second pass over each function's code,
+not a second sweep; the register and stack model resets at every join and
+barrier, so a value is read only where it holds. Per-instruction value
+semantics live in `src/calls/{x86,arm}.rs`, over the length and control
+flow the `isa/` decoders already give; x86, x86-64 and 32-bit Arm first.
+Syscall numbers resolve through `Binary::syscall`, a per-arch, per-OS table
+generated from the `libc` crate (`src/syscalls.rs`, `tools/syscalls.py`).
+
+This replaces the earlier `search`/`ExternalHints` plan: stng needs none of
+it (its XOR aiming is now native, step in the stng tree), and the
+connect/syscall data is for filefacts and cleave, which read it directly.
+
+Validated against rizin `/as`: on kimwolf (Arm) binform resolves `socket`
+and `connect` — including the `connect` sockaddr `45.139.197.87:8082` built
+on the stack — which rizin misses because the number is built with
+`mov`+`add`; on brickstorm (x86-64 Go) binform resolves all 52 real
+`syscall` instructions with no unaligned false positives, where `/as`
+reports 202 by matching `0f05` in non-instruction bytes.
 
 ### 6. Delete rizin from filefacts
 
-After the step-3 and step-5 A/Bs are accepted. Instruction sets binform
+**Done in extraction, ahead of step 5**: every place filefacts reached for
+goblin and then rizin now reaches for binform alone
+(`formats/common.rs::recover_natively`). binform runs on each PE, ELF or
+Mach-O binary whose function view is empty, with no admission policy,
+and fills the section, import and export views of a PE goblin cannot
+read. A/B over both corpora (328 files): 104 s against rizin's 462 s;
+function metrics for 55 files rizin's admission policy skipped; lost for
+9 (6 ARMNT forwarder DLLs whose "functions" rizin decoded from data, and
+the eBPF and M*Core files). What remains is `filefacts::rizin` and the
+`OpenOptions::rizin*` settings, now no-ops, kept until cleave drops them.
+
+The original note: Instruction sets binform
 lacks (BPF, M*Core, Nios II, IA-64, …) get a `isa/` file when a sample
 turns up, not a fallback; until then such a file has layout and no
 functions, as resource-only DLLs do today.
@@ -279,9 +307,9 @@ What is measured, and the budgets that count as regressions:
 - **`functions`**: one linear sweep per code segment, one decode per
   instruction, bounded by `Limits`. `Limits::QUICK` is 1/64 of the default
   budget for scanners that prefer `truncated` to latency.
-- **`search`**: a second pass over the instructions of recovered
-  functions, not a second sweep; nothing allocated for a function with
-  no hit.
+- **`calls`**: a second pass over the instructions of recovered
+  functions, not a second sweep; one small register/stack model per
+  function, reset at joins and barriers; empty for an ISA with no tracker.
 - **Memory**: `Binary` borrows; the only owned data are names and the
   recovered tables. No `String` for an unnamed function (`fcn.<addr>` is
   the consumer's spelling).
