@@ -1,0 +1,67 @@
+# funktion: 42 functions, 6452 bytes of code covered, 0 landing pads, 0 cases
+# rizin: 65 functions; 42 shared, 14 with the same blocks (14 of 42 without landing pads)
+only rizin 0x400050 fcn.00400050: not code
+only rizin 0x400160 fcn.00400160: not code
+only rizin 0x400398 fcn.00400398: not code
+only rizin 0x400ce4 fcn.00400ce4: missed
+only rizin 0x400d98 fcn.00400d98: missed
+only rizin 0x400da4 fcn.00400da4: missed
+only rizin 0x4031e4 fcn.004031e4: not code
+only rizin 0x40328c fcn.0040328c: not code
+only rizin 0x403394 fcn.00403394: not code
+only rizin 0x403580 fcn.00403580: not code
+only rizin 0x403788 fcn.00403788: not code
+only rizin 0x403834 fcn.00403834: not code
+only rizin 0x403a4c fcn.00403a4c: not code
+only rizin 0x403a84 fcn.00403a84: not code
+only rizin 0x403ab4 fcn.00403ab4: not code
+only rizin 0x403b04 fcn.00403b04: not code
+only rizin 0x403b18 fcn.00403b18: not code
+only rizin 0x403bb8 fcn.00403bb8: not code
+only rizin 0x403c1c fcn.00403c1c: not code
+only rizin 0x403cd8 fcn.00403cd8: not code
+only rizin 0x403ce0 fcn.00403ce0: not code
+only rizin 0x403ebc fcn.00403ebc: not code
+only rizin 0x403ee4 fcn.00403ee4: not code
+0x400f24 size=17 blocks=1 edges=0 cc=1 cases=0 found=LOADER | SYMBOL rizin=1/1
+0x400f48 size=40 blocks=1 edges=1 cc=0 cases=0 found=ENTRY | SYMBOL rizin=1/1
+0x400f70 size=22 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | CALL | SWEEP rizin=3/3
+0x400f8c size=728 blocks=15 edges=17 cc=10 cases=0 found=SYMBOL | CALL | SWEEP rizin=1/1
+0x400fc0 size=676 blocks=15 edges=18 cc=9 cases=0 found=SYMBOL | CALL | SWEEP rizin=6/4
+0x401028 size=26 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | CALL | SWEEP rizin=3/2
+0x401044 size=332 blocks=4 edges=3 cc=3 cases=0 found=SYMBOL rizin=4/2
+0x4010e0 size=388 blocks=10 edges=12 cc=6 cases=0 found=SYMBOL | CALL | SWEEP rizin=7/4
+0x401190 size=540 blocks=10 edges=12 cc=6 cases=0 found=SYMBOL | CALL | SWEEP rizin=7/4
+0x401264 size=653 blocks=12 edges=14 cc=8 cases=0 found=SYMBOL | CALL | SWEEP rizin=7/4
+0x401314 size=152 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | CALL | SWEEP rizin=1/1
+0x4013ac size=325 blocks=4 edges=3 cc=3 cases=0 found=SYMBOL | SWEEP rizin=3/1
+0x401400 size=2681 blocks=112 edges=163 cc=75 cases=0 found=SYMBOL | CALL | SWEEP rizin=4/2
+0x401488 size=105 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | CALL | SWEEP rizin=1/1
+0x4014f4 size=2437 blocks=110 edges=161 cc=73 cases=0 found=SYMBOL | CALL | SWEEP rizin=4/2
+0x401558 size=64 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | CALL | SWEEP rizin=1/1
+0x401598 size=2273 blocks=109 edges=160 cc=73 cases=0 found=SYMBOL | CALL | SWEEP rizin=1/1
+0x4015c4 size=2229 blocks=107 edges=158 cc=71 cases=0 found=SYMBOL | CALL | SWEEP rizin=7/5
+0x4016d4 size=1957 blocks=92 edges=135 cc=61 cases=0 found=SYMBOL | CALL | SWEEP rizin=6/4
+0x4017bc size=1725 blocks=86 edges=127 cc=57 cases=0 found=SYMBOL | SWEEP rizin=4/3
+0x401888 size=1521 blocks=78 edges=116 cc=52 cases=0 found=SYMBOL | CALL rizin=7/4
+0x401a10 size=1129 blocks=64 edges=98 cc=44 cases=0 found=SYMBOL | SWEEP rizin=3/3
+0x401a68 size=1041 blocks=55 edges=83 cc=36 cases=0 found=SYMBOL | SWEEP rizin=3/1
+0x401b24 size=853 blocks=49 edges=75 cc=32 cases=0 found=SYMBOL | CALL rizin=18/14
+0x401c6c size=525 blocks=29 edges=41 cc=16 cases=0 found=SYMBOL | CALL | SWEEP rizin=8/4
+0x401d68 size=9 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | CALL | SWEEP rizin=1/1
+0x401d74 size=261 blocks=13 edges=18 cc=7 cases=0 found=SYMBOL | SWEEP rizin=5/2
+0x401e7c size=2032 blocks=80 edges=113 cc=45 cases=0 found=SYMBOL | CALL | SWEEP rizin=4/3
+0x401f48 size=71 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | CALL rizin=1/1
+0x401f74 size=1784 blocks=82 edges=117 cc=43 cases=0 found=SYMBOL | CALL | SWEEP rizin=9/5
+0x402084 size=1512 blocks=61 edges=87 cc=32 cases=0 found=SYMBOL | CALL | SWEEP rizin=2/1
+0x402164 size=1288 blocks=56 edges=80 cc=28 cases=0 found=SYMBOL | CALL | SWEEP rizin=13/7
+0x4022b0 size=956 blocks=36 edges=52 cc=18 cases=0 found=SYMBOL | CALL rizin=8/3
+0x40266c size=109 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | CALL | SWEEP rizin=1/1
+0x4026dc size=85 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | CALL | SWEEP rizin=1/1
+0x402734 size=550 blocks=61 edges=97 cc=38 cases=0 found=SYMBOL | CALL | SWEEP rizin=56/35
+0x40295c size=36 blocks=4 edges=4 cc=2 cases=0 found=SYMBOL | CALL rizin=4/2
+0x402980 size=53 blocks=4 edges=4 cc=2 cases=0 found=SYMBOL | CALL | SWEEP rizin=3/1
+0x4029b8 size=106 blocks=9 edges=11 cc=6 cases=0 found=SYMBOL | SWEEP rizin=3/1
+0x4029e0 size=40 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | CALL | SWEEP rizin=1/1
+0x402a0c size=22 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | CALL rizin=4/2
+0x402a24 size=11 blocks=1 edges=0 cc=1 cases=0 found=LOADER | SYMBOL rizin=1/1

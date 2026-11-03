@@ -184,7 +184,25 @@ only. Next:
   (`bot-csky-static`). Left: ABIv2 (CK807/CK810, 32-bit instructions),
   which no corpus sample uses; GCC's jump tables were not seen (switches
   compile to compare chains). Rizin 0.8.2 has no C-SKY support.
-- **Not supported at all:** AIX (XCOFF), and these corpus sets: Xtensa,
+- **Xtensa** (ELF, little-endian, windowed ABI) decodes the two- and
+  three-byte set: PC-relative `call0`/`call4`/`call8`/`call12` and `j`,
+  `callx`/`jx`/`ret`/`retw` through registers, the twelve- and eight-bit
+  `beqz`/`beqi`/`beq` branches and `loop`, `entry` (a frame), and `l32r`,
+  which loads a word from a literal pool placed *before* it. A pass over
+  each segment finds those pool words (every `l32r`'s target) so the sweep
+  steps over them as data; `l32r` of a callee's address then `callx`
+  resolves to a call. Every function opens with `entry`, so the sweep
+  seeds each one it finds (word-aligned), and a swept call whose target is
+  no frame is a mis-decoded pool word, dropped. `l32i` notes its load, so
+  a GOT read or a jump table through a known address resolves. On the bot
+  with symbols, every one of 494 is found with none past them, 0 invalid,
+  81% covered (the rest is pools); the stripped bot finds 243 of its ~268
+  `entry` prologues, the dynamic one all 42 (`bot-xtensa-dynamic`). Left:
+  the `.plt` stub (`l32r a8, slot; l32i.n a8, a8, 0; jx a8`) is a double
+  indirection the thunk walk does not yet fold, so imports are listed but
+  their stubs are unlinked; switch tables through `addx4; l32i; jx` leave
+  a handful of jumps unresolved; no call0 ABI or big-endian Xtensa.
+- **Not supported at all:** AIX (XCOFF), and these corpus sets:
   Nios II, M*Core, BPF, and IA-64, MIPS-FPU and PowerPC PE files.
 
 - **From the exotic-binaries survey** (`C:\data\exotic_binaries`, all

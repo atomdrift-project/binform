@@ -127,6 +127,7 @@ const EM_MICROBLAZE_OLD: u16 = 0xbaab;
 const EM_ARC_COMPACT: u16 = 93;
 const EM_ARC_COMPACT2: u16 = 195;
 const EM_CSKY: u16 = 252;
+const EM_XTENSA: u16 = 94;
 /// `e_flags`' ABI field: ABIv1 is 1.
 const EF_CSKY_ABI_V1: u32 = 1 << 28;
 const EM_S390: u16 = 22;
@@ -178,6 +179,7 @@ fn elf_arch(elf: &Elf) -> Result<Arch, Error> {
             Arch::CSky
         }
         (EM_CSKY, false) => return Err(Error::Arch("C-SKY ABIv2".into())),
+        (EM_XTENSA, false) if !elf.big => Arch::Xtensa,
         (EM_LOONGARCH, false) => return Err(Error::Arch("32-bit LoongArch".into())),
         (machine, _) => return Err(Error::Arch(format!("ELF machine {machine}"))),
     };

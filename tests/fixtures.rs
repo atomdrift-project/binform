@@ -707,6 +707,22 @@ fn csky_static() {
     });
 }
 
+/// Xtensa: two- and three-byte instructions, a literal pool of words that
+/// sit before the `l32r`s that read them, PC-relative `call`s, and
+/// windowed functions that open with `entry`. The sweep finds the pool
+/// words in a pass of its own and seeds every `entry`.
+#[test]
+fn xtensa_dynamic() {
+    check("bot-xtensa-dynamic", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::Xtensa);
+        assert!(coverage(outcome) >= 70, "covers {}%", coverage(outcome));
+        assert_eq!(outcome.recovery.invalid, 0);
+        // _start, loaded from the ELF entry point.
+        let entries: Vec<u64> = outcome.recovery.functions.iter().map(|f| f.entry).collect();
+        assert!(entries.contains(&0x400f48), "no _start");
+    });
+}
+
 /// OpenRISC: delay slots everywhere, `l.jal` that only reads the PC, and
 /// integers built like addresses that fall inside code.
 #[test]

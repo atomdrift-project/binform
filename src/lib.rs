@@ -51,6 +51,7 @@ mod riscv;
 mod s390x;
 mod sparc;
 mod superh;
+mod xtensa;
 use std::borrow::Cow;
 use std::ops::Range;
 
@@ -126,6 +127,8 @@ pub enum Arch {
     ArcV2,
     /// C-SKY ABIv1 (CK510, CK610), little-endian.
     CSky,
+    /// Tensilica Xtensa (windowed ABI), little-endian.
+    Xtensa,
 }
 
 impl Arch {
@@ -193,7 +196,8 @@ impl Arch {
             | Self::MicroBlazeEl
             | Self::Arc
             | Self::ArcV2
-            | Self::CSky => 4,
+            | Self::CSky
+            | Self::Xtensa => 4,
             Self::X86_64
             | Self::Arm64
             | Self::Mips64

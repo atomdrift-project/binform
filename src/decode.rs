@@ -233,6 +233,7 @@ pub(crate) enum Decoder {
         state: Box<crate::arc::State>,
     },
     CSky(Box<crate::csky::State>),
+    Xtensa(Box<crate::xtensa::State>),
 }
 
 impl Decoder {
@@ -304,6 +305,7 @@ impl Decoder {
                 state: Box::default(),
             },
             Arch::CSky => Self::CSky(Box::default()),
+            Arch::Xtensa => Self::Xtensa(Box::default()),
         }
     }
 
@@ -325,6 +327,7 @@ impl Decoder {
             Self::MicroBlaze { state, .. } => **state = crate::microblaze::State::default(),
             Self::Arc { state, .. } => **state = crate::arc::State::default(),
             Self::CSky(state) => state.reset(),
+            Self::Xtensa(state) => **state = crate::xtensa::State::default(),
             _ => {}
         }
     }
@@ -358,6 +361,7 @@ impl Decoder {
             Self::MicroBlaze { big, state } => crate::microblaze::decode(state, bytes, addr, *big),
             Self::Arc { v2, state } => crate::arc::decode(state, bytes, addr, *v2),
             Self::CSky(state) => crate::csky::decode(state, bytes, addr),
+            Self::Xtensa(state) => crate::xtensa::decode(state, bytes, addr),
         }
     }
 
@@ -381,7 +385,8 @@ impl Decoder {
             | Self::OpenRisc(_)
             | Self::MicroBlaze { .. }
             | Self::Arc { .. }
-            | Self::CSky(_) => 4,
+            | Self::CSky(_)
+            | Self::Xtensa(_) => 4,
             Self::RiscV { config, .. } if !config.wide => 4,
             Self::X86 { .. }
             | Self::Arm64(_)
@@ -398,7 +403,7 @@ impl Decoder {
     /// decodes.
     pub(crate) fn alignment(&self) -> u64 {
         match self {
-            Self::X86 { .. } => 1,
+            Self::X86 { .. } | Self::Xtensa(_) => 1,
             Self::S390x(_)
             | Self::SuperH(_)
             | Self::Arm { thumb: true, .. }
@@ -422,7 +427,7 @@ impl Decoder {
     /// literal pools is no function. Elsewhere, any (a Thumb pointer is odd).
     pub(crate) fn function_alignment(&self) -> u64 {
         match self {
-            Self::CSky(_) => 4,
+            Self::CSky(_) | Self::Xtensa(_) => 4,
             _ => 1,
         }
     }
@@ -483,6 +488,7 @@ impl Decoder {
                 | Self::MicroBlaze { .. }
                 | Self::Arc { .. }
                 | Self::CSky(_)
+                | Self::Xtensa(_)
         )
     }
 
@@ -528,6 +534,7 @@ impl Decoder {
             Self::MicroBlaze { big, .. } => crate::microblaze::starts_frame(bytes, *big),
             Self::Arc { v2, .. } => crate::arc::starts_frame(bytes, *v2),
             Self::CSky(_) => crate::csky::starts_frame(bytes),
+            Self::Xtensa(_) => crate::xtensa::starts_frame(bytes),
             _ => false,
         }
     }
@@ -538,8 +545,23 @@ impl Decoder {
     pub(crate) fn literal(&self, bytes: &[u8], addr: u64) -> Option<u64> {
         match self {
             Self::CSky(_) => crate::csky::literal(bytes, addr),
+            Self::Xtensa(_) => crate::xtensa::literal_word(bytes, addr),
             _ => None,
         }
+    }
+
+    /// Whether every compiled function opens with a frame, so a call
+    /// target that does not is a mis-decoded pool word, not a function
+    /// (Xtensa's windowed ABI starts each function with `entry`).
+    pub(crate) fn calls_open_frames(&self) -> bool {
+        matches!(self, Self::Xtensa(_))
+    }
+
+    /// Whether literal-pool words sit *before* the instruction that reads
+    /// them (Xtensa's `l32r`), so a sweep must find them in a pass of its
+    /// own rather than skip them as it reaches them (C-SKY's lie ahead).
+    pub(crate) fn literals_behind(&self) -> bool {
+        matches!(self, Self::Xtensa(_))
     }
 
     /// Whether `bytes` can only be a function's first instructions: 64-bit

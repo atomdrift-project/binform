@@ -483,6 +483,29 @@ impl Work<'_> {
     /// with it.) Windows of bytes as random as compressed or encrypted data
     /// (a packer's payload kept in `.text`) are skipped: what decodes there
     /// is noise, and its calls go nowhere real.
+    /// Record the literal-pool words a segment's `l32r`s read, so the
+    /// sweep steps over them as data. A linear decode finds them; where it
+    /// strays into a pool it resyncs within a few instructions, and a word
+    /// another `l32r` names is skipped so the stray is brief.
+    fn collect_literals(&mut self, base: u64, bytes: &[u8]) {
+        self.decoder.reset();
+        let mut offset = 0_usize;
+        while let Some(rest) = bytes.get(offset..).filter(|rest| !rest.is_empty()) {
+            let addr = base.wrapping_add(offset as u64);
+            if addr.is_multiple_of(4) && self.pools.contains(&addr) {
+                offset = offset.saturating_add(4);
+                self.decoder.reset();
+                continue;
+            }
+            if let Some(pool) = self.decoder.literal(rest, addr) {
+                self.pools.insert(pool);
+            }
+            let len = self.decoder.decode(rest, addr).len.max(1);
+            offset = offset.saturating_add(usize::try_from(len).unwrap_or(1));
+        }
+        self.decoder.reset();
+    }
+
     fn sweep(&mut self, most: usize) {
         let segments: Vec<(u64, &[u8])> = self
             .memory
@@ -491,6 +514,12 @@ impl Work<'_> {
             .collect();
         let step = self.decoder.alignment();
         let mode = self.decoder.sweep_mode();
+        let behind = self.decoder.literals_behind();
+        for (base, bytes) in &segments {
+            if behind {
+                self.collect_literals(*base, bytes);
+            }
+        }
         for (base, bytes) in segments {
             self.decoder.reset();
             let mut offset = 0_usize;
@@ -513,6 +542,14 @@ impl Work<'_> {
                     }
                 }
                 let addr = base.wrapping_add(offset as u64) | mode;
+                // A literal pool found in the pass before this one: skip
+                // the word as data, the way code after it would.
+                if behind && addr.is_multiple_of(4) && self.pools.contains(&addr) {
+                    offset = offset.saturating_add(4);
+                    self.decoder.reset();
+                    after_end = true;
+                    continue;
+                }
                 while pools.first().is_some_and(|&pool| pool + 4 <= addr) {
                     pools.pop_first();
                 }
@@ -523,14 +560,14 @@ impl Work<'_> {
                     after_end = true;
                     continue;
                 }
-                if let Some(pool) = self.decoder.literal(rest, addr) {
+                if !behind && let Some(pool) = self.decoder.literal(rest, addr) {
                     pools.insert(pool);
                 }
                 let Some(insn) = self.decode(rest, addr) else {
                     return;
                 };
                 if self.decoder.starts_function(rest)
-                    || (after_end
+                    || ((after_end || self.decoder.calls_open_frames())
                         && addr.is_multiple_of(self.decoder.function_alignment())
                         && self.decoder.starts_frame(rest))
                 {
@@ -543,8 +580,15 @@ impl Work<'_> {
                             Flow::Return | Flow::Jump(_) | Flow::JumpRegister(_) | Flow::Stop
                         )
                         && !insn.falls;
+                let framed = |work: &Self, target| {
+                    !work.decoder.calls_open_frames()
+                        || work
+                            .memory
+                            .code(target)
+                            .is_some_and(|code| work.decoder.starts_frame(code))
+                };
                 match insn.flow {
-                    Flow::Call(target) => {
+                    Flow::Call(target) if framed(self, target) => {
                         self.add_entry(target, Found::SWEEP, most);
                     }
                     Flow::Jump(target) => {
