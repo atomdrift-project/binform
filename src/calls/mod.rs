@@ -95,8 +95,28 @@ pub fn calls(bin: &Binary<'_>, funcs: &Functions) -> Vec<Call> {
         decoder.reset();
         walk(bin, arch, &memory, &mut decoder, function, &mut found);
     }
-    found.sort_by_key(|call: &Call| call.addr);
+    // Recovered functions can overlap, so one instruction may be walked from
+    // several of them; an address is one call site, so keep a single record
+    // per address — the one whose arguments the richest walk resolved.
+    found.sort_by(|a, b| a.addr.cmp(&b.addr).then(richness(b).cmp(&richness(a))));
+    found.dedup_by_key(|call| call.addr);
     found
+}
+
+/// How much a site's arguments resolved, for choosing between records of the
+/// same address: the count of known arguments, then the bytes known behind
+/// their pointers.
+fn richness(call: &Call) -> (usize, usize) {
+    let known = call.args.iter().filter(|v| **v != Value::Unknown).count();
+    let bytes = call
+        .args
+        .iter()
+        .map(|v| match v {
+            Value::Mem { bytes, .. } => bytes.iter().filter(|b| b.is_some()).count(),
+            _ => 0,
+        })
+        .sum();
+    (known, bytes)
 }
 
 /// The block-start addresses within `function`: its entry, and every target

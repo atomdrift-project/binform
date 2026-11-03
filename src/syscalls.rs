@@ -4,9 +4,10 @@
 
 use crate::Arch;
 
-/// The name Linux gives syscall `number` on `arch`.
-pub(crate) fn name(arch: Arch, number: u64) -> Option<&'static str> {
-    let table: &[(u16, &str)] = match arch {
+/// The `(number, name)` table for `arch`, or `None` for an architecture
+/// this does not name.
+fn table(arch: Arch) -> Option<&'static [(u16, &'static str)]> {
+    Some(match arch {
         Arch::X86_64 => &X86_64,
         Arch::X86 => &X86,
         Arch::Arm64 => &ARM64,
@@ -24,10 +25,22 @@ pub(crate) fn name(arch: Arch, number: u64) -> Option<&'static str> {
         Arch::M68k => &M68K,
         Arch::CSky => &CSKY,
         _ => return None,
-    };
+    })
+}
+
+/// The name Linux gives syscall `number` on `arch`.
+pub(crate) fn name(arch: Arch, number: u64) -> Option<&'static str> {
+    let table = table(arch)?;
     let number = u16::try_from(number).ok()?;
     let index = table.binary_search_by_key(&number, |&(n, _)| n).ok()?;
     table.get(index).map(|&(_, name)| name)
+}
+
+/// The number Linux gives syscall `name` on `arch`: the inverse of
+/// [`name`], for resolving a libc wrapper such as `connect` to the call
+/// it issues. The tables are keyed by number, so this scans.
+pub(crate) fn number(arch: Arch, name: &str) -> Option<u64> {
+    table(arch)?.iter().find(|&&(_, n)| n == name).map(|&(number, _)| u64::from(number))
 }
 
 /// `src/unix/linux_like/linux/gnu/b64/x86_64/not_x32.rs`

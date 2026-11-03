@@ -94,15 +94,22 @@ fn clobber(state: &mut State<'_>) {
     }
 }
 
-/// Whether `bytes` begin a syscall instruction: A32 `svc` is `cond 1111
-/// imm24`, Thumb `svc` is `1101 1111 imm8`. The immediate is the SVC comment,
-/// which Linux ignores; the number is in `r7`.
+/// Whether `bytes` begin a Linux syscall instruction. A32 `svc` is `cond 1111
+/// imm24`, Thumb `svc` is `1101 1111 imm8`; the immediate is the SVC comment
+/// and the number is in `r7`. Linux's EABI always issues `svc #0` (the comment
+/// is unused), so a non-zero immediate is not a syscall — requiring a zero
+/// comment is what keeps data that merely shares the opcode bits (one word in
+/// sixteen) from reading as millions of syscalls. The old OABI `svc
+/// #(0x900000+n)` form predates EABI by two decades and does not appear here.
 fn is_svc(bytes: &[u8], thumb: bool) -> bool {
     if thumb {
-        // Thumb `svc` is `1101 1111 imm8`: a high byte of 0xdf.
-        half(bytes).is_some_and(|h| h >> 8 == 0xdf)
+        // Thumb `svc #0`: the whole halfword is 0xdf00.
+        half(bytes) == Some(0xdf00)
     } else {
-        word(bytes).is_some_and(|w| w & 0x0f00_0000 == 0x0f00_0000)
+        // A32 `svc #0`: opcode bits 27:24 are 1111, the imm24 comment is zero,
+        // and the condition is a real one (NV, 0b1111, is not an instruction).
+        word(bytes)
+            .is_some_and(|w| w & 0x0fff_ffff == 0x0f00_0000 && w >> 28 != 0b1111)
     }
 }
 

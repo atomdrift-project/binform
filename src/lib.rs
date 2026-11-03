@@ -423,6 +423,18 @@ impl Binary<'_> {
         }
     }
 
+    /// The syscall number a libc wrapper such as `connect` issues in this
+    /// binary's OS and architecture: the inverse of [`syscall`](Self::syscall),
+    /// for resolving an imported wrapper call to the syscall behind it. `None`
+    /// for an unknown name, and for PE and Mach-O files.
+    #[must_use]
+    pub fn syscall_number(&self, name: &str) -> Option<u64> {
+        match (self.format, self.arch) {
+            (Format::Elf, Some(arch)) => syscalls::number(arch, name),
+            _ => None,
+        }
+    }
+
     /// The name of the import whose slot is at `slot`: what a [`Ref`] that
     /// goes through a slot (a [`Ref::to`] that is no function's entry)
     /// calls.

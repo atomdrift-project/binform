@@ -12,9 +12,12 @@ ELF, PE and Mach-O binaries. The API is three pure functions over plain
 structs, and a caller pays only for what it calls: `parse` reads the
 headers into a `Binary` (format, entry point, sections, imports and
 exports, by rizin's rules), `functions` recovers its functions, and
-`calls` yields every call and syscall site with the values its arguments
-carry. A binary of an instruction set binform does not decode still
-parses: it has a layout, no `arch`, and no functions.
+`calls` yields every call and syscall site (one per address) with the values
+its arguments carry. `Binary::syscall` names a syscall number for the
+binary's OS and architecture, and `Binary::syscall_number` is its inverse —
+the number a libc wrapper such as `connect` issues. A binary of an
+instruction set binform does not decode still parses: it has a layout, no
+`arch`, and no functions.
 
 ```rust
 let bytes = std::fs::read("a.out")?;

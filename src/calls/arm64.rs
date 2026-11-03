@@ -20,8 +20,11 @@ pub(crate) fn step(state: &mut State<'_>, decoder: &mut Decoder, bytes: &[u8], a
         return Step::stop(len);
     };
 
-    // SVC #imm: `1101 0100 000 imm16 0 0001`. The number is in x8.
-    if w & 0xffe0_001f == 0xd400_0001 {
+    // SVC #0: `1101 0100 000 imm16 0 0001`. Linux issues `svc #0`, so the
+    // imm16 comment is zero; a non-zero one is not a Linux syscall, and
+    // requiring zero keeps data sharing the opcode from reading as one. The
+    // number is in x8.
+    if w == 0xd400_0001 {
         let args = (0..=5).map(|r| state.value(r)).collect();
         let number = match state.get(8) {
             Val::Int(n) => n,

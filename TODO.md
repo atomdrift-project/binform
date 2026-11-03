@@ -329,8 +329,46 @@ In scan's pipeline stng already runs without rizin; only the stng CLI
      a `decoded` sockaddr field and `via` for a libc `syscall()` wrapper.
      The old iced sweep, AArch64 window and hand-written number tables are
      gone; extraction now covers x86, x86-64, Arm and AArch64. kimwolf's
-     `connect` resolves to `45.139.197.87:8082`. Left: emit the IP as a
-     network IOC, and the libc `connect()` call path (`via: "connect"`).
+     `connect` resolves to `45.139.197.87:8082`. **Done:** decoded
+     destinations are emitted as the `elf.network_endpoints` IOC
+     (ip/port/offset/syscall/via, with `elf.network_endpoint_count`), and the
+     libc `connect()` call path projects as `via: "connect"` with the number
+     from `Binary::syscall_number("connect")` (the inverse table lookup now in
+     binform). `binform::calls` dedupes by address (overlapping recovered
+     functions were emitting one site many times).
+
+   - **Spilled pointers + connect-wrapper attribution. Done.** The value
+     model (`calls/state.rs`) now remembers a symbolic value spilled to the
+     frame (`store_slot`/`load_slot`), so a pointer parked on the stack and
+     reloaded into an argument register survives; the x86 tracker addresses
+     the frame through any base register holding a stack pointer (`rbp`
+     frames, not just `rsp`) and restores a reloaded spill. filefacts
+     attributes a direct call to a thin `connect` syscall wrapper (a small
+     function that issues the connect syscall) as a `connect` with the
+     caller's arguments (`via: "wrapper"`), using `Binary::syscall_number`.
+     Regression test: `x86_64_connect_sockaddr_spilled_and_reloaded`.
+
+   - **A/B findings (`C:\data\gauntlet`, 61 ELF samples) — open.**
+     - **sockaddr C2 recall is still ≈ 0% end-to-end, and the cause is
+       inter-procedural.** The connect site itself is glibc's wrapper
+       (`mov eax, 42; syscall`), now correctly attributed to the caller with
+       its `addrlen` resolved — but the `sockaddr` pointer at the caller is a
+       *function parameter* (`mov [rbp-0x720], rdi`), built in a higher frame.
+       Intra-procedural tracking, spills included, cannot reach it. Closing
+       this needs inter-procedural argument propagation (follow a value into a
+       callee / up from a caller), a larger analysis with real false-IOC risk;
+       decide whether it is worth it before building. The decode does fire
+       when the sockaddr is built and used within one function (the kimwolf
+       and x86-64 spill tests).
+     - **Go/ARM syscall false positives. Fixed.** The Arm/AArch64 `svc` match
+       now requires a zero comment (`svc #0`), which is what Linux's EABI
+       always issues; a non-zero immediate is data sharing the opcode bits.
+       This cut the 8.8 MB Go/ARM sample from ~70k false `svc` to 42, and
+       another Arm sample from 127 to 0 (it has no `svc #0` at all, which rizin
+       confirms), while the real Arm samples (tadashi) and the kimwolf tests
+       keep their syscalls. The underlying recovery over-extension on Go
+       `.text` remains (mega-functions), but it no longer manufactures
+       syscalls. Regression: `arm_svc_requires_a_zero_comment`.
    - Then `pe/api_hash.rs` takes its call graph from `Function`/`Ref`;
      its PEB and export-walk shape detectors stay, optionally run over
      binform's instructions instead of a sweep.
@@ -348,5 +386,6 @@ In scan's pipeline stng already runs without rizin; only the stng CLI
    string-specific. `fileid/shellcode.rs`'s GetPC byte checks stay in
    filefacts: a few byte reads at offset 0 do not justify recovery.
 
-Order: 1–3 and 5 are done. Next: 4's filefacts step (`syscalls.rs` onto
-`calls`), then 6.
+Order: 1–3, 5 and 4's filefacts step are done. Next: the two A/B findings
+above (sockaddr arg recall across joins; Go/ARM `svc` false positives), then
+4's `pe/api_hash.rs`, then 6.

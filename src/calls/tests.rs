@@ -123,6 +123,69 @@ fn arm64_connect_sockaddr_from_the_stack() {
     assert_eq!(connect.args[2], Value::Int(16));
 }
 
+/// x86-64 `connect` where the sockaddr is built in an `rbp` frame, its address
+/// spilled to another stack slot, then reloaded into `rsi` just before the
+/// `syscall` — the shape glibc-linked code takes. Recovering it needs the
+/// `rbp`-relative frame and the symbolic spill, not just `rsp` stores.
+#[test]
+fn x86_64_connect_sockaddr_spilled_and_reloaded() {
+    let base = 0x1000;
+    #[rustfmt::skip]
+    let bytes = vec![
+        0x55,                               // push rbp
+        0x48, 0x89, 0xe5,                   // mov  rbp, rsp
+        0x48, 0x81, 0xec, 0x80, 0, 0, 0,    // sub  rsp, 0x80
+        0x66, 0xc7, 0x45, 0xe0, 0x02, 0x00, // mov  word [rbp-0x20], 2      ; AF_INET
+        0x66, 0xc7, 0x45, 0xe2, 0x1f, 0x92, // mov  word [rbp-0x1e], 0x921f ; port 8082 BE
+        0xc7, 0x45, 0xe4, 0x2d, 0x8b, 0xc5, 0x57, // mov dword [rbp-0x1c], ...; 45.139.197.87
+        0x48, 0x8d, 0x45, 0xe0,             // lea  rax, [rbp-0x20]         ; &sockaddr
+        0x48, 0x89, 0x45, 0xc0,             // mov  [rbp-0x40], rax         ; spill the pointer
+        0x48, 0x8b, 0x75, 0xc0,             // mov  rsi, [rbp-0x40]         ; reload it
+        0xba, 0x10, 0x00, 0x00, 0x00,       // mov  edx, 16
+        0xb8, 0x2a, 0x00, 0x00, 0x00,       // mov  eax, 42                 ; connect
+        0x0f, 0x05,                         // syscall
+        0xc3,                               // ret
+    ];
+    let bin = image(Arch::X86_64, base, bytes);
+    let funcs = Functions {
+        functions: vec![crate::Function { entry: base, size: 0x100, ..Default::default() }],
+        ..Default::default()
+    };
+
+    let calls = calls(&bin, &funcs);
+    let connect = calls
+        .iter()
+        .find(|c| c.target == Target::Syscall(42))
+        .unwrap_or_else(|| panic!("no connect syscall in {calls:#?}"));
+    assert_eq!(bin.syscall(42), Some("connect"));
+    assert_sockaddr(&connect.args[1]);
+    assert_eq!(connect.args[2], Value::Int(16));
+}
+
+/// Only `svc #0` is a Linux syscall. A `cond 1111` word with a non-zero
+/// comment is data (or an old-ABI form), not a syscall — this is what keeps
+/// data in a recovered region from reading as millions of syscalls.
+#[test]
+fn arm_svc_requires_a_zero_comment() {
+    let base = 0x1000;
+    let bytes = code(&[
+        0xe3a07001, // mov   r7, #1          ; number = exit
+        0xef123456, // svc   #0x123456       ; non-zero comment: NOT a syscall
+        0xef000000, // svc   #0              ; the real one
+        0xe12fff1e, // bx    lr
+    ]);
+    let bin = image(Arch::Arm, base, bytes);
+    let funcs = Functions {
+        functions: vec![crate::Function { entry: base, size: 0x10, ..Default::default() }],
+        ..Default::default()
+    };
+    let syscalls: Vec<_> =
+        calls(&bin, &funcs).into_iter().filter(|c| matches!(c.target, Target::Syscall(_))).collect();
+    assert_eq!(syscalls.len(), 1, "only svc #0 counts: {syscalls:#?}");
+    assert_eq!(syscalls[0].target, Target::Syscall(1));
+    assert_eq!(syscalls[0].addr, base + 8, "the svc #0 at offset 8");
+}
+
 /// The pointer argument decodes to `AF_INET`, port 8082, `45.139.197.87`.
 fn assert_sockaddr(arg: &Value) {
     let Value::Mem { addr, bytes } = arg else {

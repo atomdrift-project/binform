@@ -27,6 +27,11 @@ pub(crate) struct State<'a> {
     /// Bytes written to the frame, keyed by offset from the entry stack
     /// pointer. Bounded so a wild store cannot grow it without limit.
     stack: BTreeMap<i64, u8>,
+    /// Symbolic values spilled to the frame, keyed by offset: a pointer or
+    /// constant stored to a slot and read back whole, so a `sockaddr` address
+    /// parked on the stack and reloaded into an argument register survives.
+    /// The width lets a read require the store that matches it.
+    slots: BTreeMap<i64, (Val, u8)>,
     memory: &'a Memory<'a>,
     /// The stack pointer's register, set to the frame base at every reset so a
     /// frame stays addressable: `r13` on Arm, `rsp`/`esp` on x86.
@@ -49,6 +54,7 @@ impl<'a> State<'a> {
         let mut state = Self {
             regs: vec![Val::Unknown; 32],
             stack: BTreeMap::new(),
+            slots: BTreeMap::new(),
             memory,
             frame,
         };
@@ -67,6 +73,7 @@ impl<'a> State<'a> {
             *sp = Val::Stack(0);
         }
         self.stack.clear();
+        self.slots.clear();
     }
 
     pub(crate) fn get(&self, reg: u32) -> Val {
@@ -89,6 +96,7 @@ impl<'a> State<'a> {
 
     /// Record `count` little-endian bytes of `value` at stack offset `off`.
     pub(crate) fn store_stack(&mut self, off: i64, value: u64, count: u8) {
+        self.invalidate_slots(off, count);
         if self.stack.len() > MAX_STACK_BYTES {
             return;
         }
@@ -102,8 +110,45 @@ impl<'a> State<'a> {
     /// Forget any stack bytes `count` wide at `off`: an overwrite the walk
     /// cannot resolve must not leave stale bytes behind.
     pub(crate) fn forget_stack(&mut self, off: i64, count: u8) {
+        self.invalidate_slots(off, count);
         for i in 0..i64::from(count) {
             self.stack.remove(&off.wrapping_add(i));
+        }
+    }
+
+    /// Record a symbolic value `val`, `width` bytes wide, spilled to stack
+    /// offset `off` — a register parked on the frame. The bytes it occupies are
+    /// forgotten, since a pointer's runtime bytes are not known.
+    pub(crate) fn store_slot(&mut self, off: i64, val: Val, width: u8) {
+        self.invalidate_slots(off, width);
+        for i in 0..i64::from(width) {
+            self.stack.remove(&off.wrapping_add(i));
+        }
+        if self.slots.len() <= MAX_STACK_BYTES {
+            self.slots.insert(off, (val, width));
+        }
+    }
+
+    /// The symbolic value spilled at `off`, if a `width`-wide store put one
+    /// there: a reload reads back exactly what a matching store parked.
+    pub(crate) fn load_slot(&self, off: i64, width: u8) -> Option<Val> {
+        self.slots.get(&off).and_then(|&(val, w)| (w == width).then_some(val))
+    }
+
+    /// Drop every spilled slot whose bytes overlap `[off, off + count)`: a
+    /// write there makes a parked pointer stale. Slots are at most 8 wide, so
+    /// any overlap starts within 7 bytes before `off`.
+    fn invalidate_slots(&mut self, off: i64, count: u8) {
+        let start = off.wrapping_sub(7);
+        let end = off.wrapping_add(i64::from(count));
+        let stale: Vec<i64> = self
+            .slots
+            .range(start..end)
+            .filter(|&(&at, &(_, width))| at.wrapping_add(i64::from(width)) > off)
+            .map(|(&at, _)| at)
+            .collect();
+        for at in stale {
+            self.slots.remove(&at);
         }
     }
 

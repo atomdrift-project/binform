@@ -117,9 +117,10 @@ fn track(state: &mut State<'_>, insn: &Instruction) {
         Mnemonic::Mov if insn.op0_kind() == OpKind::Register => {
             let value = match insn.op1_kind() {
                 OpKind::Register => reg(state, insn.op1_register()),
-                OpKind::Immediate8 | OpKind::Immediate16 | OpKind::Immediate32
-                | OpKind::Immediate64 | OpKind::Immediate8to16 | OpKind::Immediate8to32
-                | OpKind::Immediate8to64 | OpKind::Immediate32to64 => {
+                // A reload of a value spilled to the frame: read back the
+                // symbolic store that matches this access's width.
+                OpKind::Memory => load(state, insn),
+                k if is_immediate(k) => {
                     insn.try_immediate(1).ok().map_or(Val::Unknown, Val::Int)
                 }
                 _ => Val::Unknown,
@@ -132,13 +133,8 @@ fn track(state: &mut State<'_>, insn: &Instruction) {
         Mnemonic::Lea => {
             if insn.is_ip_rel_memory_operand() {
                 set(state, dst, Val::Int(insn.ip_rel_memory_address()));
-            } else if insn.memory_base() == Register::RSP && insn.memory_index() == Register::None {
-                if let Val::Stack(base) = reg(state, Register::RSP) {
-                    #[expect(clippy::cast_possible_wrap, reason = "displacement")]
-                    set(state, dst, Val::Stack(base.wrapping_add(insn.memory_displacement64() as i64)));
-                } else {
-                    clear(state, dst);
-                }
+            } else if let Some(off) = mem_stack_off(state, insn) {
+                set(state, dst, Val::Stack(off));
             } else {
                 clear(state, dst);
             }
@@ -168,16 +164,12 @@ fn track(state: &mut State<'_>, insn: &Instruction) {
     }
 }
 
-/// Store the source of a `mov [rsp+disp], src` into the stack model.
+/// Store the source of a `mov [base+disp], src` into the stack model, for any
+/// base register that holds a frame pointer (`rsp`, or an `rbp` frame).
 fn store(state: &mut State<'_>, insn: &Instruction) {
-    if insn.memory_base() != Register::RSP || insn.memory_index() != Register::None {
-        return;
-    }
-    let Val::Stack(base) = reg(state, Register::RSP) else {
+    let Some(off) = mem_stack_off(state, insn) else {
         return;
     };
-    #[expect(clippy::cast_possible_wrap, reason = "displacement")]
-    let off = base.wrapping_add(insn.memory_displacement64() as i64);
     let count = u8::try_from(insn.memory_size().size()).unwrap_or(0);
     if count == 0 || count > 8 {
         return;
@@ -188,9 +180,36 @@ fn store(state: &mut State<'_>, insn: &Instruction) {
         _ => Val::Unknown,
     };
     match value {
+        // A constant's bytes read back as data; a spilled pointer reads back as
+        // itself, so an address parked here and reloaded survives.
         Val::Int(v) => state.store_stack(off, v, count),
-        _ => state.forget_stack(off, count),
+        Val::Stack(_) => state.store_slot(off, value, count),
+        Val::Unknown => state.forget_stack(off, count),
     }
+}
+
+/// Read what a `mov reg, [base+disp]` loads: a value spilled to the frame at
+/// that offset and width, or unknown.
+fn load(state: &State<'_>, insn: &Instruction) -> Val {
+    let Some(off) = mem_stack_off(state, insn) else {
+        return Val::Unknown;
+    };
+    let count = u8::try_from(insn.memory_size().size()).unwrap_or(0);
+    state.load_slot(off, count).unwrap_or(Val::Unknown)
+}
+
+/// The frame offset a memory operand addresses, when its base register holds a
+/// stack pointer and it has no index: `[rsp±n]` or `[rbp±n]` in a frame.
+fn mem_stack_off(state: &State<'_>, insn: &Instruction) -> Option<i64> {
+    if insn.memory_index() != Register::None {
+        return None;
+    }
+    let Val::Stack(base) = reg(state, insn.memory_base()) else {
+        return None;
+    };
+    #[expect(clippy::cast_possible_wrap, reason = "displacement")]
+    let disp = insn.memory_displacement64() as i64;
+    Some(base.wrapping_add(disp))
 }
 
 /// Clear every register an unmodelled instruction writes.
