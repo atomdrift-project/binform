@@ -61,19 +61,20 @@ pub fn search(bin: &Binary<'_>, fns: &Functions) -> Hits;
 
 pub struct Binary<'a> {
     pub format: Format,              // Elf, Pe, MachO
-    pub arch: Arch,
+    pub arch: Option<Arch>,          // None: an ISA binform does not decode; layout only
     pub entry: Option<u64>,
     pub sections: Vec<Section>,
-    pub imports: Vec<Import>,
+    pub imports: Vec<Import>,        // one per symbol
     pub exports: Vec<Export>,
-    // private: segments, seeds, extents, handlers, got, rebased — what
-    // `functions` needs and no consumer reads.
+    // private: segments, seeds, slots, extents, handlers, got, rebased —
+    // what `functions` needs and no consumer reads.
 }
 pub struct Section { pub name: String, pub addr: u64, pub size: u64,
-                     pub offset: u64, pub file_size: u64, pub flags: Flags }
+                     pub offset: u64, pub file_size: u64,
+                     pub readable: bool, pub writable: bool, pub executable: bool }
 pub struct Import  { pub name: String, pub library: Option<String>,
-                     pub ordinal: Option<u32>, pub slot: u64, pub stub: Option<u64> }
-pub struct Export  { pub name: String, pub addr: u64 }
+                     pub ordinal: Option<u16>, pub slot: Option<u64> }
+pub struct Export  { pub name: String, pub addr: u64, pub forward: Option<String> }
 
 pub struct Functions {
     pub functions: Vec<Function>,    // entry order
@@ -91,6 +92,7 @@ pub struct Sockaddr { pub ip: [u8; 4], pub port: u16, pub at: u64 }
 pub struct Limits { pub functions: usize, pub instructions: usize, pub table_entries: usize }
 impl Limits { pub const DEFAULT: Self; pub const QUICK: Self; }
 
+impl Section      { pub fn mapped(&self) -> bool; }
 impl Binary<'_>   { pub fn import(&self, slot: u64) -> Option<&str>;
                     pub fn section_at(&self, addr: u64) -> Option<&Section>;
                     pub fn offset(&self, addr: u64) -> Option<u64>; }   // vaddr → file
@@ -179,8 +181,35 @@ unchanged.
 
 ### 3. Layout surface
 
-`Section`, `Import` (with `library`, `ordinal`, `stub`), `Export`, `entry`
-on `Binary`, for all three formats, under rizin's leniency rules:
+**Done.** `Section`, `Import` (with `library`, `ordinal`), `Export`
+(with `forward`), `entry` and `format` on `Binary`, for all three formats.
+Decisions taken while building it:
+
+- No `Import::stub`. Rizin's `plt` is a per-architecture guess; binform's
+  functions already name each stub after its import, so a caller that
+  wants the stub has it in `Functions`.
+- `Import::ordinal` is a PE import's real ordinal. Rizin's is a row
+  index. Names stay `Ordinal_n`: filefacts already resolves the DLLs whose
+  ordinals are stable (`pe/ordinals.rs`), so binform does not ship rizin's
+  3 MB ordinal database.
+- `arch` is `Option`: a file of an instruction set binform does not decode
+  (eBPF, M*Core, Nios II, IA-64, MIPS-FPU and PowerPC PE) parses to its
+  layout, and `functions` returns nothing for it. `Error::Arch` is gone.
+- ELF sections come from the section headers only. Rizin's `iS` does not
+  synthesise them from program headers either (those are `iSS`), and
+  filefacts reads rizin's sections on the PE path alone.
+- PE sections follow rizin's per-section rules (`sect_N` for no name,
+  memory size rounded up to the section alignment, file offset down to
+  the file alignment), not its entry-point fix-up, which renames or marks
+  sections executable for display (`blob`; IA-64's `.rdata`).
+- Exports: ELF's defined `GLOBAL` symbols (weak ones are no exports, as
+  rizin says); PE's export directory, forwarders and ordinal-only exports
+  included, COFF symbols not (filefacts discarded those from rizin);
+  Mach-O's external symbols that are not private, merged with the export
+  trie (all a stripped dylib has).
+
+The original notes:
+
 
 - ELF: sections from headers; from program headers when the table is
   missing, empty, or names no code (packers). Imports from `.dynsym` +
@@ -197,6 +226,19 @@ Test: `binform-ab parse` over `testdata/`, stng's binaries and
 differences only where rizin is wrong and the fixture notes say why.
 Then filefacts reads `Binary` instead of rizin's tables; its
 `*.recovered_*_count` metrics keep their names.
+
+Result over both corpora (328 files, binform 0.9 s against rizin's 68 s):
+every file parses; every remaining difference is one of these, each
+rizin's doing: names it sanitises (`/` and control characters, a leading
+`__` on ELF section names, doubled escapes in Go names) or demangles;
+`.group_0x…` and `blob` sections it invents; ordinals it resolves from its
+database; ELF imports it finds none of (relocations it does not read on
+ARCv2, m68k, MIPS, PowerPC, SuperH, SPARC, s390x); dynamic symbols it
+cannot count without a hash table; COFF symbols it lists as Go PE exports;
+object files it lays out at its own addresses; Objective-C metaclass
+imports it folds into their class. filefacts now fills empty import,
+export and section views from binform (`formats/common.rs::apply_native`),
+so a file binform answers no longer loses the tables rizin used to add.
 
 ### 4. stng CLI drops strings from rizin
 

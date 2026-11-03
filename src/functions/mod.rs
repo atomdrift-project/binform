@@ -125,14 +125,17 @@ pub(crate) struct Detail {
 /// Recover the functions of `image`, and each one's [`Detail`], in the same
 /// (entry) order.
 pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Functions, Vec<Detail>) {
+    let Some(arch) = image.arch else {
+        return (Functions::default(), Vec::new());
+    };
     let mut work = Work {
-        memory: Memory::for_arch(&image.segments, image.arch),
-        decoder: Decoder::new(image),
+        memory: Memory::for_arch(&image.segments, arch),
+        decoder: Decoder::new(image, arch),
         budget: limits.instructions,
         table_entries: limits.table_entries,
         truncated: false,
         entries: BTreeMap::new(),
-        imports: image.imports.iter().map(|import| import.slot).collect(),
+        imports: image.slots.iter().map(|slot| slot.slot).collect(),
         rebased: image.rebased.iter().copied().collect(),
         noreturn: HashSet::new(),
         returns: HashMap::new(),
@@ -156,7 +159,7 @@ pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Functions, Vec<De
             .or_default()
             .push(handler.addr);
     }
-    for import in &image.imports {
+    for import in &image.slots {
         if never_returns(&import.name) {
             work.noreturn.insert(import.slot);
         }
@@ -220,7 +223,7 @@ pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Functions, Vec<De
                 break;
             }
             scanned = true;
-            for pointer in data_pointers(image, &work, &runs) {
+            for pointer in data_pointers(image, arch, &work, &runs) {
                 if let Some(entry) = work.add_entry(pointer, Found::POINTER, limits.functions) {
                     queue.push(entry);
                 }
@@ -322,13 +325,18 @@ pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Functions, Vec<De
 /// function covers that sets up a frame (as only a function's first
 /// instructions do). Not on Arm: a pointer to Thumb code carries bit 0, and
 /// an even word into Thumb code is no function's address.
-fn data_pointers(image: &Binary<'_>, work: &Work<'_>, runs: &[(u64, u64)]) -> Vec<u64> {
-    if image.arch == crate::Arch::Arm {
+fn data_pointers(
+    image: &Binary<'_>,
+    arch: crate::Arch,
+    work: &Work<'_>,
+    runs: &[(u64, u64)],
+) -> Vec<u64> {
+    if arch == crate::Arch::Arm {
         return Vec::new();
     }
     let merged = merge(runs);
-    let width = usize::from(image.arch.address_width());
-    let big = image.arch.big_endian();
+    let width = usize::from(arch.address_width());
+    let big = arch.big_endian();
     let align = work.decoder.alignment();
     let mut found = BTreeSet::new();
     let mut candidate = |value: u64| {

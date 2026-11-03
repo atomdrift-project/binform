@@ -241,7 +241,7 @@ fn check(name: &str, claims: impl Fn(&Outcome<'_>)) {
     let image = crate::parse(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
     let mut recovery = super::recover(&image);
     // Thumb entries carry their mode in bit 0; rizin's are even.
-    if image.arch == crate::Arch::Arm {
+    if image.arch == Some(crate::Arch::Arm) {
         for function in &mut recovery.functions {
             function.entry &= !1;
         }
@@ -408,7 +408,7 @@ fn elf_arm64_cxx() {
 #[test]
 fn macho_universal_cxx() {
     check("classic-level-darwin.node", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::X86_64);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::X86_64));
         assert!(outcome.found(Found::STUB) > 0, "no __stubs");
     });
 }
@@ -438,7 +438,7 @@ fn macho_arm64_object() {
             "{ours} functions to rizin's {theirs}"
         );
         assert!(
-            !outcome.image.imports.is_empty(),
+            !outcome.image.slots.is_empty(),
             "undefined symbols got no slots"
         );
     });
@@ -501,7 +501,7 @@ fn coverage(outcome: &Outcome<'_>) -> u64 {
 #[test]
 fn elf_arm_go() {
     check("does-nothing-linux-arm", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::Arm);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::Arm));
         let named = outcome.found(Found::SYMBOL);
         assert!(named > 2000, "only {named} functions from the Go table");
         finds_all_of_rizin(outcome);
@@ -520,7 +520,7 @@ fn elf_arm_go() {
 #[test]
 fn elf_mips_go() {
     check("does-nothing-linux-mips", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::Mips);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::Mips));
         let named = outcome.found(Found::SYMBOL);
         assert!(named > 2000, "only {named} functions from the Go table");
         assert!(coverage(outcome) >= 99, "covers {}%", coverage(outcome));
@@ -543,7 +543,7 @@ fn elf_mips_go() {
 #[test]
 fn elf_s390x_go() {
     check("does-nothing-linux-s390x", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::S390x);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::S390x));
         let named = outcome.found(Found::SYMBOL);
         assert!(named > 2000, "only {named} functions from the Go table");
         assert!(coverage(outcome) >= 97, "covers {}%", coverage(outcome));
@@ -562,12 +562,12 @@ fn elf_s390x_go() {
 #[test]
 fn elf_thumb_c() {
     check("libe_sqlite3-linux-arm.so", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::Arm);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::Arm));
         // Each stub jumps through its GOT slot; a slot an import fills makes
         // the stub that import's thunk. (Most stubs here call the library's
         // own exported functions, whose slots name no import.)
         let imports: std::collections::HashSet<u64> =
-            outcome.image.imports.iter().map(|i| i.slot).collect();
+            outcome.image.slots.iter().map(|i| i.slot).collect();
         let stubs: Vec<&super::Recovered> = outcome
             .recovery
             .functions
@@ -613,7 +613,7 @@ fn links_calls(outcome: &Outcome<'_>) {
     assert!(functions.iter().all(|f| f.found.contains(Found::SYMBOL)));
     let slots: HashMap<u64, &str> = outcome
         .image
-        .imports
+        .slots
         .iter()
         .map(|i| (i.slot, i.name.as_str()))
         .collect();
@@ -662,7 +662,7 @@ fn mips_got_calls() {
 #[test]
 fn microblaze_static() {
     check("bot-microblaze-static", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::MicroBlaze);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::MicroBlaze));
         assert!(coverage(outcome) >= 99, "covers {}%", coverage(outcome));
         assert!(outcome.cases() >= 160, "only {} cases", outcome.cases());
         assert_eq!(outcome.recovery.unresolved, 0);
@@ -675,7 +675,7 @@ fn microblaze_static() {
 #[test]
 fn microblaze_pic() {
     check("bot-microblaze-pic", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::MicroBlaze);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::MicroBlaze));
         assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
         assert_eq!(outcome.recovery.unresolved, 0);
         assert_eq!(outcome.recovery.invalid, 0);
@@ -696,7 +696,7 @@ fn microblaze_pic() {
 #[test]
 fn arc_static() {
     check("bot-arc-static", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::Arc);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::Arc));
         assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
         assert!(outcome.cases() >= 21, "only {} cases", outcome.cases());
         assert_eq!(outcome.recovery.invalid, 0);
@@ -716,7 +716,7 @@ fn arc_static() {
 #[test]
 fn arcv2_dynamic() {
     check("bot-arcv2-dynamic", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::ArcV2);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::ArcV2));
         assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
         assert_eq!(outcome.recovery.invalid, 0);
         let thunks = outcome
@@ -736,7 +736,7 @@ fn arcv2_dynamic() {
 #[test]
 fn csky_static() {
     check("bot-csky-static", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::CSky);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::CSky));
         // The rest is literal pools.
         assert!(coverage(outcome) >= 85, "covers {}%", coverage(outcome));
         assert!(outcome.recovery.invalid <= 1);
@@ -758,7 +758,7 @@ fn csky_static() {
 #[test]
 fn xtensa_dynamic() {
     check("bot-xtensa-dynamic", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::Xtensa);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::Xtensa));
         assert!(coverage(outcome) >= 70, "covers {}%", coverage(outcome));
         assert_eq!(outcome.recovery.invalid, 0);
         // _start, loaded from the ELF entry point.
@@ -772,7 +772,7 @@ fn xtensa_dynamic() {
 #[test]
 fn openrisc_static() {
     check("bot-openrisc-static", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::OpenRisc);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::OpenRisc));
         assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
         // Tail calls through function pointers loaded from memory.
         assert!(outcome.recovery.unresolved <= 5);
@@ -794,7 +794,7 @@ fn openrisc_static() {
 #[test]
 fn m68k_static() {
     check("bot-m68k-static", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::M68k);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::M68k));
         assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
         assert!(outcome.cases() >= 28, "only {} cases", outcome.cases());
         assert_eq!(outcome.recovery.unresolved, 0);
@@ -817,7 +817,7 @@ fn m68k_static() {
 #[test]
 fn loongarch64_pie() {
     check("la64-pie", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::LoongArch64);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::LoongArch64));
         assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
         assert_eq!(outcome.cases(), 20, "pick's cases");
         // musl's `f->write` tail calls, through a pointer.
@@ -1019,7 +1019,7 @@ fn c_mips64_and_s390x() {
 #[test]
 fn mips_uclibc_static() {
     check("bot-mips-uclibc-static", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::Mips);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::Mips));
         assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
         let pointers = outcome.found(Found::POINTER);
         assert!(
@@ -1045,7 +1045,7 @@ fn mips_uclibc_static() {
 #[test]
 fn superh_uclibc_static() {
     check("bot-sh-uclibc-static", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::SuperH);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::SuperH));
         assert!(coverage(outcome) >= 75, "covers {}%", coverage(outcome));
         let pointers = outcome.found(Found::POINTER);
         assert!(
@@ -1069,7 +1069,7 @@ fn superh_uclibc_static() {
 #[test]
 fn s390x_encrypted_payload() {
     check("bot-s390x-static-pie", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::S390x);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::S390x));
         let payload = 0xa0_1000..0xa5_a000;
         let inside: Vec<u64> = outcome
             .recovery
@@ -1096,7 +1096,7 @@ fn s390x_encrypted_payload() {
 #[test]
 fn mips_r6() {
     check("r6-mipsel-static", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::MipsR6El);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::MipsR6El));
         assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
         assert!(outcome.cases() >= 10, "{} cases", outcome.cases());
         finds_rizin_except(outcome, &[]);
@@ -1128,7 +1128,7 @@ fn finds_rizin_before(outcome: &Outcome<'_>, offset: u64, except: &[u64]) {
 #[test]
 fn powerpc_static() {
     check("bot-ppc-static", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::PowerPc);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::PowerPc));
         assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
         let pointers = outcome.found(Found::POINTER);
         assert!(pointers >= 15, "only {pointers} from built addresses");
@@ -1147,7 +1147,7 @@ fn powerpc_static() {
 #[test]
 fn powerpc_pie() {
     check("ppc-pie", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::PowerPc);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::PowerPc));
         assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
         assert_eq!(outcome.cases(), 20, "pick's cases");
         assert_eq!(outcome.recovery.unresolved, 0);
@@ -1174,7 +1174,7 @@ fn powerpc_pie() {
 #[test]
 fn powerpc64le_power10() {
     check("ppc64le-power10-pie", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::PowerPc64El);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::PowerPc64El));
         assert!(coverage(outcome) >= 80, "covers {}%", coverage(outcome));
         assert_eq!(outcome.cases(), 20, "pick's cases");
         assert_eq!(outcome.recovery.unresolved, 0);
@@ -1189,7 +1189,7 @@ fn powerpc64le_power10() {
 #[test]
 fn riscv64_pie() {
     check("rv64-pie", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::RiscV64);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::RiscV64));
         assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
         assert_eq!(outcome.cases(), 20, "pick's cases");
         // musl's `f->write` tail calls, through a pointer.
@@ -1203,7 +1203,7 @@ fn riscv64_pie() {
 #[test]
 fn powerpc64_elfv1() {
     check("bot-ppc64-elfv1", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::PowerPc64);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::PowerPc64));
         assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
         let pointers = outcome.found(Found::POINTER);
         assert!(pointers >= 20, "only {pointers} from descriptors");
@@ -1234,7 +1234,7 @@ fn powerpc64_elfv1() {
 #[test]
 fn powerpc64le_static() {
     check("ppc64le-static", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::PowerPc64El);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::PowerPc64El));
         assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
         finds_rizin_before(outcome, 8, &[]);
         // No function starts at a local entry.
@@ -1267,7 +1267,7 @@ fn thunks(outcome: &Outcome<'_>) -> usize {
 #[test]
 fn wince_arm() {
     check("bot-wince-arm", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::Arm);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::Arm));
         assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
         assert!(outcome.found(Found::UNWIND) > 80);
         assert!(
@@ -1293,7 +1293,7 @@ fn wince_arm() {
 #[test]
 fn wince_thumb() {
     check("bot-wince-thumb", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::Arm);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::Arm));
         assert!(coverage(outcome) >= 70, "covers {}%", coverage(outcome));
         assert!(
             thunks(outcome) >= 25,
@@ -1311,7 +1311,7 @@ fn wince_thumb() {
 #[test]
 fn pe_armnt() {
     check("e_sqlite3-win-arm.dll", |outcome| {
-        assert_eq!(outcome.image.arch, crate::Arch::Arm);
+        assert_eq!(outcome.image.arch, Some(crate::Arch::Arm));
         // A case target rizin takes for a function.
         finds_rizin_except(outcome, &[(0x100c_745e, "a case of 0x100a813a")]);
         let (same, shared) = outcome.same_blocks_without_pads();
@@ -1320,7 +1320,7 @@ fn pe_armnt() {
             "{same} of {shared}"
         );
         let slots: std::collections::HashSet<u64> =
-            outcome.image.imports.iter().map(|i| i.slot).collect();
+            outcome.image.slots.iter().map(|i| i.slot).collect();
         let imported = outcome
             .recovery
             .functions
@@ -1330,4 +1330,88 @@ fn pe_armnt() {
             .count();
         assert!(imported > 140, "only {imported} calls to imports");
     });
+}
+
+/// The layout `parse` reports, as rizin's `iS`, `ii` and `iE` do: a PE's
+/// DLLs and exports, an ELF's dynamic imports and exports, a Mach-O's
+/// segment-qualified sections and two-level namespace libraries.
+#[test]
+fn layout_tables() {
+    let parsed = |name: &str| {
+        let bytes = read_zst(&format!("{name}.zst"));
+        let bin = crate::parse(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+        (
+            bin.format,
+            bin.entry,
+            bin.sections,
+            bin.imports,
+            bin.exports,
+        )
+    };
+    let section = |sections: &[crate::Section], name: &str| {
+        sections
+            .iter()
+            .find(|s| s.name == name)
+            .cloned()
+            .unwrap_or_else(|| panic!("no {name} in {sections:?}"))
+    };
+
+    let (format, entry, sections, imports, exports) = parsed("e_sqlite3-win-arm64.dll");
+    assert_eq!(format, crate::Format::Pe);
+    assert!(entry.is_some());
+    let text = section(&sections, ".text");
+    assert!(
+        text.executable && text.readable && !text.writable,
+        "{text:?}"
+    );
+    assert!(
+        imports.iter().any(|i| i
+            .library
+            .as_deref()
+            .is_some_and(|l| l.eq_ignore_ascii_case("kernel32.dll"))
+            && i.slot.is_some()),
+        "{imports:?}"
+    );
+    assert!(
+        exports.iter().any(|e| e.name == "sqlite3_open"),
+        "{exports:?}"
+    );
+
+    let (format, _, sections, imports, exports) = parsed("libsqlite3-freebsd-amd64.so");
+    assert_eq!(format, crate::Format::Elf);
+    assert!(section(&sections, ".text").executable);
+    let strtab = section(&sections, ".shstrtab");
+    assert!(!strtab.mapped(), "{strtab:?}");
+    assert!(
+        imports
+            .iter()
+            .any(|i| i.name == "malloc" && i.slot.is_some()),
+        "{imports:?}"
+    );
+    assert!(
+        exports.iter().any(|e| e.name == "sqlite3_open"),
+        "{exports:?}"
+    );
+    assert!(
+        imports
+            .iter()
+            .all(|i| i.library.is_none() && i.ordinal.is_none())
+    );
+
+    let (format, _, sections, imports, exports) = parsed("classic-level-darwin.node");
+    assert_eq!(format, crate::Format::MachO);
+    assert!(section(&sections, "__TEXT.__text").executable);
+    assert!(
+        imports.iter().any(|i| i
+            .library
+            .as_deref()
+            .is_some_and(|l| l.contains("libSystem"))),
+        "{imports:?}"
+    );
+    assert!(
+        exports
+            .iter()
+            .any(|e| e.name.starts_with("_napi_register_module")),
+        "{exports:?}"
+    );
 }

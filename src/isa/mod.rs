@@ -254,8 +254,8 @@ pub(crate) enum Decoder {
 }
 
 impl Decoder {
-    pub(crate) fn new(image: &Binary<'_>) -> Self {
-        match image.arch {
+    pub(crate) fn new(image: &Binary<'_>, arch: Arch) -> Self {
+        match arch {
             Arch::X86 => Self::X86 {
                 bitness: 32,
                 got: image.got,
@@ -314,11 +314,11 @@ impl Decoder {
             Arch::M68k => Self::M68k(Box::default()),
             Arch::OpenRisc => Self::OpenRisc(Box::default()),
             Arch::MicroBlaze | Arch::MicroBlazeEl => Self::MicroBlaze {
-                big: image.arch == Arch::MicroBlaze,
+                big: arch == Arch::MicroBlaze,
                 state: Box::default(),
             },
             Arch::Arc | Arch::ArcV2 => Self::Arc {
-                v2: image.arch == Arch::ArcV2,
+                v2: arch == Arch::ArcV2,
                 state: Box::default(),
             },
             Arch::CSky => Self::CSky(Box::default()),

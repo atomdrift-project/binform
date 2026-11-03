@@ -1,8 +1,11 @@
 //! Compare binform with rizin, file by file.
 //!
 //! ```text
-//! binform-ab [--rizin PATH] [--script CMDS] [--timeout SECS] [--jobs N] [--save DIR] PATH...
+//! binform-ab [parse] [--rizin PATH] [--script CMDS] [--timeout SECS] [--jobs N] [--save DIR] PATH...
 //! ```
+//!
+//! `parse` compares the layout instead: binform's sections, imports and
+//! exports against rizin's `iSj`, `iij` and `iEj`, name by name.
 //!
 //! Directories are walked. Each supported executable is analysed by both
 //! tools; one JSON line per file reports the function-level agreement and the
@@ -30,6 +33,8 @@ use binform::{Arch, RefKind};
 use serde_json::{Value, json};
 
 struct Options {
+    /// Compare layouts (`parse`) rather than functions.
+    parse: bool,
     rizin: PathBuf,
     script: Option<String>,
     timeout: Duration,
@@ -40,6 +45,7 @@ struct Options {
 
 fn options() -> Result<Options, String> {
     let mut options = Options {
+        parse: false,
         rizin: PathBuf::from("rizin"),
         script: None,
         timeout: Duration::from_secs(600),
@@ -59,13 +65,14 @@ fn options() -> Result<Options, String> {
             }
             "--jobs" => options.jobs = value()?.parse().map_err(|e| format!("--jobs: {e}"))?,
             "--save" => options.save = Some(PathBuf::from(value()?)),
+            "parse" if options.paths.is_empty() && !options.parse => options.parse = true,
             _ if arg.starts_with("--") => return Err(format!("unknown option {arg}")),
             _ => options.paths.push(PathBuf::from(arg)),
         }
     }
     if options.paths.is_empty() {
         return Err(
-            "usage: binform-ab [--rizin PATH] [--script CMDS] [--timeout SECS] [--jobs N] PATH..."
+            "usage: binform-ab [parse] [--rizin PATH] [--script CMDS] [--timeout SECS] [--jobs N] PATH..."
                 .into(),
         );
     }
@@ -92,7 +99,12 @@ fn main() -> ExitCode {
         for _ in 0..options.jobs.max(1) {
             scope.spawn(|| {
                 while let Some(file) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    if let Some(report) = compare(&options, file) {
+                    let report = if options.parse {
+                        compare_layout(&options, file)
+                    } else {
+                        compare(&options, file)
+                    };
+                    if let Some(report) = report {
                         println!("{report}");
                         if let Ok(mut reports) = reports.lock() {
                             reports.push(report);
@@ -102,7 +114,12 @@ fn main() -> ExitCode {
             });
         }
     });
-    summarize(&reports.into_inner().unwrap_or_default());
+    let reports = reports.into_inner().unwrap_or_default();
+    if options.parse {
+        summarize_layout(&reports);
+    } else {
+        summarize(&reports);
+    }
     ExitCode::SUCCESS
 }
 
@@ -182,7 +199,7 @@ fn compare(options: &Options, file: &Path) -> Option<Value> {
         binform::diagnostics::functions(&image, &binform::Limits::DEFAULT);
     // Thumb entries carry their mode in bit 0; rizin's are the even
     // addresses of their first instructions.
-    if image.arch == Arch::Arm {
+    if image.arch == Some(Arch::Arm) {
         for function in &mut recovery.functions {
             function.entry &= !1;
         }
@@ -224,7 +241,7 @@ fn compare(options: &Options, file: &Path) -> Option<Value> {
     }
     let mut report = json!({
         "path": file.display().to_string(),
-        "arch": format!("{:?}", image.arch),
+        "arch": image.arch.map(|arch| format!("{arch:?}")),
         "script": script,
         "native_ms": native_ms,
         "rizin_ms": rizin_ms,
@@ -371,7 +388,7 @@ fn save(dir: &Path, file: &Path, script: &str, rows: &[Value]) -> std::io::Resul
 fn default_script(bytes: &[u8], image: &binform::Binary<'_>) -> String {
     let pe = bytes.starts_with(b"MZ");
     let named = named(image);
-    if pe && matches!(image.arch, Arch::X86 | Arch::X86_64) {
+    if pe && matches!(image.arch, Some(Arch::X86 | Arch::X86_64)) {
         "aa; aac".into()
     } else if !named {
         "aaa".into()
@@ -382,6 +399,13 @@ fn default_script(bytes: &[u8], image: &binform::Binary<'_>) -> String {
 
 /// Rizin's `aflj` after `script`, or `None` when it failed or timed out.
 fn run_rizin(options: &Options, file: &Path, script: &str) -> Option<Vec<Value>> {
+    let text = rizin_output(options, file, &format!("{script}; aflj"))?;
+    let start = text.find('[')?;
+    serde_json::from_str(&text[start..]).ok()
+}
+
+/// What rizin prints for `commands`, or `None` when it failed or timed out.
+fn rizin_output(options: &Options, file: &Path, commands: &str) -> Option<String> {
     let mut child = Command::new(&options.rizin)
         .args([
             "-NN",
@@ -396,7 +420,7 @@ fn run_rizin(options: &Options, file: &Path, script: &str) -> Option<Vec<Value>>
             "analysis.vars=false",
             "-c",
         ])
-        .arg(format!("{script}; aflj"))
+        .arg(commands)
         .arg(file)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -423,9 +447,190 @@ fn run_rizin(options: &Options, file: &Path, script: &str) -> Option<Vec<Value>>
     };
     let out = reader.join().ok()?;
     status.filter(std::process::ExitStatus::success)?;
-    let text = String::from_utf8_lossy(&out);
-    let start = text.find('[')?;
-    serde_json::from_str(&text[start..]).ok()
+    Some(String::from_utf8_lossy(&out).into_owned())
+}
+
+/// A name as both tools can agree on it: rizin numbers Mach-O sections
+/// (`0.__TEXT.__text`) and drops the underscore (and the Objective-C class
+/// prefix) from Mach-O imports, which binform spells as the binary does.
+fn normal(table: &str, macho: bool, rizin: bool, name: &str) -> String {
+    if !macho {
+        return name.to_owned();
+    }
+    match table {
+        "sections" if rizin => name
+            .split_once('.')
+            .filter(|(index, _)| index.bytes().all(|b| b.is_ascii_digit()))
+            .map_or(name, |(_, rest)| rest)
+            .to_owned(),
+        "imports" if !rizin => {
+            let name = name.strip_prefix("_OBJC_CLASS_$_").unwrap_or(name);
+            name.strip_prefix('_').unwrap_or(name).to_owned()
+        }
+        _ => name.to_owned(),
+    }
+}
+
+/// binform's layout against rizin's `iSj`, `iij` and `iEj`.
+fn compare_layout(options: &Options, file: &Path) -> Option<Value> {
+    let bytes = std::fs::read(file).ok()?;
+    let started = Instant::now();
+    let bin = binform::parse(&bytes).ok()?;
+    let native_ms = started.elapsed().as_secs_f64() * 1e3;
+    let macho = bin.format == binform::Format::MachO;
+    let started = Instant::now();
+    let output = rizin_output(
+        options,
+        file,
+        "e bin.demangle=false; iSj; echo ===SEP===; iij; echo ===SEP===; iEj",
+    );
+    let rizin_ms = started.elapsed().as_secs_f64() * 1e3;
+    let mut report = json!({
+        "path": file.display().to_string(),
+        "format": format!("{:?}", bin.format),
+        "arch": bin.arch.map(|arch| format!("{arch:?}")),
+        "native_ms": native_ms,
+        "rizin_ms": rizin_ms,
+    });
+    let Some(output) = output else {
+        report["rizin"] = Value::Null;
+        return Some(report);
+    };
+    let tables: Vec<Vec<Value>> = output
+        .split("===SEP===")
+        .map(|block| {
+            block
+                .find('[')
+                .and_then(|start| serde_json::from_str(&block[start..]).ok())
+                .unwrap_or_default()
+        })
+        .collect();
+    let ours: [Vec<String>; 3] = [
+        bin.sections.iter().map(|s| s.name.clone()).collect(),
+        bin.imports.iter().map(|i| i.name.clone()).collect(),
+        bin.exports.iter().map(|e| e.name.clone()).collect(),
+    ];
+    for (i, table) in ["sections", "imports", "exports"].into_iter().enumerate() {
+        let theirs: HashSet<String> = tables
+            .get(i)
+            .into_iter()
+            .flatten()
+            .filter_map(|row| row["name"].as_str())
+            .filter(|name| !name.is_empty())
+            .map(|name| normal(table, macho, true, name))
+            .collect();
+        let mine: HashSet<String> = ours[i]
+            .iter()
+            .filter(|name| !name.is_empty())
+            .map(|name| normal(table, macho, false, name))
+            .collect();
+        let mut only_rizin: Vec<&String> = theirs.difference(&mine).collect();
+        let mut only_native: Vec<&String> = mine.difference(&theirs).collect();
+        only_rizin.sort();
+        only_native.sort();
+        report[table] = json!({
+            "rizin": theirs.len(),
+            "native": mine.len(),
+            "shared": theirs.intersection(&mine).count(),
+            "only_rizin": only_rizin.iter().take(8).collect::<Vec<_>>(),
+            "only_native": only_native.iter().take(8).collect::<Vec<_>>(),
+        });
+    }
+    // Shared sections whose address, size or permissions differ.
+    let mut differ = Vec::new();
+    for row in tables.first().into_iter().flatten() {
+        let Some(name) = row["name"].as_str() else {
+            continue;
+        };
+        let name = normal("sections", macho, true, name);
+        let Some(section) = bin.sections.iter().find(|s| s.name == name) else {
+            continue;
+        };
+        let perm = row["perm"].as_str().unwrap_or("");
+        // Rizin gives a section no loader maps the address -1.
+        let mapped = section.readable || section.writable || section.executable;
+        let addr = if mapped { section.addr } else { u64::MAX };
+        let same = row["vaddr"].as_u64() == Some(addr)
+            && row["vsize"].as_u64() == Some(section.size)
+            && row["size"].as_u64() == Some(section.file_size)
+            && perm.contains('x') == section.executable
+            && perm.contains('w') == section.writable;
+        if !same {
+            differ.push(name);
+        }
+    }
+    report["sections"]["differ"] = json!(differ);
+    // Import libraries, where both name one.
+    let libraries: HashMap<String, String> = tables
+        .get(1)
+        .into_iter()
+        .flatten()
+        .filter_map(|row| {
+            let name = normal("imports", macho, true, row["name"].as_str()?);
+            Some((name, row["libname"].as_str()?.to_owned()))
+        })
+        .collect();
+    let library_differ = bin
+        .imports
+        .iter()
+        .filter_map(|import| {
+            let theirs = libraries.get(&normal("imports", macho, false, &import.name))?;
+            let mine = import.library.as_deref()?;
+            (!theirs.eq_ignore_ascii_case(mine))
+                .then(|| format!("{}: {mine} / {theirs}", import.name))
+        })
+        .take(8)
+        .collect::<Vec<_>>();
+    report["imports"]["library_differ"] = json!(library_differ);
+    Some(report)
+}
+
+fn summarize_layout(reports: &[Value]) {
+    let compared: Vec<&Value> = reports
+        .iter()
+        .filter(|r| r["sections"].is_object())
+        .collect();
+    eprintln!(
+        "files compared: {} (rizin failed on {})",
+        compared.len(),
+        reports.len() - compared.len()
+    );
+    let sum = |key: &str| -> f64 { compared.iter().filter_map(|r| r[key].as_f64()).sum() };
+    eprintln!(
+        "time: binform {:.1} ms, rizin {:.1} s",
+        sum("native_ms"),
+        sum("rizin_ms") / 1e3
+    );
+    for table in ["sections", "imports", "exports"] {
+        let total =
+            |key: &str| -> u64 { compared.iter().filter_map(|r| r[table][key].as_u64()).sum() };
+        let disagree = compared
+            .iter()
+            .filter(|r| {
+                r[table]["only_rizin"]
+                    .as_array()
+                    .is_some_and(|a| !a.is_empty())
+                    || r[table]["only_native"]
+                        .as_array()
+                        .is_some_and(|a| !a.is_empty())
+            })
+            .count();
+        eprintln!(
+            "{table}: rizin {}, binform {}, shared {}; files that disagree: {disagree}",
+            total("rizin"),
+            total("native"),
+            total("shared"),
+        );
+    }
+    let differ = compared
+        .iter()
+        .filter(|r| {
+            r["sections"]["differ"]
+                .as_array()
+                .is_some_and(|a| !a.is_empty())
+        })
+        .count();
+    eprintln!("files with shared sections whose layout differs: {differ}");
 }
 
 fn summarize(reports: &[Value]) {

@@ -17,10 +17,15 @@ const SHT_DYNAMIC: u32 = 6;
 pub(super) const SHT_NOBITS: u32 = 8;
 const SHT_REL: u32 = 9;
 const SHT_DYNSYM: u32 = 11;
+pub(super) const SHF_WRITE: u64 = 1;
 pub(super) const SHF_ALLOC: u64 = 2;
 pub(super) const SHF_EXECINSTR: u64 = 4;
 pub(super) const STT_OBJECT: u8 = 1;
 pub(super) const STT_FUNC: u8 = 2;
+pub(super) const STT_SECTION: u8 = 3;
+pub(super) const STT_FILE: u8 = 4;
+pub(super) const STB_GLOBAL: u8 = 1;
+pub(super) const STB_WEAK: u8 = 2;
 pub(super) const SHN_UNDEF: u16 = 0;
 pub(super) const SHN_ABS: u16 = 0xfff1;
 
@@ -95,6 +100,8 @@ pub(super) struct Symbol {
     pub(super) name: String,
     /// `STT_*`: the low four bits of `st_info`.
     pub(super) kind: u8,
+    /// `STB_*`: the high four bits of `st_info`.
+    pub(super) bind: u8,
     pub(super) shndx: u16,
     pub(super) value: u64,
     pub(super) size: u64,
@@ -340,6 +347,7 @@ impl Elf {
                 Some(Symbol {
                     name: string(r, strings, r.u32(at)?),
                     kind: info & 0xf,
+                    bind: info >> 4,
                     shndx,
                     value,
                     size,

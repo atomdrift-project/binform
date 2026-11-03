@@ -45,6 +45,10 @@ use std::ops::Range;
 
 pub use layout::{Error, parse};
 
+/// binform's version, for cache keys: a cache of its answers is stale when
+/// this changes.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// An instruction set binform decodes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
@@ -264,27 +268,107 @@ pub(crate) struct Seed {
 /// A pointer slot the loader fills with an imported function's address: a PE
 /// import-address-table entry, an ELF GOT entry, a Mach-O symbol pointer.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct Import {
+pub(crate) struct Slot {
     /// Address of the slot.
     pub(crate) slot: u64,
     /// The imported symbol's name, as the binary spells it.
     pub(crate) name: String,
 }
 
+/// A container format binform reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Format {
+    /// ELF: executables, shared objects and relocatable objects.
+    Elf,
+    /// PE/COFF images.
+    Pe,
+    /// Mach-O, thin or one slice of a universal file.
+    MachO,
+}
+
+/// A section as the headers describe it: rizin's `iS`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Section {
+    /// The header's name; Mach-O's is `__SEGMENT.__section`.
+    pub name: String,
+    /// Virtual address.
+    pub addr: u64,
+    /// Bytes in memory.
+    pub size: u64,
+    /// File offset of the bytes the file holds.
+    pub offset: u64,
+    /// Bytes the file holds: zero for zero-filled sections (`.bss`).
+    pub file_size: u64,
+    /// Mapped readable.
+    pub readable: bool,
+    /// Mapped writable.
+    pub writable: bool,
+    /// Mapped executable.
+    pub executable: bool,
+}
+
+impl Section {
+    /// Whether the loader maps it: ELF sections without `SHF_ALLOC` (symbol
+    /// tables, debug information) are only in the file.
+    #[must_use]
+    pub const fn mapped(&self) -> bool {
+        self.readable || self.writable || self.executable
+    }
+}
+
+/// An imported symbol: rizin's `ii`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Import {
+    /// The symbol's name as the binary spells it; `Ordinal_n` for a PE
+    /// import by ordinal only.
+    pub name: String,
+    /// The library it binds to, where the format says: a PE import's DLL,
+    /// a Mach-O two-level namespace library.
+    pub library: Option<String>,
+    /// A PE import by ordinal: the ordinal.
+    pub ordinal: Option<u16>,
+    /// The first pointer slot the loader fills with its address, if any.
+    pub slot: Option<u64>,
+}
+
+/// An exported symbol: rizin's `iE`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Export {
+    /// The symbol's name as the binary spells it; `Ordinal_n` for a PE
+    /// export by ordinal only.
+    pub name: String,
+    /// Its address.
+    pub addr: u64,
+    /// For a PE forwarder, the export it forwards to (`NTDLL.RtlAllocateHeap`);
+    /// `addr` is then that string's.
+    pub forward: Option<String>,
+}
+
 /// A parsed binary: what [`parse`] read from its headers, and what
 /// [`functions`](fn@functions) needs to recover its functions.
 #[derive(Clone, Debug)]
 pub struct Binary<'a> {
-    /// The instruction set of the code segments.
-    pub arch: Arch,
+    /// The container format.
+    pub format: Format,
+    /// The instruction set of the code segments; `None` for one binform
+    /// does not decode, whose binary has its layout and no functions.
+    pub arch: Option<Arch>,
+    /// The entry point, when the binary has one.
+    pub entry: Option<u64>,
+    /// Sections in header order.
+    pub sections: Vec<Section>,
+    /// Imported symbols, one per symbol.
+    pub imports: Vec<Import>,
+    /// Exported symbols.
+    pub exports: Vec<Export>,
     /// Every mapped segment, code and data.
     pub(crate) segments: Vec<Segment<'a>>,
     /// Addresses known to start functions. Duplicates are harmless.
     pub(crate) seeds: Vec<Seed>,
-    /// Import slots. Calls through them, and through stubs that only jump
+    /// Import slots, one per slot. Calls through them, and through stubs that only jump
     /// through them, are resolved to the import; calls to imports that never
     /// return end their basic block.
-    pub(crate) imports: Vec<Import>,
+    pub(crate) slots: Vec<Slot>,
     /// Landing pads, explored as part of the functions they belong to.
     pub(crate) handlers: Vec<Handler>,
     /// The code each function spans, by unwind tables that say so (ELF and
@@ -306,15 +390,34 @@ pub struct Binary<'a> {
 }
 
 impl Binary<'_> {
+    /// The mapped section that holds `addr`.
+    #[must_use]
+    pub fn section_at(&self, addr: u64) -> Option<&Section> {
+        self.sections
+            .iter()
+            .filter(|s| s.mapped())
+            .find(|s| addr.wrapping_sub(s.addr) < s.size)
+    }
+
+    /// The file offset of `addr`, when a mapped section's file bytes hold
+    /// it.
+    #[must_use]
+    pub fn offset(&self, addr: u64) -> Option<u64> {
+        self.sections.iter().filter(|s| s.mapped()).find_map(|s| {
+            let delta = addr.wrapping_sub(s.addr);
+            (delta < s.file_size).then(|| s.offset.wrapping_add(delta))
+        })
+    }
+
     /// The name of the import whose slot is at `slot`: what a [`Ref`] that
     /// goes through a slot (a [`Ref::to`] that is no function's entry)
     /// calls.
     #[must_use]
     pub fn import(&self, slot: u64) -> Option<&str> {
-        self.imports
+        self.slots
             .iter()
-            .find(|import| import.slot == slot)
-            .map(|import| import.name.as_str())
+            .find(|s| s.slot == slot)
+            .map(|s| s.name.as_str())
     }
 }
 
@@ -550,5 +653,8 @@ impl Functions {
 /// Recover the functions of `bin`, doing no more work than `limits` allow.
 #[must_use]
 pub fn functions(bin: &Binary<'_>, limits: &Limits) -> Functions {
+    if bin.arch.is_none() {
+        return Functions::default();
+    }
     functions::recover(bin, limits).0
 }

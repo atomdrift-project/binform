@@ -2,7 +2,7 @@
 //!
 //! Everything a loader or linker leaves behind that names function starts
 //! becomes a [`Seed`]: entry points, initializers, TLS callbacks, symbols,
-//! exports, unwind tables and Mach-O function starts. Import slots come from
+//! exports, unwind tables and Mach-O function starts. Slot slots come from
 //! the PE import table, ELF relocations against undefined symbols, and the
 //! Mach-O indirect symbol table.
 
@@ -10,7 +10,7 @@ use std::borrow::Cow;
 use std::fmt;
 
 use crate::isa::Memory;
-use crate::{Arch, Binary, Handler, Import, Origin, Seed, Segment};
+use crate::{Arch, Binary, Export, Format, Handler, Import, Origin, Section, Seed, Segment, Slot};
 
 use elf::Elf;
 use macho::MachO;
@@ -24,21 +24,18 @@ mod pe;
 mod read;
 mod relocate;
 
-/// Why bytes could not become an [`Binary`].
+/// Why bytes could not become a [`Binary`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
     /// Not ELF, PE or Mach-O, or too malformed to parse.
     Format(String),
-    /// A format binform reads, for an instruction set it does not decode.
-    Arch(String),
 }
 
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Format(why) => write!(f, "not a readable executable: {why}"),
-            Self::Arch(arch) => write!(f, "unsupported architecture: {arch}"),
         }
     }
 }
@@ -46,14 +43,62 @@ impl fmt::Display for Error {
 impl std::error::Error for Error {}
 
 /// The [`Binary`] of an ELF, PE or Mach-O file. A universal Mach-O yields its
-/// first slice of a supported architecture.
+/// first slice of an instruction set binform decodes, else its first slice.
+/// A binary of an instruction set binform does not decode has its layout
+/// and no [`Binary::arch`].
 pub fn parse(bytes: &[u8]) -> Result<Binary<'_>, Error> {
-    match bytes.get(..4) {
-        Some(b"\x7fELF") => elf_image(bytes, &elf::parse(bytes).map_err(Error::Format)?),
-        Some([b'M', b'Z', ..]) => pe_image(bytes, &pe::parse(bytes).map_err(Error::Format)?),
-        Some(&[0xca, 0xfe, 0xba, 0xbe | 0xbf]) => fat_image(bytes),
-        Some(_) => macho_image(bytes, &macho::parse(bytes).map_err(Error::Format)?),
-        None => Err(Error::Format("too short".into())),
+    Ok(match bytes.get(..4) {
+        Some(b"\x7fELF") => {
+            let elf = elf::parse(bytes).map_err(Error::Format)?;
+            elf_image(bytes, &elf).unwrap_or_else(|| {
+                let addrs: Vec<u64> = elf.sections.iter().map(|sh| sh.addr).collect();
+                let object = elf.kind == elf::ET_REL;
+                let tables = elf_tables(&elf, &addrs, &elf_slots(&elf), object);
+                bare(Format::Elf, elf.entry, tables, Vec::new())
+            })
+        }
+        Some([b'M', b'Z', ..]) => {
+            let pe = pe::parse(bytes).map_err(Error::Format)?;
+            pe_image(bytes, &pe).unwrap_or_else(|| {
+                let (tables, slots) = pe_tables(&pe);
+                let entry = if pe.entry == 0 {
+                    0
+                } else {
+                    pe.image_base.wrapping_add(u64::from(pe.entry))
+                };
+                bare(Format::Pe, entry, tables, slots)
+            })
+        }
+        Some(&[0xca, 0xfe, 0xba, 0xbe | 0xbf]) => fat_image(bytes)?,
+        Some(_) => macho_any(bytes, &macho::parse(bytes).map_err(Error::Format)?),
+        None => return Err(Error::Format("too short".into())),
+    })
+}
+
+/// The sections, imports and exports a format's headers list.
+struct Tables {
+    sections: Vec<Section>,
+    imports: Vec<Import>,
+    exports: Vec<Export>,
+}
+
+/// The layout of a binary whose instruction set binform does not decode:
+/// no code to recover functions from.
+fn bare(format: Format, entry: u64, tables: Tables, slots: Vec<Slot>) -> Binary<'static> {
+    Binary {
+        format,
+        arch: None,
+        entry: (entry != 0).then_some(entry),
+        sections: tables.sections,
+        imports: tables.imports,
+        exports: tables.exports,
+        segments: Vec::new(),
+        seeds: Vec::new(),
+        slots,
+        handlers: Vec::new(),
+        extents: Vec::new(),
+        got: None,
+        rebased: Vec::new(),
     }
 }
 
@@ -106,6 +151,28 @@ fn seed(addr: u64, origin: Origin) -> Seed {
     Seed { addr, origin }
 }
 
+/// One import per name, in first-seen order, each with the first slot
+/// that names it.
+fn import_table(
+    slots: &[Slot],
+    symbols: impl Iterator<Item = (String, Option<String>)>,
+) -> Vec<Import> {
+    let mut first: std::collections::HashMap<&str, u64> = std::collections::HashMap::new();
+    for slot in slots {
+        first.entry(slot.name.as_str()).or_insert(slot.slot);
+    }
+    let mut seen = std::collections::HashSet::new();
+    symbols
+        .filter(|(name, _)| !name.is_empty() && seen.insert(name.clone()))
+        .map(|(name, library)| Import {
+            slot: first.get(name.as_str()).copied(),
+            name,
+            library,
+            ordinal: None,
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // ELF
 // ---------------------------------------------------------------------------
@@ -138,7 +205,7 @@ const EM_X86_64: u16 = 62;
 const EM_AARCH64: u16 = 183;
 
 /// The instruction set of an ELF file's machine, word size and byte order.
-fn elf_arch(elf: &Elf) -> Result<Arch, Error> {
+fn elf_arch(elf: &Elf) -> Option<Arch> {
     let arch = match (elf.machine, elf.is_64) {
         (EM_386, _) => Arch::X86,
         (EM_X86_64, _) => Arch::X86_64,
@@ -159,7 +226,7 @@ fn elf_arch(elf: &Elf) -> Result<Arch, Error> {
             }
         }
         (EM_S390, true) => Arch::S390x,
-        (EM_S390, false) => return Err(Error::Arch("31-bit s390".into())),
+        (EM_S390, false) => return None,
         (EM_SPARC | EM_SPARC32PLUS, _) => Arch::Sparc,
         (EM_SPARCV9, _) => Arch::Sparc64,
         (EM_SH, _) => Arch::SuperH,
@@ -178,16 +245,12 @@ fn elf_arch(elf: &Elf) -> Result<Arch, Error> {
         (EM_CSKY, false) if !elf.big && elf.header_flags & 0xf000_0000 == EF_CSKY_ABI_V1 => {
             Arch::CSky
         }
-        (EM_CSKY, false) => return Err(Error::Arch("C-SKY ABIv2".into())),
+        (EM_CSKY, false) => return None,
         (EM_XTENSA, false) if !elf.big => Arch::Xtensa,
-        (EM_LOONGARCH, false) => return Err(Error::Arch("32-bit LoongArch".into())),
-        (machine, _) => return Err(Error::Arch(format!("ELF machine {machine}"))),
+        (EM_LOONGARCH, false) => return None,
+        _ => return None,
     };
-    if elf.big != arch.big_endian() {
-        let order = if elf.big { "big" } else { "little" };
-        return Err(Error::Arch(format!("{order}-endian {arch:?} ELF")));
-    }
-    Ok(arch)
+    (elf.big == arch.big_endian()).then_some(arch)
 }
 
 /// `segments` with the `ranges` (start, end) that lie wholly inside
@@ -248,7 +311,7 @@ const DT_FINI_ARRAYSZ: u64 = 28;
 const DT_PREINIT_ARRAY: u64 = 32;
 const DT_PREINIT_ARRAYSZ: u64 = 33;
 
-fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Binary<'a>, Error> {
+fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Option<Binary<'a>> {
     let arch = elf_arch(elf)?;
     let object = elf.kind == elf::ET_REL;
 
@@ -375,21 +438,7 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Binary<'a>, Error> {
             .map(|addr| seed(addr, Origin::Stub)),
     );
 
-    // Relocations against undefined symbols fill import slots.
-    for reloc in &elf.dynamic_relocations {
-        if reloc.symbol == 0 {
-            continue;
-        }
-        let Some(symbol) = elf.dynamic_symbols.get(reloc.symbol) else {
-            continue;
-        };
-        if symbol.shndx == elf::SHN_UNDEF && !symbol.name.is_empty() {
-            imports.push(Import {
-                slot: reloc.offset,
-                name: symbol.name.clone(),
-            });
-        }
-    }
+    imports.extend(elf_slots(elf));
     let mips = arch.mips();
     if mips {
         imports.extend(mips_got_imports(elf));
@@ -477,11 +526,17 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Binary<'a>, Error> {
         .filter_map(|reloc| Some((reloc.offset, u64::try_from(reloc.addend?).ok()?)))
         .collect();
 
-    Ok(Binary {
-        arch,
+    let tables = elf_tables(elf, &addrs, &imports, object);
+    Some(Binary {
+        format: Format::Elf,
+        arch: Some(arch),
+        entry: (elf.entry != 0).then_some(elf.entry),
+        sections: tables.sections,
+        imports: tables.imports,
+        exports: tables.exports,
         segments,
         seeds,
-        imports,
+        slots: imports,
         handlers,
         extents,
         got,
@@ -489,10 +544,105 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Binary<'a>, Error> {
     })
 }
 
+/// An ELF file's import slots: the dynamic relocations against undefined
+/// symbols.
+fn elf_slots(elf: &Elf) -> Vec<Slot> {
+    elf.dynamic_relocations
+        .iter()
+        .filter(|reloc| reloc.symbol != 0)
+        .filter_map(|reloc| {
+            let symbol = elf.dynamic_symbols.get(reloc.symbol)?;
+            (symbol.shndx == elf::SHN_UNDEF && !symbol.name.is_empty()).then(|| Slot {
+                slot: reloc.offset,
+                name: symbol.name.clone(),
+            })
+        })
+        .collect()
+}
+
+/// An ELF file's sections, imports and exports. `addrs` are the sections'
+/// addresses (an object's, as binform placed them).
+fn elf_tables(elf: &Elf, addrs: &[u64], slots: &[Slot], object: bool) -> Tables {
+    let sections = elf
+        .sections
+        .iter()
+        .enumerate()
+        .filter(|&(i, sh)| i != 0 || sh.kind != 0)
+        .map(|(i, sh)| Section {
+            name: sh.name.clone(),
+            addr: if object {
+                addrs.get(i).copied().unwrap_or(0)
+            } else {
+                sh.addr
+            },
+            size: sh.size,
+            offset: sh.offset,
+            file_size: if sh.kind == elf::SHT_NOBITS {
+                0
+            } else {
+                sh.size
+            },
+            readable: sh.flags & elf::SHF_ALLOC != 0,
+            writable: sh.flags & elf::SHF_WRITE != 0,
+            executable: sh.flags & elf::SHF_EXECINSTR != 0,
+        })
+        .collect();
+    // The symbols the loader binds (or, in an object, the linker): the
+    // dynamic table's undefined ones, else the static table's. Exports are
+    // the defined global symbols of either table (weak ones, rizin says, are
+    // no exports).
+    let named = |symbol: &&elf::Symbol| {
+        matches!(symbol.bind, elf::STB_GLOBAL | elf::STB_WEAK)
+            && !matches!(symbol.kind, elf::STT_SECTION | elf::STT_FILE)
+            && !symbol.name.is_empty()
+    };
+    let undefined = if elf.dynamic_symbols.is_empty() {
+        &elf.symbols
+    } else {
+        &elf.dynamic_symbols
+    };
+    let imports = import_table(
+        slots,
+        undefined
+            .iter()
+            .filter(named)
+            .filter(|symbol| symbol.shndx == elf::SHN_UNDEF)
+            .map(|symbol| (symbol.name.clone(), None)),
+    );
+    let mut seen = std::collections::HashSet::new();
+    let exports = elf
+        .dynamic_symbols
+        .iter()
+        .chain(&elf.symbols)
+        .filter(named)
+        .filter(|symbol| symbol.bind == elf::STB_GLOBAL && symbol.shndx != elf::SHN_UNDEF)
+        .filter_map(|symbol| {
+            let addr = if object {
+                addrs
+                    .get(usize::from(symbol.shndx))?
+                    .wrapping_add(symbol.value)
+            } else {
+                symbol.value
+            };
+            seen.insert((symbol.name.as_str(), addr)).then(|| Export {
+                forward: None,
+                name: symbol.name.clone(),
+                addr,
+            })
+        })
+        .collect();
+
+    Tables {
+        sections,
+        imports,
+        exports,
+    }
+}
+
 /// The MIPS GOT's slots for undefined symbols. The GOT holds its local
 /// entries, then one for each dynamic symbol from `DT_MIPS_GOTSYM` on, in
 /// order; the dynamic linker fills them without relocations.
-fn mips_got_imports(elf: &Elf) -> Vec<Import> {
+fn mips_got_imports(elf: &Elf) -> Vec<Slot> {
     let (Some(got), Some(local), Some(first)) = (
         elf.dynamic_value(elf::DT_PLTGOT),
         elf.dynamic_value(elf::DT_MIPS_LOCAL_GOTNO),
@@ -505,7 +655,7 @@ fn mips_got_imports(elf: &Elf) -> Vec<Import> {
     (local..)
         .zip(elf.dynamic_symbols.iter().skip(first))
         .filter(|(_, symbol)| symbol.shndx == elf::SHN_UNDEF && !symbol.name.is_empty())
-        .map(|(entry, symbol)| Import {
+        .map(|(entry, symbol)| Slot {
             slot: got.wrapping_add(entry.wrapping_mul(width)),
             name: symbol.name.clone(),
         })
@@ -519,7 +669,7 @@ fn mips_got_pointers(
     elf: &Elf,
     sections: &ElfSections<'_>,
     memory: &Memory<'_>,
-    imports: &[Import],
+    imports: &[Slot],
 ) -> Vec<u64> {
     let width: u8 = if elf.is_64 { 8 } else { 4 };
     let range = sections
@@ -704,18 +854,107 @@ fn elf_initializers(
 
 const IMAGE_SCN_CNT_CODE: u32 = 0x0000_0020;
 const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
+const IMAGE_SCN_MEM_READ: u32 = 0x4000_0000;
+const IMAGE_SCN_MEM_WRITE: u32 = 0x8000_0000;
 
-fn pe_image<'a>(bytes: &'a [u8], pe: &Pe<'_>) -> Result<Binary<'a>, Error> {
-    let machine = pe.machine;
-    let arch = match machine {
+/// A PE file's sections, imports and exports, and its import slots.
+fn pe_tables(pe: &Pe<'_>) -> (Tables, Vec<Slot>) {
+    let at = |rva: u32| pe.image_base.wrapping_add(u64::from(rva));
+    let pe_imports = pe.imports();
+    let slots = pe_imports
+        .iter()
+        .map(|import| Slot {
+            slot: at(import.slot),
+            name: import.name.clone(),
+        })
+        .collect();
+    let mut seen = std::collections::HashSet::new();
+    let imports = pe_imports
+        .into_iter()
+        .filter(|import| seen.insert((import.library.clone(), import.name.clone())))
+        .map(|import| Import {
+            slot: Some(at(import.slot)),
+            name: import.name,
+            library: (!import.library.is_empty()).then_some(import.library),
+            ordinal: import.ordinal,
+        })
+        .collect();
+    // Rizin's rules: an unnamed section is `sect_N`; the memory size rounds
+    // up to the section alignment, the file offset down to the file
+    // alignment (the file size growing by as much).
+    let round_up = |size: u64, to: u32| match size % u64::from(to.max(1)) {
+        0 => size,
+        rest => size + (u64::from(to) - rest),
+    };
+    let sections = (0..)
+        .zip(&pe.sections)
+        .map(|(i, section)| {
+            let raw = u64::from(section.size_of_raw_data);
+            let offset = u64::from(section.pointer_to_raw_data);
+            let slack = offset % u64::from(pe.file_alignment.max(1));
+            let size = match section.virtual_size {
+                0 => raw,
+                size => u64::from(size),
+            };
+            (
+                i,
+                section,
+                round_up(size, pe.section_alignment),
+                offset - slack,
+                raw + slack,
+            )
+        })
+        .map(|(i, section, size, offset, file_size)| Section {
+            name: if section.name.is_empty() {
+                format!("sect_{i}")
+            } else {
+                section.name.clone()
+            },
+            addr: at(section.virtual_address),
+            size,
+            offset,
+            file_size,
+            readable: section.characteristics & IMAGE_SCN_MEM_READ != 0,
+            writable: section.characteristics & IMAGE_SCN_MEM_WRITE != 0,
+            executable: section.characteristics & IMAGE_SCN_MEM_EXECUTE != 0,
+        })
+        .collect();
+
+    let exports = pe
+        .exports()
+        .into_iter()
+        .map(|export| Export {
+            name: export.name,
+            addr: at(export.rva),
+            forward: export.forward,
+        })
+        .collect();
+    (
+        Tables {
+            sections,
+            imports,
+            exports,
+        },
+        slots,
+    )
+}
+
+fn pe_arch(machine: u16) -> Option<Arch> {
+    Some(match machine {
         0x014c => Arch::X86,
         0x8664 => Arch::X86_64,
         0xaa64 => Arch::Arm64,
         // Windows CE on Arm, with Thumb (`THUMB`) or without; ARMNT,
         // Windows on 32-bit Arm, which runs Thumb-2 only.
         0x01c0 | 0x01c2 | 0x01c4 => Arch::Arm,
-        _ => return Err(Error::Arch(format!("PE machine {machine:#06x}"))),
-    };
+        _ => return None,
+    })
+}
+
+fn pe_image<'a>(bytes: &'a [u8], pe: &Pe<'_>) -> Option<Binary<'a>> {
+    let machine = pe.machine;
+    let arch = pe_arch(machine)?;
+    let (tables, slots) = pe_tables(pe);
     // ARMNT code addresses carry Thumb's bit 0, as `.pdata` writes them;
     // Windows CE's set it for Thumb code only.
     let code = |addr: u64| if machine == 0x01c4 { addr | 1 } else { addr };
@@ -751,9 +990,9 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &Pe<'_>) -> Result<Binary<'a>, Error> {
     if pe.entry != 0 {
         seeds.push(seed(code(at(pe.entry)), Origin::Entry));
     }
-    for (rva, name) in pe.exports() {
-        if rva != 0 {
-            seeds.push(seed(code(at(rva)), Origin::Export(name)));
+    for export in &tables.exports {
+        if export.forward.is_none() && export.addr != base {
+            seeds.push(seed(code(export.addr), Origin::Export(export.name.clone())));
         }
     }
     seeds.extend(
@@ -793,20 +1032,16 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &Pe<'_>) -> Result<Binary<'a>, Error> {
         // 32-bit x86 unwinds by frame chain, not by table.
         _ => {}
     }
-    let imports = pe
-        .imports()
-        .into_iter()
-        .map(|(slot, name)| Import {
-            slot: at(slot),
-            name,
-        })
-        .collect();
-
-    Ok(Binary {
-        arch,
+    Some(Binary {
+        format: Format::Pe,
+        arch: Some(arch),
+        entry: (pe.entry != 0).then(|| at(pe.entry)),
+        sections: tables.sections,
+        imports: tables.imports,
+        exports: tables.exports,
         segments,
         seeds,
-        imports,
+        slots,
         handlers: Vec::new(),
         extents,
         got: None,
@@ -839,17 +1074,28 @@ fn fat_image(bytes: &[u8]) -> Result<Binary<'_>, Error> {
     let slice = slices
         .iter()
         .find(|slice| macho_arch(slice.cputype).is_some())
-        .ok_or_else(|| Error::Arch("no supported slice in universal binary".into()))?;
+        .or_else(|| slices.first())
+        .ok_or_else(|| Error::Format("a universal binary with no slices".into()))?;
     let slice = file_range(bytes, slice.offset, slice.size);
-    macho_image(slice, &macho::parse(slice).map_err(Error::Format)?)
+    Ok(macho_any(
+        slice,
+        &macho::parse(slice).map_err(Error::Format)?,
+    ))
 }
 
-fn macho_image<'a>(bytes: &'a [u8], macho: &MachO) -> Result<Binary<'a>, Error> {
-    let cputype = macho.cputype;
-    let arch =
-        macho_arch(cputype).ok_or_else(|| Error::Arch(format!("Mach-O CPU type {cputype:#x}")))?;
+/// A Mach-O file's [`Binary`], or its layout alone.
+fn macho_any<'a>(bytes: &'a [u8], macho: &MachO) -> Binary<'a> {
+    macho_image(bytes, macho).unwrap_or_else(|| {
+        let slots = macho_slots(macho);
+        let tables = macho_tables(bytes, macho, &slots);
+        bare(Format::MachO, macho.entry, tables, slots)
+    })
+}
+
+fn macho_image<'a>(bytes: &'a [u8], macho: &MachO) -> Option<Binary<'a>> {
+    let arch = macho_arch(macho.cputype)?;
     if macho.big {
-        return Err(Error::Arch("big-endian Mach-O".into()));
+        return None;
     }
     let sections = &macho.sections;
     let symbols = &macho.symbols;
@@ -878,6 +1124,7 @@ fn macho_image<'a>(bytes: &'a [u8], macho: &MachO) -> Result<Binary<'a>, Error> 
         })
         .collect();
 
+    imports.extend(macho_slots(macho));
     let mut seeds = Vec::new();
     if macho.entry != 0 {
         seeds.push(seed(macho.entry, Origin::Entry));
@@ -895,37 +1142,12 @@ fn macho_image<'a>(bytes: &'a [u8], macho: &MachO) -> Result<Binary<'a>, Error> 
         .iter()
         .find(|segment| segment.named("__TEXT"))
         .map(|segment| segment.vmaddr);
-    let pointer: u64 = if macho.is_64 { 8 } else { 4 };
     if let (Some(mut addr), Some((offset, size))) = (text, macho.function_starts) {
         for delta in uleb128s(file_range(bytes, offset, size)).take_while(|&delta| delta != 0) {
             addr = addr.wrapping_add(delta);
             seeds.push(seed(addr, Origin::FunctionStarts));
         }
     }
-    for section in sections {
-        let kind = section.flags & macho::SECTION_TYPE;
-        if kind != S_NON_LAZY_SYMBOL_POINTERS && kind != S_LAZY_SYMBOL_POINTERS {
-            continue;
-        }
-        let first = section.reserved1 as usize;
-        let count = usize::try_from(section.size / pointer).unwrap_or(0);
-        let entries = macho.indirect.iter().skip(first).take(count);
-        for (i, &index) in (0_u64..).zip(entries) {
-            // INDIRECT_SYMBOL_LOCAL and INDIRECT_SYMBOL_ABS name no import.
-            if index & 0xc000_0000 != 0 {
-                continue;
-            }
-            if let Some(symbol) = symbols.get(index as usize)
-                && !symbol.name.is_empty()
-            {
-                imports.push(Import {
-                    slot: section.addr.wrapping_add(i * pointer),
-                    name: symbol.name.clone(),
-                });
-            }
-        }
-    }
-
     if let Some(section) = sections.iter().find(|section| section.named("__gopclntab")) {
         let text = sections
             .iter()
@@ -979,16 +1201,135 @@ fn macho_image<'a>(bytes: &'a [u8], macho: &MachO) -> Result<Binary<'a>, Error> 
     }
     drop(memory);
 
-    Ok(Binary {
-        arch,
+    let tables = macho_tables(bytes, macho, &imports);
+    Some(Binary {
+        format: Format::MachO,
+        arch: Some(arch),
+        entry: (macho.entry != 0).then_some(macho.entry),
+        sections: tables.sections,
+        imports: tables.imports,
+        exports: tables.exports,
         segments,
         seeds,
-        imports,
+        slots: imports,
         handlers,
         extents,
         got: None,
         rebased: Vec::new(),
     })
+}
+
+/// A Mach-O file's import slots: the symbol pointers the indirect symbol
+/// table names.
+fn macho_slots(macho: &MachO) -> Vec<Slot> {
+    let pointer: u64 = if macho.is_64 { 8 } else { 4 };
+    let mut imports = Vec::new();
+    for section in &macho.sections {
+        let kind = section.flags & macho::SECTION_TYPE;
+        if kind != S_NON_LAZY_SYMBOL_POINTERS && kind != S_LAZY_SYMBOL_POINTERS {
+            continue;
+        }
+        let first = section.reserved1 as usize;
+        let count = usize::try_from(section.size / pointer).unwrap_or(0);
+        let entries = macho.indirect.iter().skip(first).take(count);
+        for (i, &index) in (0_u64..).zip(entries) {
+            // INDIRECT_SYMBOL_LOCAL and INDIRECT_SYMBOL_ABS name no import.
+            if index & 0xc000_0000 != 0 {
+                continue;
+            }
+            if let Some(symbol) = macho.symbols.get(index as usize)
+                && !symbol.name.is_empty()
+            {
+                imports.push(Slot {
+                    slot: section.addr.wrapping_add(i * pointer),
+                    name: symbol.name.clone(),
+                });
+            }
+        }
+    }
+
+    imports
+}
+
+/// A Mach-O file's sections, imports and exports.
+fn macho_tables(bytes: &[u8], macho: &MachO, slots: &[Slot]) -> Tables {
+    let symbols = &macho.symbols;
+    let text = macho
+        .segments
+        .iter()
+        .find(|segment| segment.named("__TEXT"))
+        .map(|segment| segment.vmaddr);
+    let sections = macho
+        .sections
+        .iter()
+        .map(|section| Section {
+            name: section.full_name(),
+            addr: section.addr,
+            size: section.size,
+            offset: section.offset,
+            file_size: if matches!(
+                section.flags & macho::SECTION_TYPE,
+                S_ZEROFILL | S_GB_ZEROFILL | S_THREAD_LOCAL_ZEROFILL
+            ) {
+                0
+            } else {
+                section.size
+            },
+            readable: section.protection & 1 != 0,
+            writable: section.protection & 2 != 0,
+            executable: section.protection & 4 != 0,
+        })
+        .collect();
+    let external = |symbol: &&macho::Symbol| {
+        !symbol.is_stab() && symbol.n_type & macho::N_EXT != 0 && !symbol.name.is_empty()
+    };
+    let imports = import_table(
+        slots,
+        symbols
+            .iter()
+            .filter(external)
+            .filter(|symbol| symbol.n_type & macho::N_TYPE == macho::N_UNDF)
+            .map(|symbol| {
+                // Ordinal 0 is this image, 0xfe the executable, 0xff
+                // whichever library defines it.
+                let library = usize::from(symbol.n_desc >> 8)
+                    .checked_sub(1)
+                    .and_then(|i| macho.dylibs.get(i))
+                    .cloned();
+                (symbol.name.clone(), library)
+            }),
+    );
+    // The symbol table's defined external symbols, and the export trie's
+    // (all a stripped dylib has), once per name.
+    let mut seen = std::collections::HashSet::new();
+    let trie = macho
+        .exports_trie
+        .map(|(offset, size)| macho::exports_trie(file_range(bytes, offset, size)))
+        .unwrap_or_default();
+    let exports = symbols
+        .iter()
+        .filter(external)
+        // A private external symbol is linked as one but not exported.
+        .filter(|symbol| symbol.n_type & macho::N_TYPE == macho::N_SECT)
+        .filter(|symbol| symbol.n_type & macho::N_PEXT == 0)
+        .map(|symbol| (symbol.name.clone(), symbol.n_value))
+        .chain(
+            trie.into_iter()
+                .map(|(name, offset)| (name, text.unwrap_or(0).wrapping_add(offset))),
+        )
+        .filter(|(name, _)| seen.insert(name.clone()))
+        .map(|(name, addr)| Export {
+            name,
+            addr,
+            forward: None,
+        })
+        .collect();
+
+    Tables {
+        sections,
+        imports,
+        exports,
+    }
 }
 
 /// The (function, LSDA) pairs of a compact unwind table, as offsets from
@@ -1116,5 +1457,24 @@ mod tests {
         assert!(parse(b"not an executable at all").is_err());
         assert!(parse(b"\x7fELF\x02\x01\x01").is_err());
         assert!(parse(b"MZ\x90\x00").is_err());
+    }
+
+    /// An instruction set binform does not decode (eBPF, machine 247)
+    /// leaves the layout readable and no code to recover.
+    #[test]
+    fn an_unknown_instruction_set_has_layout_only() {
+        let mut header = vec![0_u8; 64];
+        header[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
+        header[16..18].copy_from_slice(&2_u16.to_le_bytes());
+        header[18..20].copy_from_slice(&247_u16.to_le_bytes());
+        header[24..32].copy_from_slice(&0x1000_u64.to_le_bytes());
+        let bin = parse(&header).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(
+            (bin.format, bin.arch, bin.entry),
+            (Format::Elf, None, Some(0x1000))
+        );
+        assert!(bin.segments.is_empty() && bin.seeds.is_empty());
+        let functions = crate::functions(&bin, &crate::Limits::DEFAULT);
+        assert!(functions.functions.is_empty());
     }
 }

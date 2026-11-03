@@ -19,6 +19,15 @@ const LC_DYSYMTAB: u32 = 0xb;
 const LC_SEGMENT_64: u32 = 0x19;
 const LC_FUNCTION_STARTS: u32 = 0x26;
 const LC_MAIN: u32 = 0x8000_0028;
+const LC_LOAD_DYLIB: u32 = 0xc;
+const LC_DYLD_INFO: u32 = 0x22;
+const LC_DYLD_INFO_ONLY: u32 = 0x8000_0022;
+const LC_DYLD_EXPORTS_TRIE: u32 = 0x8000_0033;
+const EXPORT_SYMBOL_FLAGS_REEXPORT: u64 = 0x8;
+const LC_LOAD_WEAK_DYLIB: u32 = 0x8000_0018;
+const LC_REEXPORT_DYLIB: u32 = 0x8000_001f;
+const LC_LAZY_LOAD_DYLIB: u32 = 0x20;
+const LC_LOAD_UPWARD_DYLIB: u32 = 0x8000_0023;
 
 pub(super) const CPU_TYPE_X86: u32 = 7;
 pub(super) const CPU_TYPE_X86_64: u32 = 0x0100_0007;
@@ -31,6 +40,8 @@ const VM_PROT_EXECUTE: u32 = 0x4;
 
 /// `n_type` bits: a debugging entry when any of these is set.
 const N_STAB: u8 = 0xe0;
+pub(super) const N_EXT: u8 = 0x01;
+pub(super) const N_PEXT: u8 = 0x10;
 pub(super) const N_TYPE: u8 = 0x0e;
 pub(super) const N_UNDF: u8 = 0x0;
 pub(super) const N_SECT: u8 = 0xe;
@@ -50,6 +61,11 @@ pub(super) struct MachO {
     pub(super) function_starts: Option<(u64, u64)>,
     /// The entry point's address; zero for none.
     pub(super) entry: u64,
+    /// The libraries the load commands name, in order: what a symbol's
+    /// two-level namespace ordinal (from 1) counts.
+    pub(super) dylibs: Vec<String>,
+    /// The export trie: file offset and size.
+    pub(super) exports_trie: Option<(u64, u64)>,
 }
 
 pub(super) struct Segment {
@@ -62,6 +78,10 @@ pub(super) struct Segment {
 /// into the indirect symbol table, `reserved2` a stub section's stub size.
 pub(super) struct Section {
     name: [u8; 16],
+    segment: [u8; 16],
+    /// Its segment's initial protection: `VM_PROT_READ` 1, `WRITE` 2,
+    /// `EXECUTE` 4.
+    pub(super) protection: u32,
     pub(super) addr: u64,
     pub(super) size: u64,
     pub(super) offset: u64,
@@ -78,6 +98,9 @@ pub(super) struct Section {
 pub(super) struct Symbol {
     pub(super) name: String,
     pub(super) n_type: u8,
+    /// For an undefined symbol in a two-level namespace image, the library
+    /// it binds to in the high byte.
+    pub(super) n_desc: u16,
     pub(super) n_value: u64,
 }
 
@@ -101,6 +124,15 @@ impl Segment {
 impl Section {
     pub(super) fn named(&self, name: &str) -> bool {
         named(&self.name, name)
+    }
+
+    /// `__SEGMENT.__section`.
+    pub(super) fn full_name(&self) -> String {
+        let text = |name: &[u8; 16]| {
+            let len = name.iter().position(|&b| b == 0).unwrap_or(16);
+            String::from_utf8_lossy(name.get(..len).unwrap_or_default()).into_owned()
+        };
+        format!("{}.{}", text(&self.segment), text(&self.name))
     }
 }
 
@@ -129,6 +161,8 @@ pub(super) fn parse(bytes: &[u8]) -> Result<MachO, String> {
         indirect: Vec::new(),
         function_starts: None,
         entry: 0,
+        dylibs: Vec::new(),
+        exports_trie: None,
     };
     let (mut main, mut thread) = (None, None);
     let mut at: u64 = if is_64 { 32 } else { 28 };
@@ -140,6 +174,22 @@ pub(super) fn parse(bytes: &[u8]) -> Result<MachO, String> {
             LC_SEGMENT | LC_SEGMENT_64 => macho.read_segment(&r, at, cmd == LC_SEGMENT_64),
             LC_SYMTAB => macho.read_symbols(&r, at),
             LC_DYSYMTAB => macho.read_indirect(&r, at),
+            LC_DYLD_INFO | LC_DYLD_INFO_ONLY => {
+                macho.exports_trie =
+                    (|| Some((u64::from(r.u32(at + 40)?), u64::from(r.u32(at + 44)?))))()
+                        .filter(|&(_, size)| size != 0)
+                        .or(macho.exports_trie);
+            }
+            LC_DYLD_EXPORTS_TRIE => {
+                macho.exports_trie =
+                    (|| Some((u64::from(r.u32(at + 8)?), u64::from(r.u32(at + 12)?))))()
+                        .filter(|&(_, size)| size != 0);
+            }
+            LC_LOAD_DYLIB | LC_LOAD_WEAK_DYLIB | LC_REEXPORT_DYLIB | LC_LAZY_LOAD_DYLIB
+            | LC_LOAD_UPWARD_DYLIB => {
+                let name = r.u32(at + 8).map(|offset| r.name(at + u64::from(offset)));
+                macho.dylibs.push(name.unwrap_or_default().into_owned());
+            }
             LC_FUNCTION_STARTS => {
                 macho.function_starts =
                     (|| Some((u64::from(r.u32(at + 8)?), u64::from(r.u32(at + 12)?))))();
@@ -238,6 +288,8 @@ impl MachO {
                 (|| {
                     Some(Section {
                         name: name(at)?,
+                        segment: name(at + 16)?,
+                        protection: initprot,
                         addr: r.u64(at + 32)?,
                         size: r.u64(at + 40)?,
                         offset: u64::from(r.u32(at + 48)?),
@@ -253,6 +305,8 @@ impl MachO {
                 (|| {
                     Some(Section {
                         name: name(at)?,
+                        segment: name(at + 16)?,
+                        protection: initprot,
                         addr: u64::from(r.u32(at + 32)?),
                         size: u64::from(r.u32(at + 36)?),
                         offset: u64::from(r.u32(at + 40)?),
@@ -291,6 +345,7 @@ impl MachO {
                 Some(Symbol {
                     name: r.name(stroff + u64::from(r.u32(at)?)).into_owned(),
                     n_type: r.u8(at + 4)?,
+                    n_desc: r.u16(at + 6)?,
                     n_value,
                 })
             })
@@ -306,6 +361,71 @@ impl MachO {
             .map_while(|i| r.u32(offset + 4 * i))
             .collect();
     }
+}
+
+/// The symbols an export trie names, each with its offset from the image
+/// base. Re-exports (another library's symbols) are left out. Each node is
+/// visited at most once, so a trie whose edges loop ends.
+pub(super) fn exports_trie(trie: &[u8]) -> Vec<(String, u64)> {
+    let mut out = Vec::new();
+    let mut visited = std::collections::HashSet::new();
+    let mut stack = vec![(0_usize, Vec::new())];
+    while let Some((node, prefix)) = stack.pop() {
+        if !visited.insert(node) || visited.len() > 1 << 20 {
+            continue;
+        }
+        let mut at = node;
+        let Some(terminal) = uleb(trie, &mut at) else {
+            continue;
+        };
+        let children = at.saturating_add(usize::try_from(terminal).unwrap_or(usize::MAX));
+        if terminal != 0 {
+            let flags = uleb(trie, &mut at);
+            if let Some(flags) = flags
+                && flags & EXPORT_SYMBOL_FLAGS_REEXPORT == 0
+                && let Some(offset) = uleb(trie, &mut at)
+            {
+                out.push((String::from_utf8_lossy(&prefix).into_owned(), offset));
+            }
+        }
+        let mut at = children;
+        let Some(&count) = trie.get(at) else {
+            continue;
+        };
+        at += 1;
+        for _ in 0..count {
+            let Some(len) = trie
+                .get(at..)
+                .and_then(|rest| rest.iter().position(|&b| b == 0))
+            else {
+                break;
+            };
+            let mut name = prefix.clone();
+            name.extend_from_slice(trie.get(at..at + len).unwrap_or_default());
+            at += len + 1;
+            let Some(child) = uleb(trie, &mut at) else {
+                break;
+            };
+            if let Ok(child) = usize::try_from(child) {
+                stack.push((child, name));
+            }
+        }
+    }
+    out
+}
+
+/// The unsigned LEB128 number at `*at`, advancing past it.
+fn uleb(data: &[u8], at: &mut usize) -> Option<u64> {
+    let mut value = 0_u64;
+    for shift in (0..64).step_by(7) {
+        let byte = *data.get(*at)?;
+        *at += 1;
+        value |= u64::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            return Some(value);
+        }
+    }
+    None
 }
 
 /// One slice of a universal binary: its CPU type and file range.

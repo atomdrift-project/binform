@@ -295,11 +295,11 @@ In scan's pipeline stng already runs without rizin; only the stng CLI
    size, complexity, blocks, call sites) that both `RizinRecovery` and a
    binform adapter fill; `apply_inner`, the metrics and
    `pe/api_hash.rs` (`function_ranges`, `direct_call_edges`) read only
-   the table. binform runs after the native parse; rizin only when
-   `binform::parse` fails (unparseable, or Nios II, IA-64, MIPS-FPU and
-   PowerPC PE), when `Functions` looks untrustworthy (`covered/code` low,
-   `invalid`/`unresolved` high, `truncated`), or when a PE has no section
-   table goblin could read. Keep today's admission policy at first so the
+   the table. binform runs after the native parse and fills the import,
+   export and section views goblin left empty; rizin only when
+   `binform::parse` fails, when the `Binary` has no `arch` (eBPF,
+   M*Core, Nios II, IA-64, MIPS-FPU and PowerPC PE), or when `Functions`
+   fails `trust` (truncated, or no functions in substantial code). Keep today's admission policy at first so the
    A/B isolates the change in metrics from the change in which files are
    analysed; widening it to every executable (binform costs
    milliseconds) is a later step. Cache key: binform's version always,

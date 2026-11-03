@@ -6,7 +6,7 @@
 #![allow(clippy::panic, clippy::indexing_slicing)]
 
 use super::Recovered as Function;
-use crate::{Arch, Binary, Found, Handler, Import, Origin, RefKind, Seed, Segment};
+use crate::{Arch, Binary, Found, Handler, Origin, RefKind, Seed, Segment, Slot};
 
 fn segment(addr: u64, bytes: &[u8], executable: bool) -> Segment<'_> {
     Segment {
@@ -25,10 +25,15 @@ fn entry(addr: u64) -> Seed {
 
 fn image(arch: Arch, segments: Vec<Segment<'_>>, seeds: Vec<Seed>) -> Binary<'_> {
     Binary {
-        arch,
+        format: crate::Format::Elf,
+        arch: Some(arch),
+        entry: None,
+        sections: Vec::new(),
+        imports: Vec::new(),
+        exports: Vec::new(),
         segments,
         seeds,
-        imports: Vec::new(),
+        slots: Vec::new(),
         handlers: Vec::new(),
         extents: Vec::new(),
         got: None,
@@ -252,7 +257,7 @@ fn main_from_libc_start_main() {
             vec![segment(base, code, true), segment(0x3000, &slot, false)],
             vec![entry(base)],
         );
-        image.imports.push(Import {
+        image.slots.push(Slot {
             slot: 0x3000,
             name: "__libc_start_main".into(),
         });

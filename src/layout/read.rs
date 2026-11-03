@@ -17,7 +17,7 @@ impl<'a> Reader<'a> {
         Self { bytes, big }
     }
 
-    fn array<const N: usize>(&self, at: u64) -> Option<[u8; N]> {
+    pub(super) fn array<const N: usize>(&self, at: u64) -> Option<[u8; N]> {
         let at = usize::try_from(at).ok()?;
         self.bytes.get(at..at.checked_add(N)?)?.try_into().ok()
     }

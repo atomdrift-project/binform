@@ -14,6 +14,7 @@ const DIRECTORY_IMPORT: usize = 1;
 const DIRECTORY_RESOURCE: usize = 2;
 const DIRECTORY_EXCEPTION: usize = 3;
 const DIRECTORY_TLS: usize = 9;
+const DIRECTORY_DELAY_IMPORT: usize = 13;
 
 /// `UNW_FLAG_CHAININFO`: the unwind data continues another entry's.
 const UNW_FLAG_CHAININFO: u8 = 4;
@@ -29,13 +30,34 @@ pub(super) struct Pe<'a> {
     pub(super) image_base: u64,
     /// The entry point's RVA; zero for none.
     pub(super) entry: u32,
-    file_alignment: u32,
+    pub(super) file_alignment: u32,
+    pub(super) section_alignment: u32,
     pub(super) sections: Vec<Section>,
     /// Each data directory's (RVA, size).
     directories: Vec<(u32, u32)>,
 }
 
+/// One exported function: by name, or `Ordinal_n`; a forwarder names
+/// another DLL's export instead of code.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Export {
+    pub(super) rva: u32,
+    pub(super) name: String,
+    pub(super) forward: Option<String>,
+}
+
+/// One imported symbol and the address-table slot the loader fills.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) struct Import {
+    pub(super) slot: u32,
+    pub(super) library: String,
+    pub(super) name: String,
+    pub(super) ordinal: Option<u16>,
+}
+
 pub(super) struct Section {
+    /// The header's name; a `/N` long name read from the COFF string table.
+    pub(super) name: String,
     pub(super) virtual_size: u32,
     pub(super) virtual_address: u32,
     pub(super) size_of_raw_data: u32,
@@ -69,6 +91,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Pe<'_>, String> {
         r.u32(optional + 28).map(u64::from)
     }
     .unwrap_or(0);
+    let section_alignment = r.u32(optional + 32).unwrap_or(0);
     let file_alignment = r.u32(optional + 36).unwrap_or(0);
     let (count_at, first) = if is_64 { (108, 112) } else { (92, 96) };
     // The directories that fit in the optional header the COFF header sizes.
@@ -84,10 +107,24 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Pe<'_>, String> {
         })
         .collect();
     let table = optional + u64::from(optional_size);
+    // Long section names (`/4`) are offsets into the COFF string table,
+    // which follows the symbol table.
+    let strings = r
+        .u32(coff + 8)
+        .filter(|&symbols| symbols != 0)
+        .map(|symbols| u64::from(symbols) + 18 * u64::from(r.u32(coff + 12).unwrap_or(0)));
     let sections = (0..u64::from(count))
         .map_while(|i| {
             let at = table + 40 * i;
+            let raw = r.array::<8>(at)?;
+            let raw = raw.split(|&b| b == 0).next().unwrap_or_default();
+            let long = raw
+                .strip_prefix(b"/")
+                .and_then(|digits| std::str::from_utf8(digits).ok()?.parse::<u64>().ok())
+                .zip(strings)
+                .map(|(offset, strings)| r.name(strings + offset).into_owned());
             Some(Section {
+                name: long.unwrap_or_else(|| String::from_utf8_lossy(raw).into_owned()),
                 virtual_size: r.u32(at + 8)?,
                 virtual_address: r.u32(at + 12)?,
                 size_of_raw_data: r.u32(at + 16)?,
@@ -103,6 +140,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Pe<'_>, String> {
         image_base,
         entry,
         file_alignment,
+        section_alignment,
         sections,
         directories,
     })
@@ -172,7 +210,7 @@ impl Pe<'_> {
     /// The named exports: each one's RVA and name. A forwarder, whose RVA
     /// lies inside the export directory and names another DLL's export,
     /// is left out.
-    pub(super) fn exports(&self) -> Vec<(u32, String)> {
+    pub(super) fn exports(&self) -> Vec<Export> {
         let Some((dir, size)) = self.directory(DIRECTORY_EXPORT) else {
             return Vec::new();
         };
@@ -192,6 +230,7 @@ impl Pe<'_> {
         let Some((functions, names, function_table, name_table, ordinal_table)) = fields else {
             return Vec::new();
         };
+        let ordinal_base = r.u32(at + 16).unwrap_or(1);
         let (Some(function_table), Some(name_table), Some(ordinal_table)) = (
             self.offset(function_table),
             self.offset(name_table),
@@ -199,77 +238,133 @@ impl Pe<'_> {
         ) else {
             return Vec::new();
         };
-        let forwarder = |rva: u32| rva >= dir && rva - dir < size;
-        (0..u64::from(names).min(MOST))
-            .filter_map(|i| {
-                let ordinal = r.u16(ordinal_table + 2 * i)?;
-                if u32::from(ordinal) >= functions {
-                    return None;
-                }
-                let rva = r.u32(function_table + 4 * u64::from(ordinal))?;
-                if forwarder(rva) {
-                    return None;
-                }
-                let name = r
+        // Each function by its index: the names table names some of them;
+        // the rest are exported by ordinal only.
+        let mut named: Vec<Option<String>> =
+            vec![None; usize::try_from(u64::from(functions).min(MOST)).unwrap_or(0)];
+        for i in 0..u64::from(names).min(MOST) {
+            let Some(index) = r.u16(ordinal_table + 2 * i) else {
+                break;
+            };
+            if let Some(slot) = named.get_mut(usize::from(index))
+                && slot.is_none()
+            {
+                *slot = r
                     .u32(name_table + 4 * i)
-                    .and_then(|name| self.name_at(name))
-                    .unwrap_or_default();
-                Some((rva, name))
+                    .and_then(|name| self.name_at(name));
+            }
+        }
+        (0_u32..)
+            .zip(named)
+            .filter_map(|(index, name)| {
+                let rva = r.u32(function_table + 4 * u64::from(index))?;
+                if rva == 0 {
+                    return None;
+                }
+                // A forwarder's RVA lies inside the export directory and
+                // names another DLL's export.
+                let forward = (rva >= dir && rva - dir < size)
+                    .then(|| self.name_at(rva))
+                    .flatten();
+                Some(Export {
+                    rva,
+                    name: name
+                        .unwrap_or_else(|| format!("Ordinal_{}", ordinal_base.wrapping_add(index))),
+                    forward,
+                })
             })
             .collect()
     }
 
-    /// The import address table's slots: each one's RVA and the name it
-    /// imports, or `ORDINAL n` for one imported by ordinal.
-    pub(super) fn imports(&self) -> Vec<(u32, String)> {
-        let Some(mut at) = self
+    /// The import address table's slots, then the delay-load table's, with
+    /// the DLL each imports from and the name it imports (`Ordinal_n` for
+    /// one imported by ordinal only).
+    pub(super) fn imports(&self) -> Vec<Import> {
+        let r = &self.r;
+        let mut imports = Vec::new();
+        if let Some(mut at) = self
             .directory(DIRECTORY_IMPORT)
             .and_then(|(rva, _)| self.offset(rva))
-        else {
-            return Vec::new();
-        };
-        let r = &self.r;
-        let width: u32 = if self.is_64 { 8 } else { 4 };
-        let ordinal_flag = if self.is_64 { 1 << 63 } else { 1 << 31 };
-        let mut imports = Vec::new();
-        for _ in 0..1 << 12 {
-            let descriptor = (|| Some([r.u32(at)?, r.u32(at + 12)?, r.u32(at + 16)?]))();
-            let Some([lookup, name, address]) = descriptor else {
-                break;
-            };
-            at += 20;
-            // The table ends at an empty descriptor, or one naming no DLL
-            // or slots.
-            if name == 0 || address == 0 {
-                break;
-            }
-            // The lookup table names the imports; the address table holds
-            // the same until the loader binds it.
-            let Some(table) = self.offset(lookup).or_else(|| self.offset(address)) else {
-                continue;
-            };
-            for i in 0..1_u32 << 16 {
-                let Some(entry) = r.word(table + u64::from(width * i), self.is_64) else {
+        {
+            for _ in 0..1 << 12 {
+                let descriptor = (|| Some([r.u32(at)?, r.u32(at + 12)?, r.u32(at + 16)?]))();
+                let Some([lookup, name, address]) = descriptor else {
                     break;
                 };
-                if entry == 0 {
+                at += 20;
+                // The table ends at an empty descriptor, or one naming no
+                // DLL or slots.
+                if name == 0 || address == 0 {
                     break;
                 }
-                let slot = address.wrapping_add(width * i);
-                let name = if entry & ordinal_flag != 0 {
-                    format!("ORDINAL {}", entry & 0xffff)
-                } else {
-                    // The hint, then the name.
-                    let rva = u32::try_from(entry & 0x7fff_ffff).unwrap_or(0);
-                    match self.offset(rva) {
-                        Some(hint) if r.u16(hint).is_some() => r.name(hint + 2).into_owned(),
-                        _ => continue,
-                    }
+                self.thunks(lookup, name, address, 0, &mut imports);
+            }
+        }
+        if let Some(mut at) = self
+            .directory(DIRECTORY_DELAY_IMPORT)
+            .and_then(|(rva, _)| self.offset(rva))
+        {
+            for _ in 0..1 << 12 {
+                let descriptor =
+                    (|| Some([r.u32(at)?, r.u32(at + 4)?, r.u32(at + 12)?, r.u32(at + 16)?]))();
+                let Some([attributes, name, address, lookup]) = descriptor else {
+                    break;
                 };
-                imports.push((slot, name));
+                at += 32;
+                if name == 0 || address == 0 {
+                    break;
+                }
+                // Before Visual C++ 7, the fields were addresses, not RVAs.
+                let base = if attributes & 1 == 0 {
+                    self.image_base
+                } else {
+                    0
+                };
+                let rva = |va: u32| u32::try_from(u64::from(va).wrapping_sub(base)).unwrap_or(0);
+                self.thunks(rva(lookup), rva(name), rva(address), base, &mut imports);
             }
         }
         imports
+    }
+
+    /// The imports of one descriptor: DLL `name`, its lookup and address
+    /// tables. `base` is subtracted from name addresses that are no RVAs.
+    fn thunks(&self, lookup: u32, name: u32, address: u32, base: u64, out: &mut Vec<Import>) {
+        let r = &self.r;
+        let width: u32 = if self.is_64 { 8 } else { 4 };
+        let ordinal_flag = if self.is_64 { 1 << 63 } else { 1 << 31 };
+        // The lookup table names the imports; the address table holds the
+        // same until the loader binds it.
+        let Some(table) = self.offset(lookup).or_else(|| self.offset(address)) else {
+            return;
+        };
+        let library = self.name_at(name).unwrap_or_default();
+        for i in 0..1_u32 << 16 {
+            let Some(entry) = r.word(table + u64::from(width * i), self.is_64) else {
+                break;
+            };
+            if entry == 0 {
+                break;
+            }
+            let slot = address.wrapping_add(width * i);
+            let (name, ordinal) = if entry & ordinal_flag != 0 {
+                let ordinal = (entry & 0xffff) as u16;
+                (format!("Ordinal_{ordinal}"), Some(ordinal))
+            } else {
+                // The hint, then the name.
+                let rva = u32::try_from(entry.wrapping_sub(base) & 0x7fff_ffff).unwrap_or(0);
+                match self.offset(rva) {
+                    Some(hint) if r.u16(hint).is_some() => (r.name(hint + 2).into_owned(), None),
+                    _ => continue,
+                }
+            };
+            out.push(Import {
+                slot,
+                library: library.clone(),
+                name,
+                ordinal,
+            });
+        }
     }
 
     /// The TLS callbacks' addresses, which the loader runs before the entry
@@ -561,7 +656,8 @@ mod tests {
         put(32, &0x1050_u32.to_le_bytes());
         put(36, &0x1060_u32.to_le_bytes());
         put(0x40, &0x1100_u32.to_le_bytes());
-        put(0x44, &0x1010_u32.to_le_bytes());
+        put(0x44, &0x1030_u32.to_le_bytes());
+        put(0x30, b"k.Fwd\0");
         put(0x50, &0x1070_u32.to_le_bytes());
         put(0x54, &0x1078_u32.to_le_bytes());
         put(0x60, &[0, 0, 1, 0]);
@@ -590,12 +686,29 @@ mod tests {
         directories[9] = (0x1140, 40);
         let bytes = image(&directories, &body);
         let pe = parsed(&bytes);
-        assert_eq!(pe.exports(), [(0x1100, "first".to_owned())]);
+        let export = |rva, name: &str, forward: Option<&str>| Export {
+            rva,
+            name: name.into(),
+            forward: forward.map(Into::into),
+        };
+        assert_eq!(
+            pe.exports(),
+            [
+                export(0x1100, "first", None),
+                export(0x1030, "second", Some("k.Fwd")),
+            ]
+        );
+        let import = |slot, name: &str, ordinal| Import {
+            slot,
+            library: "k.dll".into(),
+            name: name.into(),
+            ordinal,
+        };
         assert_eq!(
             pe.imports(),
             [
-                (0x10d8, "Sleep".to_owned()),
-                (0x10e0, "ORDINAL 7".to_owned())
+                import(0x10d8, "Sleep", None),
+                import(0x10e0, "Ordinal_7", Some(7))
             ]
         );
         assert_eq!(pe.tls_callbacks(), [0x1_4000_1100]);

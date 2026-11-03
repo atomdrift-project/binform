@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use super::elf::{self, Elf};
 use super::macho;
 
-use crate::{Arch, Import, Segment};
+use crate::{Arch, Segment, Slot};
 
 /// Where the sections are placed.
 const BASE: u64 = 0x800_0000;
@@ -26,7 +26,7 @@ pub(super) struct Layout<'a> {
     /// loaded.
     pub(super) addrs: Vec<u64>,
     pub(super) segments: Vec<Segment<'a>>,
-    pub(super) imports: Vec<Import>,
+    pub(super) imports: Vec<Slot>,
 }
 
 pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf, arch: Arch) -> Layout<'a> {
@@ -69,7 +69,7 @@ pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf, arch: Arch) -> Layout<'a> {
                 }
                 let next = first_slot.saturating_add(8 * slots.len() as u64);
                 let slot = *slots.entry(index).or_insert_with(|| {
-                    imports.push(Import {
+                    imports.push(Slot {
                         slot: next,
                         name: name.clone(),
                     });
@@ -158,7 +158,7 @@ pub(super) fn macho(
     sections: &[macho::Section],
     symbols: &[macho::Symbol],
     arch: Arch,
-) -> (Vec<Option<Vec<u8>>>, Vec<Import>) {
+) -> (Vec<Option<Vec<u8>>>, Vec<Slot>) {
     use macho::{N_SECT, N_TYPE, N_UNDF};
     /// `ARM64_RELOC_ADDEND`: the addend of the relocation after it.
     const ADDEND: u32 = 10;
@@ -214,7 +214,7 @@ pub(super) fn macho(
                 N_UNDF if !nlist.name.is_empty() => {
                     let next = first_slot.saturating_add(8 * slots.len() as u64);
                     let slot = *slots.entry(index).or_insert_with(|| {
-                        imports.push(Import {
+                        imports.push(Slot {
                             slot: next,
                             name: nlist.name.clone(),
                         });

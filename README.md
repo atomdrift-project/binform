@@ -10,7 +10,10 @@ It covers x86/x86-64, Arm/Thumb, AArch64, MIPS, PowerPC, RISC-V, LoongArch,
 s390x, SPARC, SuperH, m68k, OpenRISC, MicroBlaze, ARC, C-SKY and Xtensa, in
 ELF, PE and Mach-O binaries. The API is two pure functions over plain
 structs, and a caller pays only for what it calls: `parse` reads the
-headers into a `Binary`, and `functions` recovers its functions.
+headers into a `Binary` (format, entry point, sections, imports and
+exports, by rizin's rules), and `functions` recovers its functions. A
+binary of an instruction set binform does not decode still parses: it has
+a layout, no `arch`, and no functions.
 
 ```rust
 let bytes = std::fs::read("a.out")?;
@@ -37,10 +40,10 @@ where two tools use it:
   near a string to find XOR keys.
 
 Both shelled out to [rizin](https://rizin.re) for these and are moving to
-binform in-process, with rizin kept as a fallback for what binform does
-not read (an unsupported instruction set, a PE with no section table) or
-reads badly (a `Functions` with little code covered, or many invalid,
-unresolved or truncated paths).
+binform in-process. filefacts keeps rizin, for now, as a fallback for the
+functions of an instruction set binform does not decode, and for a
+recovery a work budget cut short or that found no function in
+substantial code.
 
 ### The line
 
