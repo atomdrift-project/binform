@@ -217,6 +217,10 @@ pub(crate) enum Decoder {
         toc: Option<u64>,
         state: Box<crate::ppc::State>,
     },
+    RiscV {
+        config: crate::riscv::Config,
+        state: Box<crate::riscv::State>,
+    },
 }
 
 impl Decoder {
@@ -269,6 +273,13 @@ impl Decoder {
                 toc: image.got,
                 state: Box::default(),
             },
+            arch @ (Arch::RiscV32 | Arch::RiscV64) => Self::RiscV {
+                config: crate::riscv::Config {
+                    wide: arch == Arch::RiscV64,
+                    gp: image.got,
+                },
+                state: Box::default(),
+            },
         }
     }
 
@@ -283,6 +294,7 @@ impl Decoder {
             Self::Sparc { state, .. } => *state = crate::sparc::State::default(),
             Self::SuperH(state) => *state = crate::superh::State::default(),
             Self::PowerPc { state, .. } => **state = crate::ppc::State::default(),
+            Self::RiscV { state, .. } => **state = crate::riscv::State::default(),
             _ => {}
         }
     }
@@ -309,6 +321,7 @@ impl Decoder {
                 toc,
                 state,
             } => crate::ppc::decode(state, (*big, *wide, *toc), bytes, addr),
+            Self::RiscV { config, state } => crate::riscv::decode(state, *config, bytes, addr),
         }
     }
 
@@ -327,12 +340,14 @@ impl Decoder {
             | Self::Sparc { wide: false, .. }
             | Self::PowerPc { wide: false, .. }
             | Self::SuperH(_) => 4,
+            Self::RiscV { config, .. } if !config.wide => 4,
             Self::X86 { .. }
             | Self::Arm64(_)
             | Self::Mips { .. }
             | Self::S390x(_)
             | Self::Sparc { .. }
-            | Self::PowerPc { .. } => 8,
+            | Self::PowerPc { .. }
+            | Self::RiscV { .. } => 8,
         }
     }
 
@@ -341,7 +356,10 @@ impl Decoder {
     pub(crate) fn alignment(&self) -> u64 {
         match self {
             Self::X86 { .. } => 1,
-            Self::S390x(_) | Self::SuperH(_) | Self::Arm { thumb: true, .. } => 2,
+            Self::S390x(_)
+            | Self::SuperH(_)
+            | Self::Arm { thumb: true, .. }
+            | Self::RiscV { .. } => 2,
             Self::Arm64(_)
             | Self::Arm { .. }
             | Self::Mips { .. }
@@ -427,6 +445,7 @@ impl Decoder {
             Self::SuperH(_) => crate::superh::starts_frame(bytes),
             Self::S390x(_) => crate::s390x::starts_frame(bytes),
             Self::PowerPc { big, .. } => crate::ppc::starts_frame(*big, bytes),
+            Self::RiscV { .. } => crate::riscv::starts_frame(bytes),
             _ => false,
         }
     }

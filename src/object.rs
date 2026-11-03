@@ -117,6 +117,7 @@ const EM_MIPS_RS3_LE: u16 = 10;
 const EM_SPARC32PLUS: u16 = 18;
 const EM_PPC: u16 = 20;
 const EM_PPC64: u16 = 21;
+const EM_RISCV: u16 = 243;
 const EM_S390: u16 = 22;
 const EM_ARM: u16 = 40;
 const EM_SH: u16 = 42;
@@ -153,6 +154,8 @@ fn elf_arch(elf: &Elf) -> Result<Arch, Error> {
         (EM_PPC, false) => Arch::PowerPc,
         (EM_PPC64, true) if elf.big => Arch::PowerPc64,
         (EM_PPC64, true) => Arch::PowerPc64El,
+        (EM_RISCV, false) => Arch::RiscV32,
+        (EM_RISCV, true) => Arch::RiscV64,
         (machine, _) => return Err(Error::Arch(format!("ELF machine {machine}"))),
     };
     if elf.big != arch.big_endian() {
@@ -396,6 +399,17 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Image<'a>, Error> {
                 sections
                     .find(".got")
                     .map(|(addr, _)| addr.wrapping_add(0x8000))
+            })
+    } else if matches!(arch, Arch::RiscV32 | Arch::RiscV64) {
+        // The global pointer, which the linker relaxes accesses near it
+        // to: `__global_pointer$`, or what `_start` sets `gp` to.
+        elf.symbols
+            .iter()
+            .find(|symbol| symbol.name == "__global_pointer$" && symbol.value != 0)
+            .map(|symbol| symbol.value)
+            .or_else(|| {
+                let code = memory.code(elf.entry)?;
+                crate::riscv::gp_setup(code, elf.entry, arch == Arch::RiscV64)
             })
     } else {
         None

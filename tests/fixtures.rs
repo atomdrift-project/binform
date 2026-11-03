@@ -942,6 +942,21 @@ fn powerpc64le_power10() {
     });
 }
 
+/// RISC-V: compressed and full-width instructions mixed, a jump table
+/// addressed PC-relative (`auipc; addi`), and calls through `auipc; jalr`.
+#[test]
+fn riscv64_pie() {
+    check("rv64-pie", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::RiscV64);
+        assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
+        assert_eq!(outcome.cases(), 20, "pick's cases");
+        // musl's `f->write` tail calls, through a pointer.
+        assert!(outcome.recovery.unresolved <= 2);
+        assert_eq!(outcome.recovery.invalid, 0);
+        finds_rizin_before(outcome, 0, &[]);
+    });
+}
+
 /// 64-bit ELFv1: the entry point and symbols name `.opd` descriptors.
 #[test]
 fn powerpc64_elfv1() {

@@ -41,6 +41,7 @@ pub mod cil;
 mod decode;
 mod mips;
 mod ppc;
+mod riscv;
 mod s390x;
 mod sparc;
 mod superh;
@@ -99,6 +100,10 @@ pub enum Arch {
     PowerPc64,
     /// 64-bit PowerPC, little-endian (the ELFv2 ABI).
     PowerPc64El,
+    /// 32-bit RISC-V (RV32), with or without compressed instructions.
+    RiscV32,
+    /// 64-bit RISC-V (RV64).
+    RiscV64,
 }
 
 impl Arch {
@@ -155,7 +160,8 @@ impl Arch {
             | Self::MipsR6El
             | Self::Sparc
             | Self::SuperH
-            | Self::PowerPc => 4,
+            | Self::PowerPc
+            | Self::RiscV32 => 4,
             Self::X86_64
             | Self::Arm64
             | Self::Mips64
@@ -165,7 +171,8 @@ impl Arch {
             | Self::S390x
             | Self::Sparc64
             | Self::PowerPc64
-            | Self::PowerPc64El => 8,
+            | Self::PowerPc64El
+            | Self::RiscV64 => 8,
         }
     }
 }

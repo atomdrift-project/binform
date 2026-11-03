@@ -65,7 +65,23 @@ only. Next:
   Go's `reflect.call` dispatch); PowerPC's `bctrl` likewise calls it.
   Other sets' register calls (`jalr`, `blx`, `call rax`) still decode as
   `CallIndirect`, with no register to look up.
-- **Not supported at all:** AIX (XCOFF).
+- **RISC-V** (ELF, RV32 and RV64, with or without compressed
+  instructions) decodes `jal`/`jalr` (calls through `ra` or `t0`, returns,
+  `auipc; jalr` far calls), branches, `auipc; addi` and `lui; addi`
+  addresses, `gp`-relative addresses (from `__global_pointer$`, or the
+  `_start` code that sets `gp`), PLT stubs (`auipc t3; ld t3, n(t3); jalr
+  t1, t3`), and jump tables bounded by `bltu`/`bgeu` against a constant,
+  including GCC's RV64 zero-extended index (`slli 32; srli 30`) and Zba's
+  `sh*add`, `slli.uw` and `zext.w` (`rv64-pie`; `jq` 1.8.1 covers 99%,
+  with 9564 cases in its tables and 165 unresolved jumps, mostly
+  oniguruma's dispatch through pointers loaded from structs; Go and the
+  bots 87-98%). Left: relocating RISC-V objects (`relocate` has no
+  RISC-V arm, so a `.syso`'s `auipc; jalr` calls are unlinked), and
+  rizin finds next to nothing on RISC-V to compare against (`aa` keeps
+  only the entry point).
+- **Not supported at all:** AIX (XCOFF), and these corpus sets:
+  LoongArch, m68k, C-SKY, ARC, MicroBlaze, Xtensa, OpenRISC, Nios II,
+  M*Core, BPF, and IA-64, MIPS-FPU and PowerPC PE files.
 
 - **From the exotic-binaries survey** (`C:\data\exotic_binaries`, all
   hostile: parse only):
