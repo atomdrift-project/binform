@@ -125,9 +125,46 @@ only. Next:
   five unresolved jumps in each are tail calls through loaded function
   pointers. No jump tables seen yet (GCC emitted none in these), and no
   PLT or object relocations. Rizin 0.8.2 cannot decode OpenRISC.
+- **MicroBlaze** (ELF, either byte order; the corpus is big-endian)
+  decodes the `imm` prefix that widens the next immediate (addresses are
+  `imm hi; addik rD, r0, lo`; an immediate it did not widen is an
+  integer), delay slots only on the `D` forms, `brlid`/`brald` calls
+  (through register constants and loaded slots), `rtsd r15, 8`, and
+  `brki r14, 8` (the system call, which returns). GCC's tables, built
+  without a barrel shifter, scale by adding the case value to itself
+  (`cmpu r18, r4, r22; bltid r18, default; addk r3, r4, r4; addk r3, r3,
+  r3; imm; addik r3, r3, table; lwi r3, r3, 0; bra r3`). PIC code finds
+  the GOT with `mfs r20, rpc`; in a static link each slot holds its
+  target, which the call goes to (as MIPS GOT slots do). The five
+  table-using bots cover their `.text` to within 8 bytes, with 164-178
+  cases and nothing unresolved (`bot-microblaze-static`); the PIC one
+  97% (`bot-microblaze-pic`). An `imm` applies only to the instruction
+  at the address after it: the stub check decodes callees mid-walk. Not
+  yet: PLT stubs, object relocations, PIC jump tables (none seen). Rizin
+  0.8.2 cannot analyze MicroBlaze.
+- **ARC** (ELF, little-endian: ARCompact/ARC700 and ARCv2/HS) decodes
+  16- and 32-bit instructions with their `limm`s (lengths agree with
+  rizin over a bot's whole `.text`), `.d` delay slots, `b`/`bl`/`Bcc`,
+  `BRcc`/`BBITn` (a bound when unsigned against a constant, even from a
+  delay slot), `j`/`jl` through registers, constants and slots, returns
+  (`j_s [blink]`, conditional `jeq_s [blink]`, ARCv2's `leave_s`), `lp`,
+  and `flag 1` (halt). GCC's tables: absolute (`ld.as r0, [table, r0];
+  j_s [r0]`) and relative to `pcl` (`ldw.as`/`ldb_s` entries, then `add_s
+  rX, rX, pcl`); ARCv2's `bi`/`bih` index a run of branches (untested on
+  a sample). Entries into the `-mmillicode` epilogue
+  (`__ld_r13_to_rN_ret`, jumped to) are functions; without that every
+  caller absorbed it. `pcl`-relative addresses are held but are no
+  function pointers (they point at data kept in `.text`); `st limm, [..]`
+  stores one. The ARC700 bots cover 86-96%, the ARCv2 ones 86-99%
+  (`bot-arc-static`, `bot-arcv2-dynamic`, whose ARCv2 PLT is seeded).
+  Left: a bound set in the delay slot of a call to `__st_r13_to_rN`
+  (`bl.d __st_r13_to_r16; cmp r0, 240`) is lost at the call (the
+  millicode keeps `r0` and the flags), so the `bad-0073ff` family resolves
+  no cases; no ARCompact PLT, big-endian ARC or object relocations.
+  Rizin 0.8.2 decodes ARCompact only, and reads ARCv2 as x86.
 - **Not supported at all:** AIX (XCOFF), and these corpus sets: C-SKY,
-  ARC, MicroBlaze, Xtensa, Nios II, M*Core, BPF, and IA-64, MIPS-FPU and
-  PowerPC PE files.
+  Xtensa, Nios II, M*Core, BPF, and IA-64, MIPS-FPU and PowerPC PE
+  files.
 
 - **From the exotic-binaries survey** (`C:\data\exotic_binaries`, all
   hostile: parse only):

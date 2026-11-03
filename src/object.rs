@@ -121,6 +121,11 @@ const EM_RISCV: u16 = 243;
 const EM_LOONGARCH: u16 = 258;
 const EM_68K: u16 = 4;
 const EM_OPENRISC: u16 = 92;
+const EM_MICROBLAZE: u16 = 189;
+/// MicroBlaze's number before it had one.
+const EM_MICROBLAZE_OLD: u16 = 0xbaab;
+const EM_ARC_COMPACT: u16 = 93;
+const EM_ARC_COMPACT2: u16 = 195;
 const EM_S390: u16 = 22;
 const EM_ARM: u16 = 40;
 const EM_SH: u16 = 42;
@@ -162,6 +167,10 @@ fn elf_arch(elf: &Elf) -> Result<Arch, Error> {
         (EM_LOONGARCH, true) => Arch::LoongArch64,
         (EM_68K, false) => Arch::M68k,
         (EM_OPENRISC, false) => Arch::OpenRisc,
+        (EM_MICROBLAZE | EM_MICROBLAZE_OLD, false) if elf.big => Arch::MicroBlaze,
+        (EM_MICROBLAZE | EM_MICROBLAZE_OLD, false) => Arch::MicroBlazeEl,
+        (EM_ARC_COMPACT, false) if !elf.big => Arch::Arc,
+        (EM_ARC_COMPACT2, false) if !elf.big => Arch::ArcV2,
         (EM_LOONGARCH, false) => return Err(Error::Arch("32-bit LoongArch".into())),
         (machine, _) => return Err(Error::Arch(format!("ELF machine {machine}"))),
     };
@@ -571,6 +580,9 @@ fn elf_stubs(bytes: &[u8], arch: Arch, sections: &ElfSections<'_>) -> Vec<u64> {
         // ld t3; jalr t1, t3; nop`, `pcaddu12i t3; ld.d t3; jirl t1, t3;
         // nop`).
         Arch::RiscV32 | Arch::RiscV64 | Arch::LoongArch64 => (32, Some(16)),
+        // ARCv2: a 32-byte header, then `ld r12, [pcl, slot]; j.d [r12];
+        // mov r12, pcl` per import.
+        Arch::ArcV2 => (32, Some(16)),
         // The others' stubs vary by ABI: the header alone.
         _ => (0, Some(0)),
     };

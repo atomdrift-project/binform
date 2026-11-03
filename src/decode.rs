@@ -224,6 +224,14 @@ pub(crate) enum Decoder {
     LoongArch(Box<crate::loongarch::State>),
     M68k(Box<crate::m68k::State>),
     OpenRisc(Box<crate::openrisc::State>),
+    MicroBlaze {
+        big: bool,
+        state: Box<crate::microblaze::State>,
+    },
+    Arc {
+        v2: bool,
+        state: Box<crate::arc::State>,
+    },
 }
 
 impl Decoder {
@@ -286,6 +294,14 @@ impl Decoder {
             Arch::LoongArch64 => Self::LoongArch(Box::default()),
             Arch::M68k => Self::M68k(Box::default()),
             Arch::OpenRisc => Self::OpenRisc(Box::default()),
+            Arch::MicroBlaze | Arch::MicroBlazeEl => Self::MicroBlaze {
+                big: image.arch == Arch::MicroBlaze,
+                state: Box::default(),
+            },
+            Arch::Arc | Arch::ArcV2 => Self::Arc {
+                v2: image.arch == Arch::ArcV2,
+                state: Box::default(),
+            },
         }
     }
 
@@ -304,6 +320,8 @@ impl Decoder {
             Self::LoongArch(state) => **state = crate::loongarch::State::default(),
             Self::M68k(state) => **state = crate::m68k::State::default(),
             Self::OpenRisc(state) => **state = crate::openrisc::State::default(),
+            Self::MicroBlaze { state, .. } => **state = crate::microblaze::State::default(),
+            Self::Arc { state, .. } => **state = crate::arc::State::default(),
             _ => {}
         }
     }
@@ -334,13 +352,16 @@ impl Decoder {
             Self::LoongArch(state) => crate::loongarch::decode(state, bytes, addr),
             Self::M68k(state) => crate::m68k::decode(state, bytes, addr),
             Self::OpenRisc(state) => crate::openrisc::decode(state, bytes, addr),
+            Self::MicroBlaze { big, state } => crate::microblaze::decode(state, bytes, addr, *big),
+            Self::Arc { v2, state } => crate::arc::decode(state, bytes, addr, *v2),
         }
     }
 
     /// Whether a GOT slot of a function of the binary holds its address in
-    /// the file: MIPS GOTs do, without relocations to say so.
+    /// the file: MIPS GOTs do, without relocations to say so, and so do
+    /// statically linked MicroBlaze ones (PIC code calls through them).
     pub(crate) const fn slots_hold_targets(&self) -> bool {
-        matches!(self, Self::Mips { .. })
+        matches!(self, Self::Mips { .. } | Self::MicroBlaze { .. })
     }
 
     /// Bytes in an address.
@@ -353,7 +374,9 @@ impl Decoder {
             | Self::PowerPc { wide: false, .. }
             | Self::SuperH(_)
             | Self::M68k(_)
-            | Self::OpenRisc(_) => 4,
+            | Self::OpenRisc(_)
+            | Self::MicroBlaze { .. }
+            | Self::Arc { .. } => 4,
             Self::RiscV { config, .. } if !config.wide => 4,
             Self::X86 { .. }
             | Self::Arm64(_)
@@ -375,14 +398,16 @@ impl Decoder {
             | Self::SuperH(_)
             | Self::Arm { thumb: true, .. }
             | Self::RiscV { .. }
-            | Self::M68k(_) => 2,
+            | Self::M68k(_)
+            | Self::Arc { .. } => 2,
             Self::Arm64(_)
             | Self::Arm { .. }
             | Self::Mips { .. }
             | Self::Sparc { .. }
             | Self::PowerPc { .. }
             | Self::LoongArch(_)
-            | Self::OpenRisc(_) => 4,
+            | Self::OpenRisc(_)
+            | Self::MicroBlaze { .. } => 4,
         }
     }
 
@@ -439,6 +464,8 @@ impl Decoder {
                 | Self::LoongArch(_)
                 | Self::M68k(_)
                 | Self::OpenRisc(_)
+                | Self::MicroBlaze { .. }
+                | Self::Arc { .. }
         )
     }
 
@@ -447,7 +474,11 @@ impl Decoder {
     pub(crate) const fn delay_slots(&self) -> bool {
         matches!(
             self,
-            Self::Sparc { .. } | Self::Mips { .. } | Self::OpenRisc(_)
+            Self::Sparc { .. }
+                | Self::Mips { .. }
+                | Self::OpenRisc(_)
+                | Self::MicroBlaze { .. }
+                | Self::Arc { .. }
         )
     }
 
@@ -477,18 +508,22 @@ impl Decoder {
             Self::LoongArch(_) => crate::loongarch::starts_frame(bytes),
             Self::M68k(_) => crate::m68k::starts_frame(bytes),
             Self::OpenRisc(_) => crate::openrisc::starts_frame(bytes),
+            Self::MicroBlaze { big, .. } => crate::microblaze::starts_frame(bytes, *big),
+            Self::Arc { v2, .. } => crate::arc::starts_frame(bytes, *v2),
             _ => false,
         }
     }
 
     /// Whether `bytes` can only be a function's first instructions: 64-bit
     /// ELFv2's global entry, which sets the TOC pointer from the function's
-    /// own address.
+    /// own address, and the entries into ARC's millicode epilogue, which
+    /// functions jump to.
     pub(crate) fn starts_function(&self, bytes: &[u8]) -> bool {
         match self {
             Self::PowerPc {
                 big, wide: true, ..
             } => crate::ppc::global_entry(*big, bytes),
+            Self::Arc { .. } => crate::arc::millicode(bytes),
             _ => false,
         }
     }

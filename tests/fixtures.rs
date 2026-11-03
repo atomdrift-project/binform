@@ -613,6 +613,78 @@ fn mips_got_calls() {
     check("calls-mips64el.so", links_calls);
 }
 
+/// MicroBlaze: `imm`-widened immediates, delay slots only where a branch
+/// asks, and jump tables scaled by adding the case value to itself.
+#[test]
+fn microblaze_static() {
+    check("bot-microblaze-static", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::MicroBlaze);
+        assert!(coverage(outcome) >= 99, "covers {}%", coverage(outcome));
+        assert!(outcome.cases() >= 160, "only {} cases", outcome.cases());
+        assert_eq!(outcome.recovery.unresolved, 0);
+        assert_eq!(outcome.recovery.invalid, 0);
+    });
+}
+
+/// MicroBlaze PIC: calls through GOT slots a static link filled, and
+/// `main` passed as an address.
+#[test]
+fn microblaze_pic() {
+    check("bot-microblaze-pic", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::MicroBlaze);
+        assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
+        assert_eq!(outcome.recovery.unresolved, 0);
+        assert_eq!(outcome.recovery.invalid, 0);
+        let entries = outcome.entries();
+        // `main`, `_init`, `_fini`, and `__uClibc_main`.
+        for start in [0x1000_0850, 0x1000_0818, 0x1001_80e4, 0x1001_2984] {
+            assert!(entries.contains_key(&start), "{start:#x} missed");
+        }
+        // A function reached only through a GOT slot.
+        assert!(entries.contains_key(&0x1000_cb28), "slot callee missed");
+    });
+}
+
+/// ARCompact (ARC700): mixed 16- and 32-bit instructions, `limm`
+/// operands, absolute tables (`ld.as r0, [table, r0]; j_s [r0]`) and
+/// byte tables relative to `pcl`, bounded by `brhs`, and the millicode
+/// epilogue functions jump into.
+#[test]
+fn arc_static() {
+    check("bot-arc-static", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::Arc);
+        assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
+        assert!(outcome.cases() >= 21, "only {} cases", outcome.cases());
+        assert_eq!(outcome.recovery.invalid, 0);
+        let entries = outcome.entries();
+        // `ld r20, [sp, 28]`: an entry into `__ld_r13_to_r20_ret`, not the
+        // tail of every function that jumps there.
+        assert!(entries.contains_key(&0x26e7c), "millicode entry missed");
+        assert!(
+            outcome.recovery.functions.iter().all(|f| f.size < 0x4000),
+            "a function absorbed others"
+        );
+    });
+}
+
+/// ARCv2 (HS): 16-bit encodings ARCompact lacks, `st w6` stores, and
+/// PLT stubs (`ld r12, [pcl, slot]; j.d [r12]; mov r12, pcl`).
+#[test]
+fn arcv2_dynamic() {
+    check("bot-arcv2-dynamic", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::ArcV2);
+        assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
+        assert_eq!(outcome.recovery.invalid, 0);
+        let thunks = outcome
+            .recovery
+            .functions
+            .iter()
+            .filter(|f| f.thunk.is_some())
+            .count();
+        assert!(thunks >= 53, "only {thunks} import stubs");
+    });
+}
+
 /// OpenRISC: delay slots everywhere, `l.jal` that only reads the PC, and
 /// integers built like addresses that fall inside code.
 #[test]

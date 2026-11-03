@@ -34,6 +34,7 @@
 //! never panics, and bounds its work by [`Limits`], so hostile input costs at
 //! most the configured budget.
 
+mod arc;
 mod arm;
 mod arm64;
 mod cfg;
@@ -41,6 +42,7 @@ pub mod cil;
 mod decode;
 mod loongarch;
 mod m68k;
+mod microblaze;
 mod mips;
 mod openrisc;
 mod ppc;
@@ -113,6 +115,14 @@ pub enum Arch {
     M68k,
     /// OpenRISC 1000 (or1k), 32-bit, big-endian.
     OpenRisc,
+    /// Xilinx MicroBlaze, 32-bit, big-endian.
+    MicroBlaze,
+    /// Xilinx MicroBlaze, 32-bit, little-endian.
+    MicroBlazeEl,
+    /// Synopsys ARCompact (ARC600, ARC700), little-endian.
+    Arc,
+    /// Synopsys ARCv2 (ARC EM, HS), little-endian.
+    ArcV2,
 }
 
 impl Arch {
@@ -133,6 +143,7 @@ impl Arch {
                 | Self::PowerPc64
                 | Self::M68k
                 | Self::OpenRisc
+                | Self::MicroBlaze
         )
     }
 
@@ -174,7 +185,11 @@ impl Arch {
             | Self::PowerPc
             | Self::RiscV32
             | Self::M68k
-            | Self::OpenRisc => 4,
+            | Self::OpenRisc
+            | Self::MicroBlaze
+            | Self::MicroBlazeEl
+            | Self::Arc
+            | Self::ArcV2 => 4,
             Self::X86_64
             | Self::Arm64
             | Self::Mips64

@@ -164,14 +164,15 @@ impl Tracker {
             } => (reg, self.load(mem, size, signed).map(Value::Entry)),
             Note::Copy { reg, src } => (reg, Some(self.copy(src))),
             // A constant added to an entry of absolute offsets makes them
-            // relative to it (MIPS adds `$gp`).
+            // relative to it (MIPS adds `$gp`; ARC adds `pcl` to halfword
+            // and byte entries).
             Note::Offset { reg, src, imm } => (
                 reg,
                 match self.get(src) {
                     Some(Value::Address(addr)) => {
                         Some(Value::Address(addr.wrapping_add(imm) & self.mask()))
                     }
-                    Some(Value::Entry(table)) if table.base.is_none() && table.size >= 4 => {
+                    Some(Value::Entry(table)) if table.base.is_none() => {
                         Some(Value::Entry(Table {
                             base: Some(imm & self.mask()),
                             ..table
