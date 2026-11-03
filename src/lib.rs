@@ -40,6 +40,7 @@ mod cfg;
 pub mod cil;
 mod decode;
 mod loongarch;
+mod m68k;
 mod mips;
 mod ppc;
 mod riscv;
@@ -107,6 +108,8 @@ pub enum Arch {
     RiscV64,
     /// 64-bit LoongArch (LA64).
     LoongArch64,
+    /// The Motorola 68000 family (68020 and later in practice).
+    M68k,
 }
 
 impl Arch {
@@ -125,6 +128,7 @@ impl Arch {
                 | Self::Sparc64
                 | Self::PowerPc
                 | Self::PowerPc64
+                | Self::M68k
         )
     }
 
@@ -164,7 +168,8 @@ impl Arch {
             | Self::Sparc
             | Self::SuperH
             | Self::PowerPc
-            | Self::RiscV32 => 4,
+            | Self::RiscV32
+            | Self::M68k => 4,
             Self::X86_64
             | Self::Arm64
             | Self::Mips64

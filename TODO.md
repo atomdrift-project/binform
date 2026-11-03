@@ -97,9 +97,25 @@ only. Next:
   `la64-switch.o`; the corpus bots cover 95%, its Go race `.syso` 91%
   (754 functions, from 3638 unlinked). Rizin's analysis finds only the
   entry point.
-- **Not supported at all:** AIX (XCOFF), and these corpus sets: m68k,
-  C-SKY, ARC, MicroBlaze, Xtensa, OpenRISC, Nios II, M*Core, BPF, and
-  IA-64, MIPS-FPU and PowerPC PE files.
+- **m68k** (ELF, the 68000 family; the corpus is all 68020) decodes every
+  integer instruction's length (checked against rizin over a bot's
+  `.text`: 12399 boundaries agree; rizin rejects the 68020's `bsr.l`,
+  `extb.l`, bit fields and 32-bit `mul`/`div`, which funktion reads), the
+  FPU's, `bsr`/`jsr`/`bra`/`jmp`/`Bcc`/`DBcc`, `jsr (An)` through a
+  register `lea` set, `jmp ([d, pc])` through a slot (a PLT stub), and
+  GCC's tables (`move.w (2, pc, d0.l*2), d0; jmp (2, pc, d0.w)`), bounded
+  in a register or in memory (`cmp.l 12(a3), d1`, then a reload of
+  `12(a3)`). Addresses pushed (`pea main.l`) or stored (`move.l #f, ...`)
+  are function pointers: that is how start-up code passes `main` and how
+  the bots register their routines (`bot-m68k-static`; the stripped
+  bots cover 91-98%, the unstripped 99%). Not yet: PLT seeding, object
+  relocation, and `main` as `Found::MAIN` (arguments go on the stack). One
+  corpus file (`m68k/bad-0070230...`) has four bytes of every 32 in
+  `.text` overwritten with `00 00 00 02`, and false section headers: it
+  covers 46%.
+- **Not supported at all:** AIX (XCOFF), and these corpus sets: C-SKY,
+  ARC, MicroBlaze, Xtensa, OpenRISC, Nios II, M*Core, BPF, and IA-64,
+  MIPS-FPU and PowerPC PE files.
 
 - **From the exotic-binaries survey** (`C:\data\exotic_binaries`, all
   hostile: parse only):

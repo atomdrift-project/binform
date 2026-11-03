@@ -119,6 +119,7 @@ const EM_PPC: u16 = 20;
 const EM_PPC64: u16 = 21;
 const EM_RISCV: u16 = 243;
 const EM_LOONGARCH: u16 = 258;
+const EM_68K: u16 = 4;
 const EM_S390: u16 = 22;
 const EM_ARM: u16 = 40;
 const EM_SH: u16 = 42;
@@ -158,6 +159,7 @@ fn elf_arch(elf: &Elf) -> Result<Arch, Error> {
         (EM_RISCV, false) => Arch::RiscV32,
         (EM_RISCV, true) => Arch::RiscV64,
         (EM_LOONGARCH, true) => Arch::LoongArch64,
+        (EM_68K, false) => Arch::M68k,
         (EM_LOONGARCH, false) => return Err(Error::Arch("32-bit LoongArch".into())),
         (machine, _) => return Err(Error::Arch(format!("ELF machine {machine}"))),
     };

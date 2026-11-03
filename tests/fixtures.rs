@@ -613,6 +613,29 @@ fn mips_got_calls() {
     check("calls-mips64el.so", links_calls);
 }
 
+/// The 68020: variable-length instructions with 32-bit branches that rizin
+/// does not decode, `main` and the bot's routines reached only through the
+/// addresses pushed to calls, and jump tables bounded in memory.
+#[test]
+fn m68k_static() {
+    check("bot-m68k-static", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::M68k);
+        assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
+        assert!(outcome.cases() >= 28, "only {} cases", outcome.cases());
+        assert_eq!(outcome.recovery.unresolved, 0);
+        assert!(outcome.recovery.invalid <= 2);
+        // `main`, pushed for `__libc_start_main`.
+        assert!(outcome.entries().contains_key(&0x8000_31d6), "main missed");
+        // rizin's others are in `.rodata`, at odd addresses.
+        let missed: Vec<u64> = outcome
+            .missed()
+            .into_iter()
+            .filter(|a| *a < 0x8000_aa9a)
+            .collect();
+        assert!(missed.is_empty(), "missed {missed:x?}");
+    });
+}
+
 /// LoongArch: a jump table of offsets addressed `pcalau12i; addi.d`, far
 /// calls through `pcaddu18i; jirl`, and stdio callbacks found from the
 /// addresses `stdout`'s `FILE` holds.

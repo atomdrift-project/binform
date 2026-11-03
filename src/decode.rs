@@ -222,6 +222,7 @@ pub(crate) enum Decoder {
         state: Box<crate::riscv::State>,
     },
     LoongArch(Box<crate::loongarch::State>),
+    M68k(Box<crate::m68k::State>),
 }
 
 impl Decoder {
@@ -282,6 +283,7 @@ impl Decoder {
                 state: Box::default(),
             },
             Arch::LoongArch64 => Self::LoongArch(Box::default()),
+            Arch::M68k => Self::M68k(Box::default()),
         }
     }
 
@@ -298,6 +300,7 @@ impl Decoder {
             Self::PowerPc { state, .. } => **state = crate::ppc::State::default(),
             Self::RiscV { state, .. } => **state = crate::riscv::State::default(),
             Self::LoongArch(state) => **state = crate::loongarch::State::default(),
+            Self::M68k(state) => **state = crate::m68k::State::default(),
             _ => {}
         }
     }
@@ -326,6 +329,7 @@ impl Decoder {
             } => crate::ppc::decode(state, (*big, *wide, *toc), bytes, addr),
             Self::RiscV { config, state } => crate::riscv::decode(state, *config, bytes, addr),
             Self::LoongArch(state) => crate::loongarch::decode(state, bytes, addr),
+            Self::M68k(state) => crate::m68k::decode(state, bytes, addr),
         }
     }
 
@@ -343,7 +347,8 @@ impl Decoder {
             | Self::Mips { wide: false, .. }
             | Self::Sparc { wide: false, .. }
             | Self::PowerPc { wide: false, .. }
-            | Self::SuperH(_) => 4,
+            | Self::SuperH(_)
+            | Self::M68k(_) => 4,
             Self::RiscV { config, .. } if !config.wide => 4,
             Self::X86 { .. }
             | Self::Arm64(_)
@@ -364,7 +369,8 @@ impl Decoder {
             Self::S390x(_)
             | Self::SuperH(_)
             | Self::Arm { thumb: true, .. }
-            | Self::RiscV { .. } => 2,
+            | Self::RiscV { .. }
+            | Self::M68k(_) => 2,
             Self::Arm64(_)
             | Self::Arm { .. }
             | Self::Mips { .. }
@@ -422,7 +428,10 @@ impl Decoder {
     pub(crate) const fn notes_pointers(&self) -> bool {
         matches!(
             self,
-            Self::SuperH(_) | Self::PowerPc { wide: false, .. } | Self::LoongArch(_)
+            Self::SuperH(_)
+                | Self::PowerPc { wide: false, .. }
+                | Self::LoongArch(_)
+                | Self::M68k(_)
         )
     }
 
@@ -456,6 +465,7 @@ impl Decoder {
             Self::PowerPc { big, .. } => crate::ppc::starts_frame(*big, bytes),
             Self::RiscV { .. } => crate::riscv::starts_frame(bytes),
             Self::LoongArch(_) => crate::loongarch::starts_frame(bytes),
+            Self::M68k(_) => crate::m68k::starts_frame(bytes),
             _ => false,
         }
     }
