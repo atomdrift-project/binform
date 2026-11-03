@@ -1,9 +1,10 @@
-# funktion: 231 functions, 73028 bytes of code covered, 0 landing pads, 0 cases
+# funktion: 234 functions, 73276 bytes of code covered, 0 landing pads, 0 cases
 # rizin: 4 functions; 4 shared, 2 with the same blocks (2 of 4 without landing pads)
 0xa00798 size=28 blocks=1 edges=0 cc=1 cases=0 found=LOADER | CALL | SWEEP rizin=-
 0xa007b8 size=48 blocks=1 edges=1 cc=0 cases=0 found=CALL | SWEEP rizin=-
 0xa007e8 size=606 blocks=28 edges=42 cc=16 cases=0 found=SYMBOL rizin=-
 0xa00a48 size=648 blocks=35 edges=48 cc=15 cases=0 found=ENTRY rizin=1/1
+0xa00a78 size=86 blocks=1 edges=0 cc=1 cases=0 found=POINTER rizin=-
 0xa00cd0 size=38 blocks=3 edges=2 cc=5 cases=0 found=CALL | SWEEP rizin=-
 0xa00d40 size=118 blocks=7 edges=9 cc=4 cases=0 found=LOADER rizin=7/4
 0xa00db8 size=258 blocks=6 edges=6 cc=6 cases=0 found=LOADER rizin=3/2
@@ -27,7 +28,7 @@
 0xa68fd0 size=526 blocks=30 edges=43 cc=19 cases=0 found=CALL | SWEEP rizin=-
 0xa691e0 size=74 blocks=4 edges=4 cc=2 cases=0 found=CALL | SWEEP rizin=-
 0xa69230 size=72 blocks=1 edges=1 cc=0 cases=0 found=TAIL_CALL rizin=-
-0xa69278 size=78 blocks=1 edges=0 cc=1 cases=0 found=SWEEP rizin=-
+0xa69278 size=78 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=-
 0xa692c8 size=156 blocks=10 edges=15 cc=7 cases=0 found=CALL | SWEEP rizin=-
 0xa69368 size=20 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=-
 0xa69380 size=2 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=-
@@ -200,7 +201,9 @@
 0xa76408 size=178 blocks=11 edges=15 cc=8 cases=0 found=CALL | SWEEP rizin=-
 0xa764c0 size=66 blocks=5 edges=5 cc=6 cases=0 found=CALL | SWEEP rizin=-
 0xa76508 size=158 blocks=9 edges=13 cc=6 cases=0 found=CALL | SWEEP | TAIL_CALL rizin=-
-0xa76700 size=282 blocks=11 edges=14 cc=5 cases=0 found=SWEEP rizin=-
+0xa765a8 size=52 blocks=1 edges=0 cc=1 cases=0 found=POINTER rizin=-
+0xa76700 size=282 blocks=11 edges=14 cc=5 cases=0 found=CALL | SWEEP rizin=-
+0xa76820 size=110 blocks=4 edges=5 cc=3 cases=0 found=POINTER rizin=-
 0xa76890 size=160 blocks=6 edges=7 cc=3 cases=0 found=CALL | SWEEP rizin=-
 0xa76930 size=100 blocks=4 edges=4 cc=2 cases=0 found=CALL | SWEEP rizin=-
 0xa76998 size=86 blocks=5 edges=6 cc=3 cases=0 found=CALL | SWEEP rizin=-

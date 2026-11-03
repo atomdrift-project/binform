@@ -1,5 +1,5 @@
-# funktion: 1268 functions, 236287 bytes of code covered, 0 landing pads, 33 cases
-# rizin: 1310 functions; 1268 shared, 1264 with the same blocks (1264 of 1264 without landing pads)
+# funktion: 1269 functions, 236374 bytes of code covered, 0 landing pads, 33 cases
+# rizin: 1310 functions; 1269 shared, 1265 with the same blocks (1265 of 1265 without landing pads)
 only rizin 0x8 fcn.00000008: not code
 only rizin 0x10 fcn.00000010: not code
 only rizin 0x18 fcn.00000018: not code
@@ -20,7 +20,6 @@ only rizin 0xa0 fcn.000000a0: not code
 only rizin 0x2000 fcn.00002000: inside 0x1e90
 only rizin 0x8458 fcn.00008458: inside 0x8270
 only rizin 0xaabc fcn.0000aabc: inside 0xaa40
-only rizin 0xbbc0 fcn.0000bbc0: missed
 only rizin 0x13284 fcn.00013284: inside 0x131a0
 only rizin 0x41715 fcn.00041715: not code
 only rizin 0x9811d fcn.0009811d: not code
@@ -203,6 +202,7 @@ only rizin 0xa4ad3 fcn.000a4ad3: not code
 0xba40 size=10 blocks=1 edges=1 cc=0 cases=0 found=FUNCTION_STARTS rizin=1/1
 0xba50 size=66 blocks=5 edges=6 cc=3 cases=0 found=FUNCTION_STARTS | CALL | SWEEP rizin=5/4
 0xbaa0 size=277 blocks=15 edges=19 cc=8 cases=0 found=FUNCTION_STARTS | CALL | SWEEP rizin=15/8
+0xbbc0 size=87 blocks=1 edges=1 cc=0 cases=0 found=POINTER rizin=1/1
 0xbc20 size=981 blocks=54 edges=84 cc=32 cases=0 found=SYMBOL | FUNCTION_STARTS | CALL | SWEEP rizin=54/32
 0xc000 size=489 blocks=28 edges=43 cc=17 cases=0 found=SYMBOL | FUNCTION_STARTS | CALL | SWEEP rizin=28/17
 0xc1f0 size=695 blocks=9 edges=10 cc=5 cases=0 found=SYMBOL | FUNCTION_STARTS | CALL | SWEEP | TAIL_CALL rizin=9/5
@@ -1212,7 +1212,7 @@ only rizin 0xa4ad3 fcn.000a4ad3: not code
 0x3df53 size=6 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
 0x3df59 size=6 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
 0x3df5f size=6 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x3df65 size=6 blocks=1 edges=0 cc=1 cases=0 found=SWEEP | STUB rizin=1/1
+0x3df65 size=6 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
 0x3df6b size=6 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
 0x3df71 size=6 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
 0x3df77 size=6 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1

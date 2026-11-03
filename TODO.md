@@ -81,10 +81,25 @@ only. Next:
   "functions", one per unlinked call, to 758). Tables of sign-extended
   32-bit absolute addresses (`lw; jr`, code linked below 2 GiB) resolve
   on every 64-bit set. Rizin finds next to nothing on RISC-V to compare
-  against (`aa` keeps only the entry point).
-- **Not supported at all:** AIX (XCOFF), and these corpus sets:
-  LoongArch, m68k, C-SKY, ARC, MicroBlaze, Xtensa, OpenRISC, Nios II,
-  M*Core, BPF, and IA-64, MIPS-FPU and PowerPC PE files.
+  against (`aa` keeps only the entry point). PLT stubs are seeded from
+  the section's fixed layout (a 32-byte header, 16 bytes per import).
+- **LoongArch** (ELF, LA64 only; 32-bit LoongArch is refused) decodes `b`,
+  `bl`, the conditional branches, `jirl` (`jr ra` returns, linking `ra`
+  calls), `pcaddu18i; jirl` far calls, the constants `pcaddi`,
+  `pcalau12i`, `pcaddu12i`, `lu12i.w`/`ori`/`lu32i.d`/`lu52i.d` and
+  `addi` build, PLT stubs and GOT calls through a slot, and jump tables
+  bounded by `bltu`/`bgeu` (GCC's `alsl.d; ldptr.d; jr`, absolute; LLVM's
+  `ldx.w; add.d; jr`, relative). The vector extensions decode as
+  instructions that may write an integer register. Only a complete
+  address (not a `pcalau12i` page) counts as a function pointer. Objects
+  are linked (`B16`/`B21`/`B26`, `CALL36`, `PCALA`, GOT for imports,
+  `32_PCREL`, `ADD`/`SUB`). Fixtures: `la64-pie`, `calls-loongarch64.o`,
+  `la64-switch.o`; the corpus bots cover 95%, its Go race `.syso` 91%
+  (754 functions, from 3638 unlinked). Rizin's analysis finds only the
+  entry point.
+- **Not supported at all:** AIX (XCOFF), and these corpus sets: m68k,
+  C-SKY, ARC, MicroBlaze, Xtensa, OpenRISC, Nios II, M*Core, BPF, and
+  IA-64, MIPS-FPU and PowerPC PE files.
 
 - **From the exotic-binaries survey** (`C:\data\exotic_binaries`, all
   hostile: parse only):
@@ -113,6 +128,17 @@ only. Next:
     35%; unpacking is out of scope.
 
 ## Other open items
+
+- **Pointers in data:** once every other start is explored, a word in a
+  segment that is not code, address-aligned, that points at code no
+  function covers and that sets up a frame there (`starts_frame`) is a
+  function's address (callbacks a stripped static binary keeps in tables:
+  musl's stdio callbacks in `stdout`'s `FILE`, a bot's table of attack
+  routines, Rust vtables: `s390x/pkg-binding-s390x-rspack` 60% to 68%).
+  So are the targets of `RELATIVE` relocations. Sets without
+  `starts_frame` (MIPS, SPARC) gain nothing, and 32-bit Arm is left out:
+  a pointer to Thumb code carries bit 0, so an even word into Thumb code
+  is no function's address.
 
 - **Calls that never return** are known by name, and, where what follows
   a call fails to decode within two instructions, by a walk of the callee

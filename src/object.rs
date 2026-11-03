@@ -118,6 +118,7 @@ const EM_SPARC32PLUS: u16 = 18;
 const EM_PPC: u16 = 20;
 const EM_PPC64: u16 = 21;
 const EM_RISCV: u16 = 243;
+const EM_LOONGARCH: u16 = 258;
 const EM_S390: u16 = 22;
 const EM_ARM: u16 = 40;
 const EM_SH: u16 = 42;
@@ -156,6 +157,8 @@ fn elf_arch(elf: &Elf) -> Result<Arch, Error> {
         (EM_PPC64, true) => Arch::PowerPc64El,
         (EM_RISCV, false) => Arch::RiscV32,
         (EM_RISCV, true) => Arch::RiscV64,
+        (EM_LOONGARCH, true) => Arch::LoongArch64,
+        (EM_LOONGARCH, false) => return Err(Error::Arch("32-bit LoongArch".into())),
         (machine, _) => return Err(Error::Arch(format!("ELF machine {machine}"))),
     };
     if elf.big != arch.big_endian() {
@@ -560,6 +563,10 @@ fn elf_stubs(bytes: &[u8], arch: Arch, sections: &ElfSections<'_>) -> Vec<u64> {
         // per import (`sethi; ba,a`): 12 bytes on 32-bit SPARC, 32 on V9.
         Arch::Sparc => (48, Some(12)),
         Arch::Sparc64 => (128, Some(32)),
+        // An eight-instruction header, then four per import (`auipc t3;
+        // ld t3; jalr t1, t3; nop`, `pcaddu12i t3; ld.d t3; jirl t1, t3;
+        // nop`).
+        Arch::RiscV32 | Arch::RiscV64 | Arch::LoongArch64 => (32, Some(16)),
         // The others' stubs vary by ABI: the header alone.
         _ => (0, Some(0)),
     };

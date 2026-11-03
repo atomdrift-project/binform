@@ -122,6 +122,7 @@ pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf, arch: Arch) -> Layout<'a> {
                 Arch::S390x => s390x(section, offset, reloc.kind, fix),
                 Arch::Sparc | Arch::Sparc64 => sparc(section, offset, reloc.kind, fix),
                 Arch::RiscV32 | Arch::RiscV64 => riscv(section, offset, reloc.kind, fix, &mut high),
+                Arch::LoongArch64 => loongarch(section, offset, reloc.kind, fix),
                 // SuperH objects are laid out but not linked: their calls
                 // read as calls to themselves.
                 _ => None,
@@ -616,25 +617,8 @@ fn riscv(
         57 => put(bytes, offset, &fits(relative, 32)?.to_le_bytes()),
         // ADD32, SUB32, ADD64, SUB64: `.eh_frame`'s and the debug
         // sections' differences.
-        35 | 39 => {
-            let old = u32::from_le_bytes(field::<4>(bytes, offset)?);
-            let target = u32::from_le_bytes(low32(target));
-            let new = if kind == 35 {
-                old.wrapping_add(target)
-            } else {
-                old.wrapping_sub(target)
-            };
-            put(bytes, offset, &new.to_le_bytes())
-        }
-        36 | 40 => {
-            let old = u64::from_le_bytes(field::<8>(bytes, offset)?);
-            let new = if kind == 36 {
-                old.wrapping_add(target)
-            } else {
-                old.wrapping_sub(target)
-            };
-            put(bytes, offset, &new.to_le_bytes())
-        }
+        35 | 39 => add_sub(bytes, offset, target, false, kind == 39),
+        36 | 40 => add_sub(bytes, offset, target, true, kind == 40),
         // BRANCH: B-type, 13 bits.
         16 => {
             let imm = fits(relative, 13)?;
@@ -720,6 +704,112 @@ fn riscv(
                 | (imm >> 5 & 1) << 2;
             let field = u16::try_from(field).ok()?;
             put(bytes, offset, &(half & 0xe003 | field).to_le_bytes())
+        }
+        _ => None,
+    }
+}
+
+/// `bytes`' 32-bit (`wide`: 64-bit) field at `offset`, plus or minus
+/// `value`: the `ADD`/`SUB` pairs that write a difference of two labels.
+fn add_sub(bytes: &mut [u8], offset: usize, value: u64, wide: bool, sub: bool) -> Option<()> {
+    if wide {
+        let old = u64::from_le_bytes(field::<8>(bytes, offset)?);
+        let new = if sub {
+            old.wrapping_sub(value)
+        } else {
+            old.wrapping_add(value)
+        };
+        put(bytes, offset, &new.to_le_bytes())
+    } else {
+        let old = u32::from_le_bytes(field::<4>(bytes, offset)?);
+        let value = u32::from_le_bytes(low32(value));
+        let new = if sub {
+            old.wrapping_sub(value)
+        } else {
+            old.wrapping_add(value)
+        };
+        put(bytes, offset, &new.to_le_bytes())
+    }
+}
+
+/// LoongArch: RELA, little-endian. Calls are `bl` (`B26`) or, in the
+/// medium code model, `pcaddu18i; jirl` pairs (`CALL36`); addresses are
+/// `pcalau12i; addi.d` (`PCALA_HI20`, `PCALA_LO12`), whose low part is the
+/// target's own low 12 bits. Branches within a section are relocated too,
+/// as the linker may relax what lies between.
+fn loongarch(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix) -> Option<()> {
+    let target = fix.value.wrapping_add_signed(fix.addend?);
+    let relative = target.wrapping_sub(fix.place).cast_signed();
+    let insn = word_at(bytes, offset, false).unwrap_or(0);
+    // The 20-bit field at bits 5-24, and the 12- and 16-bit ones from bit
+    // 10.
+    let si20 = |insn: u32, value: u32| insn & !(0xf_ffff << 5) | (value & 0xf_ffff) << 5;
+    let i12 = |insn: u32, value: u32| insn & !(0xfff << 10) | (value & 0xfff) << 10;
+    let i16 = |insn: u32, value: u32| insn & !(0xffff << 10) | (value & 0xffff) << 10;
+    let page = |value: u64| value.wrapping_add(0x800) & !0xfff;
+    let low12 = u32::try_from(target & 0xfff).ok()?;
+    match kind {
+        // R_LARCH_32, R_LARCH_64, R_LARCH_32_PCREL, R_LARCH_64_PCREL
+        1 => put(bytes, offset, &low32(target)),
+        2 => put(bytes, offset, &target.to_le_bytes()),
+        99 => put(bytes, offset, &fits(relative, 32)?.to_le_bytes()),
+        109 => put(bytes, offset, &relative.to_le_bytes()),
+        // ADD32, ADD64, SUB32, SUB64
+        50 | 55 => add_sub(bytes, offset, target, false, kind == 55),
+        51 | 56 => add_sub(bytes, offset, target, true, kind == 56),
+        // B16: `beq` and kin; B21: `beqz`, `bnez`; B26: `b`, `bl`.
+        64 => put_word(bytes, offset, i16(insn, fits(relative >> 2, 16)?), false),
+        65 => {
+            let offs = fits(relative >> 2, 21)?;
+            put_word(bytes, offset, i16(insn, offs) & !0x1f | offs >> 16, false)
+        }
+        66 => {
+            let offs = fits(relative >> 2, 26)?;
+            put_word(bytes, offset, i16(insn, offs) & !0x3ff | offs >> 16, false)
+        }
+        // ABS_HI20, ABS_LO12, ABS64_LO20, ABS64_HI12: `lu12i.w; ori;
+        // lu32i.d; lu52i.d`.
+        67 => put_word(
+            bytes,
+            offset,
+            si20(insn, u32::try_from(target >> 12 & 0xf_ffff).ok()?),
+            false,
+        ),
+        68 => put_word(bytes, offset, i12(insn, low12), false),
+        69 => put_word(
+            bytes,
+            offset,
+            si20(insn, u32::try_from(target >> 32 & 0xf_ffff).ok()?),
+            false,
+        ),
+        70 => put_word(
+            bytes,
+            offset,
+            i12(insn, u32::try_from(target >> 52).ok()?),
+            false,
+        ),
+        // PCALA_HI20, PCALA_LO12; GOT_PC_HI20 and GOT_PC_LO12 for imports,
+        // whose slot stands in for the GOT entry.
+        71 | 75 if kind == 71 || fix.undefined => {
+            let pages = page(target).wrapping_sub(fix.place & !0xfff).cast_signed() >> 12;
+            put_word(
+                bytes,
+                offset,
+                si20(insn, u32::try_from(pages & 0xf_ffff).ok()?),
+                false,
+            )
+        }
+        72 | 76 if kind == 72 || fix.undefined => put_word(bytes, offset, i12(insn, low12), false),
+        // PCREL20_S2: `pcaddi`.
+        103 => put_word(bytes, offset, si20(insn, fits(relative >> 2, 20)?), false),
+        // CALL36: `pcaddu18i` and the `jirl` after it.
+        110 => {
+            let high = relative.wrapping_add(0x2_0000) >> 18;
+            let low = relative.wrapping_sub(high << 18) >> 2;
+            let next = offset.checked_add(4)?;
+            let jirl = word_at(bytes, next, false)?;
+            put_word(bytes, offset, si20(insn, fits(high, 20)?), false)?;
+            put_word(bytes, next, i16(jirl, fits(low, 16)?), false)
         }
         _ => None,
     }
@@ -866,6 +956,66 @@ mod tests {
         let mut code = 0xa001_u16.to_le_bytes();
         riscv(&mut code, 0, 45, at(0x800_1000, 0x800_17fe), &mut high);
         assert_eq!(riscv_flows(&code, 0x800_1000), [Flow::Jump(0x800_17fe)]);
+    }
+
+    #[test]
+    fn loongarch_calls_and_addresses() {
+        use crate::decode::{Flow, Note};
+        let at = |place: u64, value: u64| Fix {
+            value,
+            addend: Some(0),
+            place,
+            undefined: false,
+        };
+        let decode = |words: &[u32], addr: u64| {
+            let mut state = crate::loongarch::State::default();
+            words
+                .iter()
+                .enumerate()
+                .map(|(i, w)| {
+                    crate::loongarch::decode(&mut state, &w.to_le_bytes(), addr + 4 * i as u64)
+                })
+                .collect::<Vec<_>>()
+        };
+        let words = |code: &[u8]| -> Vec<u32> {
+            code.chunks_exact(4)
+                .filter_map(|w| w.try_into().ok().map(u32::from_le_bytes))
+                .collect()
+        };
+        // pcaddu18i ra, 0; jirl ra, ra, 0: a call 0x12345678 on, and back.
+        for to in [0x1a34_6678_u64, 0x800_0000] {
+            let mut code: Vec<u8> = [0x1e00_0001_u32, 0x4c00_0021]
+                .iter()
+                .flat_map(|w| w.to_le_bytes())
+                .collect();
+            loongarch(&mut code, 0, 110, at(0x833_3000, to));
+            assert_eq!(decode(&words(&code), 0x833_3000)[1].flow, Flow::Call(to));
+        }
+        // bl 0, forwards; b 0, backwards; bnez a0, 0; bltu a2, a0, 0.
+        for (word, kind, to, flow) in [
+            (0x5400_0000_u32, 66, 0x900_0000, Flow::Call(0x900_0000)),
+            (0x5000_0000, 66, 0x7f0_0000, Flow::Jump(0x7f0_0000)),
+            (0x4400_0080, 65, 0x7f8_0004, Flow::Branch(0x7f8_0004)),
+            (0x6800_00c4, 64, 0x800_1ffc, Flow::Branch(0x800_1ffc)),
+        ] {
+            let mut code = word.to_le_bytes().to_vec();
+            loongarch(&mut code, 0, kind, at(0x800_0000, to));
+            assert_eq!(decode(&words(&code), 0x800_0000)[0].flow, flow);
+        }
+        // pcalau12i a2, 0; addi.d a2, a2, 0: an address on another page.
+        let mut code: Vec<u8> = [0x1a00_0006_u32, 0x02c0_00c6]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        loongarch(&mut code, 0, 71, at(0x800_1000, 0x804_5ab8));
+        loongarch(&mut code, 4, 72, at(0x800_1004, 0x804_5ab8));
+        assert_eq!(
+            decode(&words(&code), 0x800_1000)[1].note,
+            Note::Address {
+                reg: 6,
+                addr: 0x804_5ab8
+            }
+        );
     }
 
     #[test]

@@ -221,6 +221,7 @@ pub(crate) enum Decoder {
         config: crate::riscv::Config,
         state: Box<crate::riscv::State>,
     },
+    LoongArch(Box<crate::loongarch::State>),
 }
 
 impl Decoder {
@@ -280,6 +281,7 @@ impl Decoder {
                 },
                 state: Box::default(),
             },
+            Arch::LoongArch64 => Self::LoongArch(Box::default()),
         }
     }
 
@@ -295,6 +297,7 @@ impl Decoder {
             Self::SuperH(state) => *state = crate::superh::State::default(),
             Self::PowerPc { state, .. } => **state = crate::ppc::State::default(),
             Self::RiscV { state, .. } => **state = crate::riscv::State::default(),
+            Self::LoongArch(state) => **state = crate::loongarch::State::default(),
             _ => {}
         }
     }
@@ -322,6 +325,7 @@ impl Decoder {
                 state,
             } => crate::ppc::decode(state, (*big, *wide, *toc), bytes, addr),
             Self::RiscV { config, state } => crate::riscv::decode(state, *config, bytes, addr),
+            Self::LoongArch(state) => crate::loongarch::decode(state, bytes, addr),
         }
     }
 
@@ -347,7 +351,8 @@ impl Decoder {
             | Self::S390x(_)
             | Self::Sparc { .. }
             | Self::PowerPc { .. }
-            | Self::RiscV { .. } => 8,
+            | Self::RiscV { .. }
+            | Self::LoongArch(_) => 8,
         }
     }
 
@@ -364,7 +369,8 @@ impl Decoder {
             | Self::Arm { .. }
             | Self::Mips { .. }
             | Self::Sparc { .. }
-            | Self::PowerPc { .. } => 4,
+            | Self::PowerPc { .. }
+            | Self::LoongArch(_) => 4,
         }
     }
 
@@ -414,7 +420,10 @@ impl Decoder {
     /// of SuperH's literal-pool loads, which hold data, callees and
     /// callbacks (other sets also note addresses inside the function).
     pub(crate) const fn notes_pointers(&self) -> bool {
-        matches!(self, Self::SuperH(_) | Self::PowerPc { wide: false, .. })
+        matches!(
+            self,
+            Self::SuperH(_) | Self::PowerPc { wide: false, .. } | Self::LoongArch(_)
+        )
     }
 
     /// Whether transfers have delay slots, whose note a call's or jump's
@@ -446,6 +455,7 @@ impl Decoder {
             Self::S390x(_) => crate::s390x::starts_frame(bytes),
             Self::PowerPc { big, .. } => crate::ppc::starts_frame(*big, bytes),
             Self::RiscV { .. } => crate::riscv::starts_frame(bytes),
+            Self::LoongArch(_) => crate::loongarch::starts_frame(bytes),
             _ => false,
         }
     }

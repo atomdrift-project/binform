@@ -613,6 +613,36 @@ fn mips_got_calls() {
     check("calls-mips64el.so", links_calls);
 }
 
+/// LoongArch: a jump table of offsets addressed `pcalau12i; addi.d`, far
+/// calls through `pcaddu18i; jirl`, and stdio callbacks found from the
+/// addresses `stdout`'s `FILE` holds.
+#[test]
+fn loongarch64_pie() {
+    check("la64-pie", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::LoongArch64);
+        assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
+        assert_eq!(outcome.cases(), 20, "pick's cases");
+        // musl's `f->write` tail calls, through a pointer.
+        assert!(outcome.recovery.unresolved <= 2);
+        assert_eq!(outcome.recovery.invalid, 0);
+        assert!(outcome.found(Found::POINTER) >= 4);
+        finds_rizin_before(outcome, 0, &[]);
+    });
+}
+
+/// LoongArch objects built for relaxation: calls are `pcaddu18i; jirl`
+/// pairs, branches are relocated, and a jump table's entries are
+/// PC-relative.
+#[test]
+fn loongarch_objects() {
+    check("calls-loongarch64.o", links_calls);
+    check("la64-switch.o", |outcome| {
+        assert_eq!(outcome.recovery.functions.len(), 4);
+        assert_eq!(outcome.cases(), 20, "pick's cases");
+        assert_eq!(outcome.recovery.unresolved, 0);
+    });
+}
+
 /// RISC-V objects built for relaxation: calls are `auipc; jalr` pairs,
 /// branches are relocated, and a jump table's entries are differences
 /// (`ADD32`/`SUB32`).

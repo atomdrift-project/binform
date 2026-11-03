@@ -39,6 +39,7 @@ mod arm64;
 mod cfg;
 pub mod cil;
 mod decode;
+mod loongarch;
 mod mips;
 mod ppc;
 mod riscv;
@@ -104,6 +105,8 @@ pub enum Arch {
     RiscV32,
     /// 64-bit RISC-V (RV64).
     RiscV64,
+    /// 64-bit LoongArch (LA64).
+    LoongArch64,
 }
 
 impl Arch {
@@ -172,7 +175,8 @@ impl Arch {
             | Self::Sparc64
             | Self::PowerPc64
             | Self::PowerPc64El
-            | Self::RiscV64 => 8,
+            | Self::RiscV64
+            | Self::LoongArch64 => 8,
         }
     }
 }

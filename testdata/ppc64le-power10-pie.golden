@@ -1,4 +1,4 @@
-# funktion: 47 functions, 7156 bytes of code covered, 0 landing pads, 20 cases
+# funktion: 49 functions, 7368 bytes of code covered, 0 landing pads, 20 cases
 # rizin: 40 functions; 39 shared, 20 with the same blocks (20 of 39 without landing pads)
 only rizin 0x10708 fcn.00010708: inside 0x104f0
 0x104c0 size=48 blocks=1 edges=0 cc=1 cases=0 found=ENTRY | SWEEP rizin=1/1
@@ -35,8 +35,10 @@ only rizin 0x10708 fcn.00010708: inside 0x104f0
 0x119a4 size=296 blocks=15 edges=22 cc=9 cases=0 found=CALL | SWEEP rizin=15/9
 0x11ad8 size=204 blocks=8 edges=10 cc=4 cases=0 found=CALL | SWEEP rizin=8/4
 0x11bb0 size=188 blocks=9 edges=13 cc=6 cases=0 found=CALL | SWEEP rizin=9/6
-0x11c78 size=4 blocks=1 edges=0 cc=1 cases=0 found=SWEEP rizin=1/1
-0x11da4 size=404 blocks=12 edges=17 cc=7 cases=0 found=SWEEP rizin=10/4
+0x11c78 size=4 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
+0x11c88 size=60 blocks=3 edges=3 cc=2 cases=0 found=POINTER rizin=-
+0x11d00 size=152 blocks=6 edges=8 cc=4 cases=0 found=POINTER rizin=-
+0x11da4 size=404 blocks=12 edges=17 cc=7 cases=0 found=CALL | SWEEP rizin=10/4
 0x11f80 size=88 blocks=3 edges=2 cc=3 cases=0 found=CALL | SWEEP rizin=3/2
 0x12000 size=104 blocks=4 edges=5 cc=1 cases=0 found=CALL | SWEEP rizin=11/5
 0x12078 size=148 blocks=8 edges=10 cc=6 cases=0 found=CALL | SWEEP | TAIL_CALL rizin=-

@@ -169,7 +169,22 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
     let (mut invalid, mut unresolved) = (0_u64, 0_u64);
     let mut queue: Vec<u64> = work.entries.keys().rev().copied().collect();
     let mut done = HashSet::new();
-    while let Some(entry) = queue.pop() {
+    let mut scanned = false;
+    loop {
+        let Some(entry) = queue.pop() else {
+            // Last, functions reached only through a table of addresses in
+            // data (a stripped static binary's callbacks).
+            if scanned {
+                break;
+            }
+            scanned = true;
+            for pointer in data_pointers(image, &work, &runs) {
+                if let Some(entry) = work.add_entry(pointer, Found::POINTER, limits.functions) {
+                    queue.push(entry);
+                }
+            }
+            continue;
+        };
         // A start another function absorbed is gone from the entries.
         if !work.entries.contains_key(&entry) || !done.insert(entry) {
             continue;
@@ -225,6 +240,72 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
         unresolved,
         truncated: work.truncated,
     }
+}
+
+/// Code addresses data holds where nothing recovered reaches: aligned
+/// words in the segments that are not code, each pointing at code no
+/// function covers that sets up a frame (as only a function's first
+/// instructions do). Not on Arm: a pointer to Thumb code carries bit 0, and
+/// an even word into Thumb code is no function's address.
+fn data_pointers(image: &Image<'_>, work: &Work<'_>, runs: &[(u64, u64)]) -> Vec<u64> {
+    if image.arch == crate::Arch::Arm {
+        return Vec::new();
+    }
+    let mut sorted = runs.to_vec();
+    sorted.sort_unstable();
+    let mut merged: Vec<(u64, u64)> = Vec::new();
+    for (start, end) in sorted {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    let covered = |addr: u64| {
+        let at = merged.partition_point(|&(start, _)| start <= addr);
+        at > 0 && merged.get(at - 1).is_some_and(|&(_, end)| addr < end)
+    };
+    let width = usize::from(image.arch.address_width());
+    let big = image.arch.big_endian();
+    let align = work.decoder.alignment();
+    let mut found = BTreeSet::new();
+    let mut candidate = |value: u64| {
+        if value.is_multiple_of(align)
+            && !work.entries.contains_key(&value)
+            && !found.contains(&value)
+            && work
+                .memory
+                .code(value)
+                .is_some_and(|code| work.decoder.starts_frame(code))
+            && !covered(value)
+        {
+            found.insert(value);
+        }
+    };
+    // Slots the loader fills (RELA's `RELATIVE`, whose slot holds zero).
+    for &(_, value) in &image.rebased {
+        candidate(value);
+    }
+    for segment in image.segments.iter().filter(|segment| !segment.executable) {
+        let start = segment.addr.next_multiple_of(width as u64) - segment.addr;
+        let Some(words) = segment
+            .bytes
+            .get(usize::try_from(start).unwrap_or(usize::MAX)..)
+        else {
+            continue;
+        };
+        for word in words.chunks_exact(width) {
+            let value = match (width, big) {
+                (8, false) => word.try_into().map(u64::from_le_bytes),
+                (8, true) => word.try_into().map(u64::from_be_bytes),
+                (_, false) => word.try_into().map(u32::from_le_bytes).map(u64::from),
+                (_, true) => word.try_into().map(u32::from_be_bytes).map(u64::from),
+            };
+            if let Ok(value) = value {
+                candidate(value);
+            }
+        }
+    }
+    found.into_iter().collect()
 }
 
 /// Bytes in the union of half-open address ranges.
