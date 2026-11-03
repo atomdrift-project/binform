@@ -113,9 +113,21 @@ only. Next:
   corpus file (`m68k/bad-0070230...`) has four bytes of every 32 in
   `.text` overwritten with `00 00 00 02`, and false section headers: it
   covers 46%.
+- **OpenRISC 1000** (ELF, `or1k`, big-endian, delay slots) decodes
+  `l.j`/`l.jal`/`l.bf`/`l.bnf`, `l.jr`/`l.jalr` through register
+  constants (`l.movhi; l.ori`) and loaded slots, `l.trap` and `l.rfe`.
+  Start-up code's `l.jal` to just past its slot (a PC read) or over a
+  word of data is a jump, not a call. Integers built from `r0`
+  (`l.ori rd, r0, n`) are no addresses; ones built like addresses
+  (`l.movhi; l.ori`: 100000 is `0x186a0`) are kept only where no
+  explored function covers them (see Pointers in data). The corpus bots
+  cover 98% with no invalid instructions (`bot-openrisc-static`); the
+  five unresolved jumps in each are tail calls through loaded function
+  pointers. No jump tables seen yet (GCC emitted none in these), and no
+  PLT or object relocations. Rizin 0.8.2 cannot decode OpenRISC.
 - **Not supported at all:** AIX (XCOFF), and these corpus sets: C-SKY,
-  ARC, MicroBlaze, Xtensa, OpenRISC, Nios II, M*Core, BPF, and IA-64,
-  MIPS-FPU and PowerPC PE files.
+  ARC, MicroBlaze, Xtensa, Nios II, M*Core, BPF, and IA-64, MIPS-FPU and
+  PowerPC PE files.
 
 - **From the exotic-binaries survey** (`C:\data\exotic_binaries`, all
   hostile: parse only):
@@ -155,6 +167,13 @@ only. Next:
   `starts_frame` (MIPS, SPARC) gain nothing, and 32-bit Arm is left out:
   a pointer to Thumb code carries bit 0, so an even word into Thumb code
   is no function's address.
+  Addresses code builds (`Note::Address` on sets that note pointers)
+  wait until the queue empties too, and one that falls inside code an
+  explored function covers is dropped unless code jumps there or it sets
+  up a frame: an integer that happens to look like an address
+  (`bot-openrisc-static`; on `bot-ppc-static` this lets one function
+  grow to the 60 blocks rizin finds). SuperH's `starts_frame` accepts a
+  leaf that pushes two registers or more.
 
 - **Calls that never return** are known by name, and, where what follows
   a call fails to decode within two instructions, by a walk of the callee

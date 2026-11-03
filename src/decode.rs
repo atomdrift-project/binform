@@ -223,6 +223,7 @@ pub(crate) enum Decoder {
     },
     LoongArch(Box<crate::loongarch::State>),
     M68k(Box<crate::m68k::State>),
+    OpenRisc(Box<crate::openrisc::State>),
 }
 
 impl Decoder {
@@ -284,6 +285,7 @@ impl Decoder {
             },
             Arch::LoongArch64 => Self::LoongArch(Box::default()),
             Arch::M68k => Self::M68k(Box::default()),
+            Arch::OpenRisc => Self::OpenRisc(Box::default()),
         }
     }
 
@@ -301,6 +303,7 @@ impl Decoder {
             Self::RiscV { state, .. } => **state = crate::riscv::State::default(),
             Self::LoongArch(state) => **state = crate::loongarch::State::default(),
             Self::M68k(state) => **state = crate::m68k::State::default(),
+            Self::OpenRisc(state) => **state = crate::openrisc::State::default(),
             _ => {}
         }
     }
@@ -330,6 +333,7 @@ impl Decoder {
             Self::RiscV { config, state } => crate::riscv::decode(state, *config, bytes, addr),
             Self::LoongArch(state) => crate::loongarch::decode(state, bytes, addr),
             Self::M68k(state) => crate::m68k::decode(state, bytes, addr),
+            Self::OpenRisc(state) => crate::openrisc::decode(state, bytes, addr),
         }
     }
 
@@ -348,7 +352,8 @@ impl Decoder {
             | Self::Sparc { wide: false, .. }
             | Self::PowerPc { wide: false, .. }
             | Self::SuperH(_)
-            | Self::M68k(_) => 4,
+            | Self::M68k(_)
+            | Self::OpenRisc(_) => 4,
             Self::RiscV { config, .. } if !config.wide => 4,
             Self::X86 { .. }
             | Self::Arm64(_)
@@ -376,7 +381,8 @@ impl Decoder {
             | Self::Mips { .. }
             | Self::Sparc { .. }
             | Self::PowerPc { .. }
-            | Self::LoongArch(_) => 4,
+            | Self::LoongArch(_)
+            | Self::OpenRisc(_) => 4,
         }
     }
 
@@ -432,13 +438,17 @@ impl Decoder {
                 | Self::PowerPc { wide: false, .. }
                 | Self::LoongArch(_)
                 | Self::M68k(_)
+                | Self::OpenRisc(_)
         )
     }
 
     /// Whether transfers have delay slots, whose note a call's or jump's
     /// is: it applies before the target.
     pub(crate) const fn delay_slots(&self) -> bool {
-        matches!(self, Self::Sparc { .. } | Self::Mips { .. })
+        matches!(
+            self,
+            Self::Sparc { .. } | Self::Mips { .. } | Self::OpenRisc(_)
+        )
     }
 
     /// The register that carries a call's `n`th argument (from zero) under
@@ -466,6 +476,7 @@ impl Decoder {
             Self::RiscV { .. } => crate::riscv::starts_frame(bytes),
             Self::LoongArch(_) => crate::loongarch::starts_frame(bytes),
             Self::M68k(_) => crate::m68k::starts_frame(bytes),
+            Self::OpenRisc(_) => crate::openrisc::starts_frame(bytes),
             _ => false,
         }
     }

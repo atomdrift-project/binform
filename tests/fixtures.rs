@@ -613,6 +613,27 @@ fn mips_got_calls() {
     check("calls-mips64el.so", links_calls);
 }
 
+/// OpenRISC: delay slots everywhere, `l.jal` that only reads the PC, and
+/// integers built like addresses that fall inside code.
+#[test]
+fn openrisc_static() {
+    check("bot-openrisc-static", |outcome| {
+        assert_eq!(outcome.image.arch, funktion::Arch::OpenRisc);
+        assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
+        // Tail calls through function pointers loaded from memory.
+        assert!(outcome.recovery.unresolved <= 5);
+        assert_eq!(outcome.recovery.invalid, 0);
+        let entries = outcome.entries();
+        // `_start`, whole: `l.jal 1f; ...; 1:` is no call.
+        assert!(entries.contains_key(&0x2590), "_start missed");
+        assert!(!entries.contains_key(&0x25b8), "_start split");
+        // 100000 and 0x12000, built with `l.movhi; l.ori` mid-function.
+        for constant in [0x186a0, 0x12000] {
+            assert!(!entries.contains_key(&constant), "{constant:#x} taken");
+        }
+    });
+}
+
 /// The 68020: variable-length instructions with 32-bit branches that rizin
 /// does not decode, `main` and the bot's routines reached only through the
 /// addresses pushed to calls, and jump tables bounded in memory.

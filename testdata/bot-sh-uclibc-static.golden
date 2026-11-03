@@ -85,7 +85,7 @@ only rizin 0x40b288 fcn.0040b288: not code
 0x404ccc size=40 blocks=1 edges=1 cc=0 cases=0 found=SWEEP rizin=1/0
 0x404cec size=8 blocks=1 edges=1 cc=0 cases=0 found=SWEEP rizin=1/0
 0x404cf4 size=216 blocks=9 edges=11 cc=6 cases=0 found=SWEEP rizin=10/6
-0x404e0c size=20 blocks=1 edges=1 cc=0 cases=0 found=SWEEP rizin=1/0
+0x404e0c size=24 blocks=1 edges=1 cc=0 cases=0 found=SWEEP rizin=1/0
 0x404e20 size=4 blocks=1 edges=1 cc=0 cases=0 found=POINTER rizin=-
 0x404e24 size=1998 blocks=89 edges=127 cc=40 cases=0 found=SWEEP rizin=7/2
 0x404ec0 size=1842 blocks=83 edges=119 cc=38 cases=0 found=SWEEP rizin=13/6

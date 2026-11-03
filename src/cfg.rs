@@ -170,8 +170,31 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
     let mut queue: Vec<u64> = work.entries.keys().rev().copied().collect();
     let mut done = HashSet::new();
     let mut scanned = false;
+    // Addresses code builds, kept for when everything called is explored.
+    let mut noted = BTreeSet::new();
+    // Where explored code jumps or branches to: block starts.
+    let mut targets = HashSet::new();
     loop {
         let Some(entry) = queue.pop() else {
+            // An address code builds may be an integer that happens to fall
+            // in code: one inside a function explored is no function's
+            // start, unless code jumps there or it sets up a frame.
+            if !noted.is_empty() {
+                let merged = merge(&runs);
+                for pointer in std::mem::take(&mut noted) {
+                    let frame = work
+                        .memory
+                        .code(pointer)
+                        .is_some_and(|code| work.decoder.starts_frame(code));
+                    if (frame || targets.contains(&pointer) || !inside(&merged, pointer))
+                        && let Some(entry) =
+                            work.add_entry(pointer, Found::POINTER, limits.functions)
+                    {
+                        queue.push(entry);
+                    }
+                }
+                continue;
+            }
             // Last, functions reached only through a table of addresses in
             // data (a stripped static binary's callbacks).
             if scanned {
@@ -209,11 +232,21 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
             }
         }
         for pointer in explored.pointers {
-            if let Some(entry) = work.add_entry(pointer, Found::POINTER, limits.functions) {
-                queue.push(entry);
+            if work.entries.contains_key(&pointer) {
+                work.add_entry(pointer, Found::POINTER, limits.functions);
+            } else {
+                noted.insert(pointer);
             }
         }
         runs.extend(explored.runs);
+        targets.extend(
+            explored
+                .function
+                .refs
+                .iter()
+                .filter(|r| r.kind != crate::RefKind::Call)
+                .map(|r| r.to),
+        );
         invalid = invalid.saturating_add(explored.invalid);
         unresolved = unresolved.saturating_add(explored.unresolved);
         functions.push(explored.function);
@@ -251,19 +284,7 @@ fn data_pointers(image: &Image<'_>, work: &Work<'_>, runs: &[(u64, u64)]) -> Vec
     if image.arch == crate::Arch::Arm {
         return Vec::new();
     }
-    let mut sorted = runs.to_vec();
-    sorted.sort_unstable();
-    let mut merged: Vec<(u64, u64)> = Vec::new();
-    for (start, end) in sorted {
-        match merged.last_mut() {
-            Some(last) if start <= last.1 => last.1 = last.1.max(end),
-            _ => merged.push((start, end)),
-        }
-    }
-    let covered = |addr: u64| {
-        let at = merged.partition_point(|&(start, _)| start <= addr);
-        at > 0 && merged.get(at - 1).is_some_and(|&(_, end)| addr < end)
-    };
+    let merged = merge(runs);
     let width = usize::from(image.arch.address_width());
     let big = image.arch.big_endian();
     let align = work.decoder.alignment();
@@ -276,7 +297,7 @@ fn data_pointers(image: &Image<'_>, work: &Work<'_>, runs: &[(u64, u64)]) -> Vec
                 .memory
                 .code(value)
                 .is_some_and(|code| work.decoder.starts_frame(code))
-            && !covered(value)
+            && !inside(&merged, value)
         {
             found.insert(value);
         }
@@ -306,6 +327,26 @@ fn data_pointers(image: &Image<'_>, work: &Work<'_>, runs: &[(u64, u64)]) -> Vec
         }
     }
     found.into_iter().collect()
+}
+
+/// Half-open address ranges, sorted and with overlaps joined.
+fn merge(runs: &[(u64, u64)]) -> Vec<(u64, u64)> {
+    let mut sorted = runs.to_vec();
+    sorted.sort_unstable();
+    let mut merged: Vec<(u64, u64)> = Vec::new();
+    for (start, end) in sorted {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
+}
+
+/// Whether `merge`'s ranges hold `addr`.
+fn inside(merged: &[(u64, u64)], addr: u64) -> bool {
+    let at = merged.partition_point(|&(start, _)| start <= addr);
+    at > 0 && merged.get(at - 1).is_some_and(|&(_, end)| addr < end)
 }
 
 /// Bytes in the union of half-open address ranges.
@@ -750,7 +791,7 @@ impl Work<'_> {
                         };
                     if let Note::Address { addr: to, .. } = insn.note
                         && self.decoder.notes_pointers()
-                        && to & 1 == 0
+                        && to.is_multiple_of(self.decoder.alignment())
                         && to != entry
                         && self.memory.is_code(to)
                     {

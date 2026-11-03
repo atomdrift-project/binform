@@ -197,17 +197,20 @@ fn track(state: &mut State, word: u16, bytes: &[u8], addr: u64) -> Note {
 /// @-r15`), the return address (`sts.l pr, @-r15`) or the frame pointer
 /// (`mov.l r14, @-r15`) among them, before anything else.
 pub(crate) fn starts_frame(bytes: &[u8]) -> bool {
+    let mut saved = 0;
     for at in (0..16).step_by(2) {
         match bytes.get(at..).and_then(half) {
             // STS.L PR, @-R15; MOV.L R14, @-R15
             Some(0x4f22 | 0x2fe6) => return true,
-            // Other saved registers; ADD #-n, R15
-            Some(word)
-                if word & 0xff0f == 0x2f06 || (word & 0xff00 == 0x7f00 && word & 0x80 != 0) => {}
-            _ => return false,
+            // Other saved registers
+            Some(word) if word & 0xff0f == 0x2f06 => saved += 1,
+            // ADD #-n, R15
+            Some(word) if word & 0xff00 == 0x7f00 && word & 0x80 != 0 => {}
+            // A leaf saves two registers or more before anything else.
+            _ => return saved >= 2,
         }
     }
-    false
+    saved >= 2
 }
 
 fn half(bytes: &[u8]) -> Option<u16> {

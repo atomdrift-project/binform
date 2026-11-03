@@ -42,6 +42,7 @@ mod decode;
 mod loongarch;
 mod m68k;
 mod mips;
+mod openrisc;
 mod ppc;
 mod riscv;
 mod s390x;
@@ -110,6 +111,8 @@ pub enum Arch {
     LoongArch64,
     /// The Motorola 68000 family (68020 and later in practice).
     M68k,
+    /// OpenRISC 1000 (or1k), 32-bit, big-endian.
+    OpenRisc,
 }
 
 impl Arch {
@@ -129,6 +132,7 @@ impl Arch {
                 | Self::PowerPc
                 | Self::PowerPc64
                 | Self::M68k
+                | Self::OpenRisc
         )
     }
 
@@ -169,7 +173,8 @@ impl Arch {
             | Self::SuperH
             | Self::PowerPc
             | Self::RiscV32
-            | Self::M68k => 4,
+            | Self::M68k
+            | Self::OpenRisc => 4,
             Self::X86_64
             | Self::Arm64
             | Self::Mips64
