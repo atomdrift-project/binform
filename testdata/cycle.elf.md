@@ -8,5 +8,5 @@ An x86-64 ELF relocatable object: the same layout question, on x86-64.
 - Size: 2624 bytes (759 compressed)
 - License: BSD-3-Clause (the Go license)
 
-`cycle.elf.rizin.json.zst` holds what rizin 0.8.2 found (`funktion-ab --save`);
-`cycle.elf.golden` holds what funktion finds (`FUNKTION_BLESS=1 cargo test --test fixtures`).
+`cycle.elf.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
+`cycle.elf.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).

@@ -7,7 +7,7 @@
 //! lg %r2, 0(%r2,%r4); b 0(%r2,%r4)`); every other instruction is taken to
 //! write every register.
 
-use crate::decode::{Extend, Flow, Insn, Mem, Note};
+use crate::isa::{Extend, Flow, Insn, Mem, Note};
 
 /// What earlier instructions left that a later one needs.
 #[derive(Clone, Copy, Debug, Default)]

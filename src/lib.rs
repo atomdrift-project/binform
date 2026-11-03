@@ -1,18 +1,20 @@
-//! Recover functions from machine code: where each one starts and ends, its
-//! basic blocks, its cyclomatic complexity, and the calls and jumps it makes.
+//! binform answers, in-process, the questions filefacts and stng used to send
+//! to rizin: where a binary's functions are, their basic blocks, complexity
+//! and calls, and its imports. It does what rizin does for those two tools,
+//! and nothing rizin does not.
 //!
-//! The input is an [`Image`]: the mapped bytes of a binary, the addresses
-//! already known to start functions (entry points, symbols, exports, unwind
-//! tables), and the import slots calls go through. [`object::image`] builds
-//! one from ELF, PE and Mach-O bytes; callers with their own parser can fill
-//! one in directly.
+//! [`parse`] reads ELF, PE and Mach-O bytes into a [`Binary`]; [`functions`](fn@functions)
+//! recovers its functions. Each is a pure function of its input: no I/O, no
+//! threads, no global state, no panics, and work bounded by [`Limits`],
+//! because the input is assumed hostile. A caller pays only for what it
+//! calls.
 //!
 //! ```no_run
-//! # fn main() -> Result<(), funktion::object::Error> {
+//! # fn main() -> Result<(), binform::Error> {
 //! let bytes = std::fs::read("a.out").unwrap_or_default();
-//! let image = funktion::object::image(&bytes)?;
-//! for function in funktion::recover(&image).functions {
-//!     println!("{:#x} {} blocks, complexity {}", function.entry, function.blocks, function.complexity);
+//! let bin = binform::parse(&bytes)?;
+//! for f in binform::functions(&bin, &binform::Limits::DEFAULT).functions {
+//!     println!("{:#x} {} blocks, complexity {}", f.entry, f.blocks, f.complexity);
 //! }
 //! # Ok(())
 //! # }
@@ -29,38 +31,21 @@
 //! traps and calls that never return, and are split where a branch lands
 //! inside them. Complexity is McCabe's `E - N + 2P` over that graph, with `P`
 //! the blocks that leave it (returns, traps, indirect jumps).
-//!
-//! Recovery is a pure function of its input. It reads nothing but the image,
-//! never panics, and bounds its work by [`Limits`], so hostile input costs at
-//! most the configured budget.
 
-mod arc;
-mod arm;
-mod arm64;
-mod cfg;
-pub mod cil;
-mod csky;
-mod decode;
-mod loongarch;
-mod m68k;
-mod microblaze;
-mod mips;
-mod openrisc;
-mod ppc;
-mod riscv;
-mod s390x;
-mod sparc;
-mod superh;
-mod xtensa;
+#[doc(hidden)]
+pub mod diagnostics;
+mod functions;
+mod isa;
+mod layout;
+#[cfg(test)]
+mod tests;
+
 use std::borrow::Cow;
 use std::ops::Range;
 
-#[cfg(feature = "object")]
-pub mod object;
-mod table;
-mod x86;
+pub use layout::{Error, parse};
 
-/// An instruction set funktion decodes.
+/// An instruction set binform decodes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Arch {
@@ -216,21 +201,20 @@ impl Arch {
 
 /// Bytes mapped at a virtual address.
 #[derive(Clone, Debug)]
-pub struct Segment<'a> {
+pub(crate) struct Segment<'a> {
     /// Virtual address of the first byte.
-    pub addr: u64,
+    pub(crate) addr: u64,
     /// The mapped bytes: borrowed from the file, or owned when a loader
     /// would have changed them (an object file's relocations applied).
-    pub bytes: Cow<'a, [u8]>,
+    pub(crate) bytes: Cow<'a, [u8]>,
     /// Whether the bytes are code. Only code is decoded; other segments are
     /// read for jump tables.
-    pub executable: bool,
+    pub(crate) executable: bool,
 }
 
 /// Why an address is believed to start a function.
 #[derive(Clone, Debug, PartialEq, Eq)]
-#[non_exhaustive]
-pub enum Origin {
+pub(crate) enum Origin {
     /// The program entry point.
     Entry,
     /// The `n`th initializer the loader runs (ELF `DT_INIT` and init arrays).
@@ -261,66 +245,67 @@ pub enum Origin {
 /// Code inside a function that no instruction branches to: a landing pad
 /// the unwinder enters to run a destructor or a `catch`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Handler {
+pub(crate) struct Handler {
     /// The start of the function the handler belongs to.
-    pub function: u64,
+    pub(crate) function: u64,
     /// The handler's first instruction.
-    pub addr: u64,
+    pub(crate) addr: u64,
 }
 
 /// An address believed to start a function, and why.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Seed {
+pub(crate) struct Seed {
     /// The function's first instruction.
-    pub addr: u64,
+    pub(crate) addr: u64,
     /// Where the address came from.
-    pub origin: Origin,
+    pub(crate) origin: Origin,
 }
 
 /// A pointer slot the loader fills with an imported function's address: a PE
 /// import-address-table entry, an ELF GOT entry, a Mach-O symbol pointer.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Import {
+pub(crate) struct Import {
     /// Address of the slot.
-    pub slot: u64,
+    pub(crate) slot: u64,
     /// The imported symbol's name, as the binary spells it.
-    pub name: String,
+    pub(crate) name: String,
 }
 
-/// A binary to recover functions from.
+/// A parsed binary: what [`parse`] read from its headers, and what
+/// [`functions`](fn@functions) needs to recover its functions.
 #[derive(Clone, Debug)]
-pub struct Image<'a> {
+pub struct Binary<'a> {
     /// The instruction set of the code segments.
     pub arch: Arch,
     /// Every mapped segment, code and data.
-    pub segments: Vec<Segment<'a>>,
+    pub(crate) segments: Vec<Segment<'a>>,
     /// Addresses known to start functions. Duplicates are harmless.
-    pub seeds: Vec<Seed>,
+    pub(crate) seeds: Vec<Seed>,
     /// Import slots. Calls through them, and through stubs that only jump
     /// through them, are resolved to the import; calls to imports that never
     /// return end their basic block.
-    pub imports: Vec<Import>,
+    pub(crate) imports: Vec<Import>,
     /// Landing pads, explored as part of the functions they belong to.
-    pub handlers: Vec<Handler>,
+    pub(crate) handlers: Vec<Handler>,
     /// The code each function spans, by unwind tables that say so (ELF and
     /// Mach-O `.eh_frame`, x86-64 PE `.pdata`), each range starting at its
     /// function's entry. Code inside a range that no path reaches is
-    /// explored too, after an indirect jump funktion cannot follow: the
+    /// explored too, after an indirect jump binform cannot follow: the
     /// cases of a jump table without a bound.
-    pub extents: Vec<Range<u64>>,
+    pub(crate) extents: Vec<Range<u64>>,
     /// The value 32-bit x86 position-independent PLT stubs address the GOT
     /// through (`jmp [ebx + disp]`), when the binary has one; on MIPS, the
     /// address `_gp` stands for, which GOT loads are offsets from; on 64-bit
     /// PowerPC, the TOC pointer `r2` holds (`.TOC.`).
-    pub got: Option<u64>,
+    pub(crate) got: Option<u64>,
     /// Slots the loader fills with an address of this binary, and the
     /// address: ELF `RELATIVE` relocations of a position-independent
     /// executable, whose slots hold zero in the file (a GOT slot that holds
     /// a jump table's address, in 32-bit PowerPC PIC code).
-    pub rebased: Vec<(u64, u64)>,
+    pub(crate) rebased: Vec<(u64, u64)>,
 }
 
-impl Image<'_> {
+impl Binary<'_> {
     /// The name of the import whose slot is at `slot`: what a [`Ref`] that
     /// goes through a slot (a [`Ref::to`] that is no function's entry)
     /// calls.
@@ -333,7 +318,7 @@ impl Image<'_> {
     }
 }
 
-/// Bounds on the work [`recover_with`] does.
+/// Bounds on the work [`functions`](fn@functions) does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Most functions recovered.
@@ -346,19 +331,22 @@ pub struct Limits {
 
 impl Default for Limits {
     fn default() -> Self {
-        Self {
-            functions: 1 << 20,
-            instructions: 1 << 27,
-            table_entries: 512,
-        }
+        Self::DEFAULT
     }
 }
 
 impl Limits {
+    /// Bounds no real binary reaches: a hostile one stops at them.
+    pub const DEFAULT: Self = Self {
+        functions: 1 << 20,
+        instructions: 1 << 27,
+        table_entries: 512,
+    };
+
     /// Bounds for a caller that scans many files and wants each answer
     /// quickly: a 64th of the default instruction budget (two million,
     /// tens of milliseconds on most binaries), at the cost of
-    /// [`Recovery::truncated`] on the largest.
+    /// [`Functions::truncated`] on the largest.
     pub const QUICK: Self = Self {
         functions: 1 << 18,
         instructions: 1 << 21,
@@ -367,66 +355,59 @@ impl Limits {
 }
 
 /// A recovered function.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Function {
     /// Address of the first instruction.
     pub entry: u64,
+    /// What the binary calls it: a symbol, else an export, else (for a stub
+    /// that only jumps to an import) the import.
+    pub name: Option<String>,
     /// Bytes from the lowest block start to the highest block end. Blocks
     /// need not be contiguous, so this can exceed the bytes they cover.
     pub size: u64,
     /// Basic blocks.
     pub blocks: u32,
-    /// Control-flow edges between blocks, including edges that leave the
-    /// function (tail calls) and one per jump-table entry.
-    pub edges: u32,
-    /// McCabe complexity, `edges - blocks + 2 * exits`.
+    /// McCabe complexity, `edges - blocks + 2 * exits`, where an exit is a
+    /// block that leaves the function (a return, a trap, an indirect jump).
     pub complexity: u32,
     /// Calls and jumps the function makes, in address order.
     pub refs: Vec<Ref>,
-    /// The import slot this function only jumps through: a PLT entry, a
-    /// Mach-O stub, an import thunk.
-    pub thunk: Option<u64>,
-    /// Every way its entry was found.
-    pub found: Found,
-    /// What the binary calls it: a symbol, else an export, else (for a
-    /// thunk) the import it jumps to.
-    pub name: Option<String>,
 }
 
 /// A set of ways a function's entry was found. Several often agree; a
 /// function found one way only is where tools tend to differ.
 #[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub struct Found(u16);
+pub(crate) struct Found(u16);
 
 impl Found {
     /// The program entry point.
-    pub const ENTRY: Self = Self(1);
+    pub(crate) const ENTRY: Self = Self(1);
     /// An initializer, finalizer or TLS callback the loader runs.
-    pub const LOADER: Self = Self(1 << 1);
+    pub(crate) const LOADER: Self = Self(1 << 1);
     /// A symbol-table entry.
-    pub const SYMBOL: Self = Self(1 << 2);
+    pub(crate) const SYMBOL: Self = Self(1 << 2);
     /// An export.
-    pub const EXPORT: Self = Self(1 << 3);
+    pub(crate) const EXPORT: Self = Self(1 << 3);
     /// An unwind-table range (ELF `.eh_frame`, PE `.pdata`).
-    pub const UNWIND: Self = Self(1 << 4);
+    pub(crate) const UNWIND: Self = Self(1 << 4);
     /// Mach-O `LC_FUNCTION_STARTS`.
-    pub const FUNCTION_STARTS: Self = Self(1 << 5);
+    pub(crate) const FUNCTION_STARTS: Self = Self(1 << 5);
     /// A direct call from a recovered function.
-    pub const CALL: Self = Self(1 << 6);
+    pub(crate) const CALL: Self = Self(1 << 6);
     /// A direct call that a linear sweep of the code decoded. Without
     /// [`Found::CALL`], no recovered function makes the call, and the bytes
     /// may not be code at all.
-    pub const SWEEP: Self = Self(1 << 7);
+    pub(crate) const SWEEP: Self = Self(1 << 7);
     /// A direct jump to code that sets up a stack frame, as only a
     /// function's first instructions do: a tail call.
-    pub const TAIL_CALL: Self = Self(1 << 8);
+    pub(crate) const TAIL_CALL: Self = Self(1 << 8);
     /// A stub that jumps to an import (an ELF PLT entry, a Mach-O stub).
-    pub const STUB: Self = Self(1 << 9);
+    pub(crate) const STUB: Self = Self(1 << 9);
     /// The program's `main`: the first argument the entry point passes to
     /// the C runtime's start routine.
-    pub const MAIN: Self = Self(1 << 10);
+    pub(crate) const MAIN: Self = Self(1 << 10);
     /// A code address held in a table of addresses (a MIPS GOT entry).
-    pub const POINTER: Self = Self(1 << 11);
+    pub(crate) const POINTER: Self = Self(1 << 11);
 
     const NAMES: [(Self, &'static str); 12] = [
         (Self::ENTRY, "ENTRY"),
@@ -445,18 +426,12 @@ impl Found {
 
     /// Whether every way in `other` is in `self`.
     #[must_use]
-    pub const fn contains(self, other: Self) -> bool {
+    pub(crate) const fn contains(self, other: Self) -> bool {
         self.0 & other.0 == other.0
     }
 
-    /// Whether the set is empty.
-    #[must_use]
-    pub const fn is_empty(self) -> bool {
-        self.0 == 0
-    }
-
     /// The names of the ways in the set, as the constants spell them.
-    pub fn names(self) -> impl Iterator<Item = &'static str> {
+    pub(crate) fn names(self) -> impl Iterator<Item = &'static str> {
         Self::NAMES
             .into_iter()
             .filter(move |&(way, _)| self.contains(way))
@@ -530,16 +505,16 @@ pub enum RefKind {
     Case,
 }
 
-/// The result of [`recover`], with the facts that say how far to trust it.
-/// A caller that falls back to another tool decides when from these: code
-/// that recovery mostly does not cover (packed or encrypted code), paths
-/// that run into bytes that do not decode (data, or the wrong instruction
-/// set), and jumps whose targets are unknown.
+/// The functions [`functions`](fn@functions) recovered, with the facts that say how far
+/// to trust them: code they mostly do not cover (packed or encrypted code),
+/// paths that run into bytes that do not decode (data, or the wrong
+/// instruction set), jumps whose targets are unknown, and whether a
+/// [`Limits`] bound cut the work short.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Recovery {
+pub struct Functions {
     /// Functions in entry-address order.
     pub functions: Vec<Function>,
-    /// Bytes of executable code in the image.
+    /// Bytes of executable code in the binary.
     pub code: u64,
     /// Bytes of executable code that lie in some function's instructions.
     pub covered: u64,
@@ -551,7 +526,7 @@ pub struct Recovery {
     pub truncated: bool,
 }
 
-impl Recovery {
+impl Functions {
     /// The function whose entry is `addr`: what a [`Ref`] to a function
     /// calls.
     #[must_use]
@@ -565,21 +540,15 @@ impl Recovery {
     /// The name of what `to` (a [`Ref::to`]) reaches: a named function, or
     /// the import whose slot it is.
     #[must_use]
-    pub fn target_name<'a>(&'a self, image: &'a Image<'_>, to: u64) -> Option<&'a str> {
+    pub fn name<'a>(&'a self, bin: &'a Binary<'_>, to: u64) -> Option<&'a str> {
         self.function(to)
             .and_then(|function| function.name.as_deref())
-            .or_else(|| image.import(to))
+            .or_else(|| bin.import(to))
     }
 }
 
-/// Recover the functions of `image` under the default [`Limits`].
+/// Recover the functions of `bin`, doing no more work than `limits` allow.
 #[must_use]
-pub fn recover(image: &Image<'_>) -> Recovery {
-    recover_with(image, &Limits::default())
-}
-
-/// Recover the functions of `image`, doing no more work than `limits` allow.
-#[must_use]
-pub fn recover_with(image: &Image<'_>, limits: &Limits) -> Recovery {
-    cfg::recover(image, limits)
+pub fn functions(bin: &Binary<'_>, limits: &Limits) -> Functions {
+    functions::recover(bin, limits).0
 }

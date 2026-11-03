@@ -5,7 +5,7 @@ A stripped, statically linked position-independent 64-bit RISC-V executable (mus
 - Source: `switch.c` below (the same as `ppc-pie`'s), built by `zig cc` 0.16.0 (from the `ziglang` PyPI package): `zig cc -target riscv64-linux-musl -O2 -fno-inline -fPIE -static-pie -s switch.c -o rv64-pie`
 - SHA-256: `c3420a319fb2079b90e75d00ae974d2c9f7ab11a882240033f2c5cdd5aa3e7c2`
 - Size: 8464 bytes (4502 compressed)
-- License: public domain (written for funktion); musl is MIT-licensed
+- License: public domain (written for binform); musl is MIT-licensed
 
 ```c
 extern int puts(const char *);
@@ -45,5 +45,5 @@ int main(int argc, char **argv) {
 }
 ```
 
-`rv64-pie.rizin.json.zst` holds what rizin 0.8.2 found (`funktion-ab --save`);
-`rv64-pie.golden` holds what funktion finds (`FUNKTION_BLESS=1 cargo test --test fixtures`).
+`rv64-pie.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
+`rv64-pie.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).

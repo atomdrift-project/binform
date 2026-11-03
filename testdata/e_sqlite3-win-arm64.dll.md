@@ -8,5 +8,5 @@ MSVC A64: `.pdata` holds entries for function fragments (unwind codes beginning 
 - Size: 1827808 bytes (784943 compressed)
 - License: Apache-2.0 (SQLitePCLRaw); SQLite itself is public domain
 
-`e_sqlite3-win-arm64.dll.rizin.json.zst` holds what rizin 0.8.2 found (`funktion-ab --save`);
-`e_sqlite3-win-arm64.dll.golden` holds what funktion finds (`FUNKTION_BLESS=1 cargo test --test fixtures`).
+`e_sqlite3-win-arm64.dll.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
+`e_sqlite3-win-arm64.dll.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).

@@ -9,5 +9,5 @@ Its `.pdata` marks every function 32-bit, so the code is Arm, though rizin decod
 - Size: 219648 bytes (79165 compressed)
 - **Malware:** this file is hostile. It is kept compressed and only ever parsed; never run it.
 
-`bot-wince-thumb.rizin.json.zst` holds what rizin 0.8.2 found (`funktion-ab --save`);
-`bot-wince-thumb.golden` holds what funktion finds (`FUNKTION_BLESS=1 cargo test --test fixtures`).
+`bot-wince-thumb.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
+`bot-wince-thumb.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).

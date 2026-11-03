@@ -1,6 +1,6 @@
 //! x86 and x86-64, through `iced-x86`.
 
-use crate::decode::{Extend, Flow, Insn, Mem, Note};
+use crate::isa::{Extend, Flow, Insn, Mem, Note};
 use iced_x86::{
     Code, Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind, Register,
 };

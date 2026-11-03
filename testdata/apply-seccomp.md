@@ -8,5 +8,5 @@ A static x86-64 glibc executable: landing pads from `.gcc_except_table` (in its 
 - Size: 831952 bytes (303900 compressed)
 - License: MIT (VSCodium); the binary statically links glibc (LGPL-2.1) and libgcc
 
-`apply-seccomp.rizin.json.zst` holds what rizin 0.8.2 found (`funktion-ab --save`);
-`apply-seccomp.golden` holds what funktion finds (`FUNKTION_BLESS=1 cargo test --test fixtures`).
+`apply-seccomp.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
+`apply-seccomp.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).

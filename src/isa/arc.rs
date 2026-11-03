@@ -21,7 +21,7 @@
 //! `ldb_s`); ARCv2 adds `bi [c]` and `bih [c]`, which jump into a run of
 //! branch instructions.
 
-use crate::decode::{Extend, Flow, Insn, Mem, Note};
+use crate::isa::{Extend, Flow, Insn, Mem, Note};
 
 /// What earlier instructions left that a later one needs.
 #[derive(Clone, Copy, Debug, Default)]

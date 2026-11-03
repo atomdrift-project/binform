@@ -1,5 +1,5 @@
 [package]
-name = "funktion"
+name = "binform"
 version = "0.1.0"
 edition = "2024"
 # Build on any rustc within ~2 releases of current stable; edition 2024 implies
@@ -9,7 +9,7 @@ authors = ["The Atomdrift Project"]
 description = "Function boundaries, basic blocks, complexity and call edges recovered from machine code"
 license = "Apache-2.0"
 readme = "README.md"
-repository = "https://github.com/atomdrift-project/funktion"
+repository = "https://github.com/atomdrift-project/binform"
 keywords = ["binary", "disassembly", "cfg", "reverse-engineering", "malware"]
 categories = ["development-tools", "parser-implementations"]
 exclude = ["testdata/", "tools/"]
@@ -17,14 +17,9 @@ exclude = ["testdata/", "tools/"]
 [workspace]
 members = [".", "tools"]
 
-[features]
-default = ["object"]
-# Build an `Image` from ELF, PE and Mach-O bytes.
-object = ["dep:gimli"]
-
 [dependencies]
 iced-x86 = { version = "1.22", default-features = false, features = ["decoder", "std", "instr_info"] }
-gimli = { version = "0.32", optional = true, default-features = false, features = ["read", "std"] }
+gimli = { version = "0.32", default-features = false, features = ["read", "std"] }
 
 [dev-dependencies]
 zstd = "0.13"

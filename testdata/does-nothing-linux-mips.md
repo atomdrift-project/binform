@@ -7,5 +7,5 @@ Go on big-endian 32-bit MIPS: the function table is read in the file's byte orde
 - Size: 2425025 bytes (726167 compressed)
 - License: Apache-2.0 (traits-dev, klog, logr); the Go runtime is BSD-3-Clause
 
-`does-nothing-linux-mips.rizin.json.zst` holds what rizin 0.8.2 found (`funktion-ab --save`);
-`does-nothing-linux-mips.golden` holds what funktion finds (`FUNKTION_BLESS=1 cargo test --test fixtures`).
+`does-nothing-linux-mips.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
+`does-nothing-linux-mips.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).

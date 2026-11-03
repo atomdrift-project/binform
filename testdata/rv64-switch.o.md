@@ -5,7 +5,7 @@ An ELF relocatable object: 64-bit RISC-V, position-independent, built for linker
 - Source: `switch.c` below (the same as `ppc-pie`'s), built by `zig cc` 0.16.0 (from the `ziglang` PyPI package): `zig cc -target riscv64-linux-musl -O2 -fno-inline -fPIC -mrelax -c switch.c -o rv64-switch.o`
 - SHA-256: `dac2975113ce3617e278b562919197a7cd4a7c7f7d513b1399d9a739f3e6c7a6`
 - Size: 17128 bytes (3259 compressed)
-- License: public domain (written for funktion)
+- License: public domain (written for binform)
 
 ```c
 extern int puts(const char *);
@@ -45,5 +45,5 @@ int main(int argc, char **argv) {
 }
 ```
 
-`rv64-switch.o.rizin.json.zst` holds what rizin 0.8.2 found (`funktion-ab --save`);
-`rv64-switch.o.golden` holds what funktion finds (`FUNKTION_BLESS=1 cargo test --test fixtures`).
+`rv64-switch.o.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
+`rv64-switch.o.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).

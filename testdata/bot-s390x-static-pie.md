@@ -9,5 +9,5 @@ Only `.init`, `.fini`, the entry point and the dynamic symbols name code. The li
 - Size: 502120 bytes (423228 compressed)
 - **Malware:** this file is hostile. It is kept compressed and only ever parsed; never run it.
 
-`bot-s390x-static-pie.rizin.json.zst` holds what rizin 0.8.2 found (`funktion-ab --save`);
-`bot-s390x-static-pie.golden` holds what funktion finds (`FUNKTION_BLESS=1 cargo test --test fixtures`).
+`bot-s390x-static-pie.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
+`bot-s390x-static-pie.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).

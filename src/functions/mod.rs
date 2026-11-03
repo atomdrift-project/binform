@@ -1,10 +1,12 @@
 //! Function discovery and control-flow graphs.
 
+pub(crate) mod table;
+
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
-use crate::decode::{Decoder, Flow, Insn, Memory, Note};
-use crate::table::Tracker;
-use crate::{Found, Function, Image, Limits, Origin, Recovery, Ref, RefKind};
+use crate::functions::table::Tracker;
+use crate::isa::{Decoder, Flow, Insn, Memory, Note};
+use crate::{Binary, Found, Function, Functions, Limits, Origin, Ref, RefKind};
 
 /// Functions that never return, by name. Rizin's list, so a call to one ends
 /// its basic block in both tools.
@@ -106,7 +108,23 @@ fn main_argument(name: &str) -> Option<usize> {
     })
 }
 
-pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
+/// What recovery knows about a function beyond what consumers read: kept
+/// for the golden fixtures and the comparison tools.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(crate) struct Detail {
+    /// Control-flow edges between blocks, including edges that leave the
+    /// function (tail calls) and one per jump-table entry.
+    pub(crate) edges: u32,
+    /// The import slot the function only jumps through: a PLT entry, a
+    /// Mach-O stub, an import thunk.
+    pub(crate) thunk: Option<u64>,
+    /// Every way its entry was found.
+    pub(crate) found: Found,
+}
+
+/// Recover the functions of `image`, and each one's [`Detail`], in the same
+/// (entry) order.
+pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Functions, Vec<Detail>) {
     let mut work = Work {
         memory: Memory::for_arch(&image.segments, image.arch),
         decoder: Decoder::new(image),
@@ -250,7 +268,7 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
         );
         invalid = invalid.saturating_add(explored.invalid);
         unresolved = unresolved.saturating_add(explored.unresolved);
-        functions.push(explored.function);
+        functions.push((explored.function, explored.detail));
     }
     // Callers explored after a function add to how it was found. A name
     // comes from a symbol, then an export, then the import a thunk reaches.
@@ -269,8 +287,8 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
             names.insert(seed.addr, name);
         }
     }
-    for function in &mut functions {
-        function.found = work
+    for (function, detail) in &mut functions {
+        detail.found = work
             .entries
             .get(&function.entry)
             .copied()
@@ -278,11 +296,12 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
         function.name = names
             .get(&function.entry)
             .copied()
-            .or_else(|| function.thunk.and_then(|slot| image.import(slot)))
+            .or_else(|| detail.thunk.and_then(|slot| image.import(slot)))
             .map(str::to_owned);
     }
-    functions.sort_by_key(|function| function.entry);
-    Recovery {
+    functions.sort_by_key(|(function, _)| function.entry);
+    let (functions, details) = functions.into_iter().unzip();
+    let recovered = Functions {
         functions,
         code: image
             .segments
@@ -294,7 +313,8 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
         invalid,
         unresolved,
         truncated: work.truncated,
-    }
+    };
+    (recovered, details)
 }
 
 /// Code addresses data holds where nothing recovered reaches: aligned
@@ -302,7 +322,7 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
 /// function covers that sets up a frame (as only a function's first
 /// instructions do). Not on Arm: a pointer to Thumb code carries bit 0, and
 /// an even word into Thumb code is no function's address.
-fn data_pointers(image: &Image<'_>, work: &Work<'_>, runs: &[(u64, u64)]) -> Vec<u64> {
+fn data_pointers(image: &Binary<'_>, work: &Work<'_>, runs: &[(u64, u64)]) -> Vec<u64> {
     if image.arch == crate::Arch::Arm {
         return Vec::new();
     }
@@ -424,6 +444,7 @@ struct Work<'a> {
 /// One explored function, and what it found beyond itself.
 struct Explored {
     function: Function,
+    detail: Detail,
     /// Direct call targets.
     calls: Vec<u64>,
     /// What it passes a C runtime start routine as `main`.
@@ -707,7 +728,7 @@ impl Work<'_> {
     /// decode (the data word after musl's call to `_start_c`, past the TOC
     /// restore a 64-bit PowerPC call leaves), by a walk of the callee.
     /// rizin infers no more (a stripped `abort` wrapper's callers run on
-    /// into their padding), and funktion matches it there.
+    /// into their padding), and binform matches it there.
     fn never_returns(&mut self, target: u64, next: u64) -> bool {
         if self.named_noreturn(target) {
             return true;
@@ -1134,15 +1155,18 @@ impl Work<'_> {
         Explored {
             function: Function {
                 entry,
+                // Filled in once every function is known.
+                name: None,
                 size: high.saturating_sub(low),
                 blocks,
-                edges,
                 complexity: u32::try_from(complexity).unwrap_or(u32::MAX),
                 refs,
+            },
+            detail: Detail {
+                edges,
                 thunk,
                 // Filled in once every caller is known.
                 found: Found::default(),
-                name: None,
             },
             calls,
             mains,

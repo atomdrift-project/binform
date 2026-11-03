@@ -5,7 +5,7 @@ A stripped, statically linked position-independent 32-bit big-endian PowerPC exe
 - Source: `switch.c` below, built by `zig cc` 0.16.0 (from the `ziglang` PyPI package): `zig cc -target powerpc-linux-musleabihf -O2 -fno-inline -fPIE -static-pie -mllvm -ppc-min-jump-table-entries=8 -s switch.c -o ppc-pie` (LLVM builds jump tables on PowerPC only for many more cases by default)
 - SHA-256: `547b2fa9d1ef711e9575134fcd21283388c32d89403193f8acef068f90c15a25`
 - Size: 10236 bytes (4779 compressed)
-- License: public domain (written for funktion); musl is MIT-licensed
+- License: public domain (written for binform); musl is MIT-licensed
 
 ```c
 extern int puts(const char *);
@@ -45,5 +45,5 @@ int main(int argc, char **argv) {
 }
 ```
 
-`ppc-pie.rizin.json.zst` holds what rizin 0.8.2 found (`funktion-ab --save`);
-`ppc-pie.golden` holds what funktion finds (`FUNKTION_BLESS=1 cargo test --test fixtures`).
+`ppc-pie.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
+`ppc-pie.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).

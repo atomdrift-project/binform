@@ -8,5 +8,5 @@
 - Size: 879532 bytes (511196 compressed)
 - License: Apache-2.0 (SQLitePCLRaw); SQLite itself is public domain
 
-`libe_sqlite3-linux-arm.so.rizin.json.zst` holds what rizin 0.8.2 found (`funktion-ab --save`);
-`libe_sqlite3-linux-arm.so.golden` holds what funktion finds (`FUNKTION_BLESS=1 cargo test --test fixtures`).
+`libe_sqlite3-linux-arm.so.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
+`libe_sqlite3-linux-arm.so.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).

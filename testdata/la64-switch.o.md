@@ -5,7 +5,7 @@ An ELF relocatable object: 64-bit LoongArch, position-independent, built for lin
 - Source: `switch.c` below (the same as `ppc-pie`'s), built by `zig cc` 0.16.0 (from the `ziglang` PyPI package): `zig cc -target loongarch64-linux-musl -O2 -fno-inline -fPIC -mrelax -c switch.c -o la64-switch.o`
 - SHA-256: `a2cfc36d9321a53cebce4301230cc0a122d87be55d139fdb1746992b600aac11`
 - Size: 12936 bytes (2661 compressed)
-- License: public domain (written for funktion)
+- License: public domain (written for binform)
 
 ```c
 extern int puts(const char *);
@@ -45,5 +45,5 @@ int main(int argc, char **argv) {
 }
 ```
 
-`la64-switch.o.rizin.json.zst` holds what rizin 0.8.2 found (`funktion-ab --save`);
-`la64-switch.o.golden` holds what funktion finds (`FUNKTION_BLESS=1 cargo test --test fixtures`).
+`la64-switch.o.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
+`la64-switch.o.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).

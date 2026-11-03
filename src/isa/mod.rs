@@ -1,7 +1,24 @@
 //! What analysis needs from one instruction: its length, and where control
 //! goes after it. Everything above this module is architecture-neutral.
 
-use crate::{Arch, Image, Segment};
+pub(crate) mod arc;
+pub(crate) mod arm;
+pub(crate) mod arm64;
+pub(crate) mod csky;
+pub(crate) mod loongarch;
+pub(crate) mod m68k;
+pub(crate) mod microblaze;
+pub(crate) mod mips;
+pub(crate) mod openrisc;
+pub(crate) mod ppc;
+pub(crate) mod riscv;
+pub(crate) mod s390x;
+pub(crate) mod sparc;
+pub(crate) mod superh;
+pub(crate) mod x86;
+pub(crate) mod xtensa;
+
+use crate::{Arch, Binary, Segment};
 
 /// One decoded instruction.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -189,9 +206,9 @@ pub(crate) enum Decoder {
         bitness: u32,
         got: Option<u64>,
     },
-    Arm64(Box<crate::arm64::State>),
+    Arm64(Box<crate::isa::arm64::State>),
     Arm {
-        state: crate::arm::State,
+        state: crate::isa::arm::State,
         /// Most of the code is Thumb: the sweep decodes it so.
         thumb: bool,
     },
@@ -201,43 +218,43 @@ pub(crate) enum Decoder {
         /// Release 6, with compact branches in opcodes it reuses.
         r6: bool,
         /// The GOT, around the address `_gp` stands for.
-        got: crate::mips::Got,
-        state: crate::mips::State,
+        got: crate::isa::mips::Got,
+        state: crate::isa::mips::State,
     },
-    S390x(crate::s390x::State),
+    S390x(crate::isa::s390x::State),
     Sparc {
         wide: bool,
-        state: crate::sparc::State,
+        state: crate::isa::sparc::State,
     },
-    SuperH(crate::superh::State),
+    SuperH(crate::isa::superh::State),
     PowerPc {
         big: bool,
         wide: bool,
         /// The TOC pointer 64-bit code keeps in `r2`.
         toc: Option<u64>,
-        state: Box<crate::ppc::State>,
+        state: Box<crate::isa::ppc::State>,
     },
     RiscV {
-        config: crate::riscv::Config,
-        state: Box<crate::riscv::State>,
+        config: crate::isa::riscv::Config,
+        state: Box<crate::isa::riscv::State>,
     },
-    LoongArch(Box<crate::loongarch::State>),
-    M68k(Box<crate::m68k::State>),
-    OpenRisc(Box<crate::openrisc::State>),
+    LoongArch(Box<crate::isa::loongarch::State>),
+    M68k(Box<crate::isa::m68k::State>),
+    OpenRisc(Box<crate::isa::openrisc::State>),
     MicroBlaze {
         big: bool,
-        state: Box<crate::microblaze::State>,
+        state: Box<crate::isa::microblaze::State>,
     },
     Arc {
         v2: bool,
-        state: Box<crate::arc::State>,
+        state: Box<crate::isa::arc::State>,
     },
-    CSky(Box<crate::csky::State>),
-    Xtensa(Box<crate::xtensa::State>),
+    CSky(Box<crate::isa::csky::State>),
+    Xtensa(Box<crate::isa::xtensa::State>),
 }
 
 impl Decoder {
-    pub(crate) fn new(image: &Image<'_>) -> Self {
+    pub(crate) fn new(image: &Binary<'_>) -> Self {
         match image.arch {
             Arch::X86 => Self::X86 {
                 bitness: 32,
@@ -252,7 +269,7 @@ impl Decoder {
                 // The mode most known starts are in: Thumb addresses are odd.
                 let thumb = image.seeds.iter().filter(|seed| seed.addr & 1 != 0).count();
                 Self::Arm {
-                    state: crate::arm::State::default(),
+                    state: crate::isa::arm::State::default(),
                     thumb: 2 * thumb > image.seeds.len(),
                 }
             }
@@ -267,19 +284,19 @@ impl Decoder {
                 big: arch.big_endian(),
                 wide: arch.address_width() == 8,
                 r6: arch.mips_r6(),
-                got: crate::mips::Got::new(image.got, &image.segments),
-                state: crate::mips::State::default(),
+                got: crate::isa::mips::Got::new(image.got, &image.segments),
+                state: crate::isa::mips::State::default(),
             },
-            Arch::S390x => Self::S390x(crate::s390x::State::default()),
+            Arch::S390x => Self::S390x(crate::isa::s390x::State::default()),
             Arch::Sparc => Self::Sparc {
                 wide: false,
-                state: crate::sparc::State::default(),
+                state: crate::isa::sparc::State::default(),
             },
             Arch::Sparc64 => Self::Sparc {
                 wide: true,
-                state: crate::sparc::State::default(),
+                state: crate::isa::sparc::State::default(),
             },
-            Arch::SuperH => Self::SuperH(crate::superh::State::default()),
+            Arch::SuperH => Self::SuperH(crate::isa::superh::State::default()),
             arch @ (Arch::PowerPc | Arch::PowerPc64 | Arch::PowerPc64El) => Self::PowerPc {
                 big: arch.big_endian(),
                 wide: arch.address_width() == 8,
@@ -287,7 +304,7 @@ impl Decoder {
                 state: Box::default(),
             },
             arch @ (Arch::RiscV32 | Arch::RiscV64) => Self::RiscV {
-                config: crate::riscv::Config {
+                config: crate::isa::riscv::Config {
                     wide: arch == Arch::RiscV64,
                     gp: image.got,
                 },
@@ -313,21 +330,21 @@ impl Decoder {
     /// control may arrive from elsewhere.
     pub(crate) fn reset(&mut self) {
         match self {
-            Self::Arm64(state) => **state = crate::arm64::State::default(),
-            Self::Arm { state, .. } => *state = crate::arm::State::default(),
-            Self::Mips { state, .. } => *state = crate::mips::State::default(),
-            Self::S390x(state) => *state = crate::s390x::State::default(),
-            Self::Sparc { state, .. } => *state = crate::sparc::State::default(),
-            Self::SuperH(state) => *state = crate::superh::State::default(),
-            Self::PowerPc { state, .. } => **state = crate::ppc::State::default(),
-            Self::RiscV { state, .. } => **state = crate::riscv::State::default(),
-            Self::LoongArch(state) => **state = crate::loongarch::State::default(),
-            Self::M68k(state) => **state = crate::m68k::State::default(),
-            Self::OpenRisc(state) => **state = crate::openrisc::State::default(),
-            Self::MicroBlaze { state, .. } => **state = crate::microblaze::State::default(),
-            Self::Arc { state, .. } => **state = crate::arc::State::default(),
+            Self::Arm64(state) => **state = crate::isa::arm64::State::default(),
+            Self::Arm { state, .. } => *state = crate::isa::arm::State::default(),
+            Self::Mips { state, .. } => *state = crate::isa::mips::State::default(),
+            Self::S390x(state) => *state = crate::isa::s390x::State::default(),
+            Self::Sparc { state, .. } => *state = crate::isa::sparc::State::default(),
+            Self::SuperH(state) => *state = crate::isa::superh::State::default(),
+            Self::PowerPc { state, .. } => **state = crate::isa::ppc::State::default(),
+            Self::RiscV { state, .. } => **state = crate::isa::riscv::State::default(),
+            Self::LoongArch(state) => **state = crate::isa::loongarch::State::default(),
+            Self::M68k(state) => **state = crate::isa::m68k::State::default(),
+            Self::OpenRisc(state) => **state = crate::isa::openrisc::State::default(),
+            Self::MicroBlaze { state, .. } => **state = crate::isa::microblaze::State::default(),
+            Self::Arc { state, .. } => **state = crate::isa::arc::State::default(),
             Self::CSky(state) => state.reset(),
-            Self::Xtensa(state) => **state = crate::xtensa::State::default(),
+            Self::Xtensa(state) => **state = crate::isa::xtensa::State::default(),
             _ => {}
         }
     }
@@ -335,33 +352,35 @@ impl Decoder {
     /// Decode the instruction at the start of `bytes`, mapped at `addr`.
     pub(crate) fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
         match self {
-            Self::X86 { bitness, got } => crate::x86::decode(*bitness, *got, bytes, addr),
-            Self::Arm64(state) => crate::arm64::decode(state, bytes, addr),
-            Self::Arm { state, .. } => crate::arm::decode(state, bytes, addr),
+            Self::X86 { bitness, got } => crate::isa::x86::decode(*bitness, *got, bytes, addr),
+            Self::Arm64(state) => crate::isa::arm64::decode(state, bytes, addr),
+            Self::Arm { state, .. } => crate::isa::arm::decode(state, bytes, addr),
             Self::Mips {
                 big,
                 wide,
                 r6,
                 got,
                 state,
-            } => crate::mips::decode(state, got, (*big, *wide, *r6), bytes, addr),
-            Self::S390x(state) => crate::s390x::decode(state, bytes, addr),
-            Self::Sparc { wide, state } => crate::sparc::decode(state, *wide, bytes, addr),
-            Self::SuperH(state) => crate::superh::decode(state, bytes, addr),
+            } => crate::isa::mips::decode(state, got, (*big, *wide, *r6), bytes, addr),
+            Self::S390x(state) => crate::isa::s390x::decode(state, bytes, addr),
+            Self::Sparc { wide, state } => crate::isa::sparc::decode(state, *wide, bytes, addr),
+            Self::SuperH(state) => crate::isa::superh::decode(state, bytes, addr),
             Self::PowerPc {
                 big,
                 wide,
                 toc,
                 state,
-            } => crate::ppc::decode(state, (*big, *wide, *toc), bytes, addr),
-            Self::RiscV { config, state } => crate::riscv::decode(state, *config, bytes, addr),
-            Self::LoongArch(state) => crate::loongarch::decode(state, bytes, addr),
-            Self::M68k(state) => crate::m68k::decode(state, bytes, addr),
-            Self::OpenRisc(state) => crate::openrisc::decode(state, bytes, addr),
-            Self::MicroBlaze { big, state } => crate::microblaze::decode(state, bytes, addr, *big),
-            Self::Arc { v2, state } => crate::arc::decode(state, bytes, addr, *v2),
-            Self::CSky(state) => crate::csky::decode(state, bytes, addr),
-            Self::Xtensa(state) => crate::xtensa::decode(state, bytes, addr),
+            } => crate::isa::ppc::decode(state, (*big, *wide, *toc), bytes, addr),
+            Self::RiscV { config, state } => crate::isa::riscv::decode(state, *config, bytes, addr),
+            Self::LoongArch(state) => crate::isa::loongarch::decode(state, bytes, addr),
+            Self::M68k(state) => crate::isa::m68k::decode(state, bytes, addr),
+            Self::OpenRisc(state) => crate::isa::openrisc::decode(state, bytes, addr),
+            Self::MicroBlaze { big, state } => {
+                crate::isa::microblaze::decode(state, bytes, addr, *big)
+            }
+            Self::Arc { v2, state } => crate::isa::arc::decode(state, bytes, addr, *v2),
+            Self::CSky(state) => crate::isa::csky::decode(state, bytes, addr),
+            Self::Xtensa(state) => crate::isa::xtensa::decode(state, bytes, addr),
         }
     }
 
@@ -453,9 +472,9 @@ impl Decoder {
     pub(crate) fn pc_thunk(&self, bytes: &[u8], call: u64, next: u64) -> Option<Note> {
         match self {
             Self::X86 { bitness: 32, .. } => {
-                crate::x86::pc_thunk(bytes).map(|reg| Note::Address { reg, addr: next })
+                crate::isa::x86::pc_thunk(bytes).map(|reg| Note::Address { reg, addr: next })
             }
-            Self::Sparc { .. } => crate::sparc::pc_thunk(bytes).map(|reg| Note::Offset {
+            Self::Sparc { .. } => crate::isa::sparc::pc_thunk(bytes).map(|reg| Note::Offset {
                 reg,
                 src: reg,
                 imm: call,
@@ -468,7 +487,7 @@ impl Decoder {
     /// a jump table after the call is concerned.
     pub(crate) const fn call_preserved(&self) -> u32 {
         match self {
-            Self::Sparc { .. } => crate::sparc::CALL_PRESERVED,
+            Self::Sparc { .. } => crate::isa::sparc::CALL_PRESERVED,
             _ => 0,
         }
     }
@@ -509,7 +528,7 @@ impl Decoder {
     /// the System V and A64 conventions; `None` when it goes on the stack.
     pub(crate) fn argument(&self, n: usize) -> Option<u32> {
         match self {
-            Self::X86 { bitness: 64, .. } => crate::x86::argument(n),
+            Self::X86 { bitness: 64, .. } => crate::isa::x86::argument(n),
             Self::X86 { .. } => None,
             Self::Arm64(_) => u32::try_from(n).ok().filter(|&n| n < 8),
             // No decoder below tracks the registers arguments travel in.
@@ -521,20 +540,20 @@ impl Decoder {
     /// function's first instructions do.
     pub(crate) fn starts_frame(&self, bytes: &[u8]) -> bool {
         match self {
-            Self::X86 { bitness, .. } => crate::x86::starts_frame(*bitness, bytes),
-            Self::Arm64(_) => crate::arm64::starts_frame(bytes),
-            Self::Arm { thumb, .. } => crate::arm::starts_frame(*thumb, bytes),
-            Self::SuperH(_) => crate::superh::starts_frame(bytes),
-            Self::S390x(_) => crate::s390x::starts_frame(bytes),
-            Self::PowerPc { big, .. } => crate::ppc::starts_frame(*big, bytes),
-            Self::RiscV { .. } => crate::riscv::starts_frame(bytes),
-            Self::LoongArch(_) => crate::loongarch::starts_frame(bytes),
-            Self::M68k(_) => crate::m68k::starts_frame(bytes),
-            Self::OpenRisc(_) => crate::openrisc::starts_frame(bytes),
-            Self::MicroBlaze { big, .. } => crate::microblaze::starts_frame(bytes, *big),
-            Self::Arc { v2, .. } => crate::arc::starts_frame(bytes, *v2),
-            Self::CSky(_) => crate::csky::starts_frame(bytes),
-            Self::Xtensa(_) => crate::xtensa::starts_frame(bytes),
+            Self::X86 { bitness, .. } => crate::isa::x86::starts_frame(*bitness, bytes),
+            Self::Arm64(_) => crate::isa::arm64::starts_frame(bytes),
+            Self::Arm { thumb, .. } => crate::isa::arm::starts_frame(*thumb, bytes),
+            Self::SuperH(_) => crate::isa::superh::starts_frame(bytes),
+            Self::S390x(_) => crate::isa::s390x::starts_frame(bytes),
+            Self::PowerPc { big, .. } => crate::isa::ppc::starts_frame(*big, bytes),
+            Self::RiscV { .. } => crate::isa::riscv::starts_frame(bytes),
+            Self::LoongArch(_) => crate::isa::loongarch::starts_frame(bytes),
+            Self::M68k(_) => crate::isa::m68k::starts_frame(bytes),
+            Self::OpenRisc(_) => crate::isa::openrisc::starts_frame(bytes),
+            Self::MicroBlaze { big, .. } => crate::isa::microblaze::starts_frame(bytes, *big),
+            Self::Arc { v2, .. } => crate::isa::arc::starts_frame(bytes, *v2),
+            Self::CSky(_) => crate::isa::csky::starts_frame(bytes),
+            Self::Xtensa(_) => crate::isa::xtensa::starts_frame(bytes),
             _ => false,
         }
     }
@@ -544,8 +563,8 @@ impl Decoder {
     /// keeps its pools between functions, after the last jump).
     pub(crate) fn literal(&self, bytes: &[u8], addr: u64) -> Option<u64> {
         match self {
-            Self::CSky(_) => crate::csky::literal(bytes, addr),
-            Self::Xtensa(_) => crate::xtensa::literal_word(bytes, addr),
+            Self::CSky(_) => crate::isa::csky::literal(bytes, addr),
+            Self::Xtensa(_) => crate::isa::xtensa::literal_word(bytes, addr),
             _ => None,
         }
     }
@@ -572,8 +591,8 @@ impl Decoder {
         match self {
             Self::PowerPc {
                 big, wide: true, ..
-            } => crate::ppc::global_entry(*big, bytes),
-            Self::Arc { .. } => crate::arc::millicode(bytes),
+            } => crate::isa::ppc::global_entry(*big, bytes),
+            Self::Arc { .. } => crate::isa::arc::millicode(bytes),
             _ => false,
         }
     }
@@ -585,7 +604,7 @@ impl Decoder {
         match self {
             Self::PowerPc {
                 big, wide: true, ..
-            } if crate::ppc::global_entry(*big, before) => addr.wrapping_sub(8),
+            } if crate::isa::ppc::global_entry(*big, before) => addr.wrapping_sub(8),
             _ => addr,
         }
     }

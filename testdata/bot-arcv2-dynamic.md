@@ -9,5 +9,5 @@ ARCv2 makes majors 0x08-0x0b 16-bit (`mov_s g, h`, `ld_s r0, [h, u5]`, `jli_s`),
 - Size: 30700 bytes (11330 compressed)
 - **Malware:** this file is hostile. It is kept compressed and only ever parsed; never run it.
 
-`bot-arcv2-dynamic.rizin.json.zst` holds what rizin 0.8.2 found (`funktion-ab --save`);
-`bot-arcv2-dynamic.golden` holds what funktion finds (`FUNKTION_BLESS=1 cargo test --test fixtures`).
+`bot-arcv2-dynamic.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
+`bot-arcv2-dynamic.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).

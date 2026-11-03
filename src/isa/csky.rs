@@ -12,7 +12,7 @@
 //! r1, [offset]; addu r1, r15; ...; jmp r1`): no call, and a jump inside
 //! the function.
 
-use crate::decode::{Flow, Insn, Mem, Note};
+use crate::isa::{Flow, Insn, Mem, Note};
 
 /// Where a constant in a register came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

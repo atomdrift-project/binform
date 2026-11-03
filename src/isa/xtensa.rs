@@ -11,7 +11,7 @@
 //! `call12`; `j` jumps, `jx` jumps through a register, and functions in the
 //! windowed ABI open with `entry` and end with `retw`/`retw.n`.
 
-use crate::decode::{Flow, Insn, Mem, Note};
+use crate::isa::{Flow, Insn, Mem, Note};
 
 /// What earlier instructions left in each of the sixteen address
 /// registers: a fixed value (an immediate, or a literal-pool word a later
@@ -151,7 +151,11 @@ pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
                 }
                 // addi / addmi at, as, imm8: tracked only off a known base.
                 0xc | 0xd => {
-                    let imm = if r == 0xd { imm8(instr) << 8 } else { imm8(instr) };
+                    let imm = if r == 0xd {
+                        imm8(instr) << 8
+                    } else {
+                        imm8(instr)
+                    };
                     if state.known.get(s as usize).copied().unwrap_or(false) && s != SP {
                         note = Note::Offset {
                             reg: t,
@@ -179,9 +183,7 @@ pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
         // a word-aligned target.
         0x5 => {
             let offset = ((instr >> 6) ^ 0x2_0000).wrapping_sub(0x2_0000) as i32 as i64;
-            Flow::Call(
-                ((addr & !3).wrapping_add(4).wrapping_add_signed(offset << 2)) & 0xffff_ffff,
-            )
+            Flow::Call(((addr & !3).wrapping_add(4).wrapping_add_signed(offset << 2)) & 0xffff_ffff)
         }
         // SI: j (again, with n==0), and the twelve- and eight-bit branches.
         0x6 => match (instr >> 4) & 3 {
@@ -359,14 +361,17 @@ mod tests {
             Flow::Branch(0x401000)
         );
         // beqz.n a2, .+0x24 (imm6 0x20: t 0b1010, r 0)
-        assert_eq!(
-            run(&[0xac, 0x02], 0x401000)[0].flow,
-            Flow::Branch(0x401024)
-        );
+        assert_eq!(run(&[0xac, 0x02], 0x401000)[0].flow, Flow::Branch(0x401024));
         // movi.n a2, -1 (imm7 0x7f: t 0b0111, r 0xf) is no branch.
         let insns = run(&[0x7c, 0xf2], 0x401000);
         assert_eq!(insns[0].flow, Flow::Next);
-        assert_eq!(insns[0].note, Note::Address { reg: 2, addr: 0xffff_ffff });
+        assert_eq!(
+            insns[0].note,
+            Note::Address {
+                reg: 2,
+                addr: 0xffff_ffff
+            }
+        );
         // call0 .+0x8
         assert_eq!(
             run(&[0x45, 0x00, 0x00], 0x401000)[0].flow,

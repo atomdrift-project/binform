@@ -9,7 +9,7 @@
 //! through. The decoder also follows the address arithmetic of a PLT stub
 //! (`add ip, pc, #n; add ip, ip, #n; ldr pc, [ip, #n]!`) to its slot.
 
-use crate::decode::{Flow, Insn, Mem, Note};
+use crate::isa::{Flow, Insn, Mem, Note};
 
 /// The link register.
 const LR: u32 = 14;

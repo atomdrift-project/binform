@@ -18,7 +18,7 @@
 //! (GCC: `alsl.d t1, t0, s2, 3; ldptr.d t1, t1, 0; jr t1`) or relative to
 //! the table (LLVM: `ldx.w a0, a2, a0; add.d a0, a2, a0; jr a0`).
 
-use crate::decode::{Extend, Flow, Insn, Mem, Note};
+use crate::isa::{Extend, Flow, Insn, Mem, Note};
 
 /// What earlier instructions left that a later one needs.
 #[derive(Clone, Copy, Debug, Default)]

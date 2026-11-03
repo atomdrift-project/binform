@@ -1,4 +1,4 @@
-//! Print the functions funktion recovers from each file named on the command
+//! Print the functions binform recovers from each file named on the command
 //! line, one JSON object per file.
 
 use std::process::ExitCode;
@@ -8,7 +8,7 @@ use serde_json::json;
 fn main() -> ExitCode {
     let paths: Vec<String> = std::env::args().skip(1).collect();
     if paths.is_empty() {
-        eprintln!("usage: funktion FILE...");
+        eprintln!("usage: binform FILE...");
         return ExitCode::from(2);
     }
     let mut status = ExitCode::SUCCESS;
@@ -16,7 +16,7 @@ fn main() -> ExitCode {
         match dump(path) {
             Ok(value) => println!("{value}"),
             Err(error) => {
-                eprintln!("funktion: {path}: {error}");
+                eprintln!("binform: {path}: {error}");
                 status = ExitCode::FAILURE;
             }
         }
@@ -26,27 +26,29 @@ fn main() -> ExitCode {
 
 fn dump(path: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let bytes = std::fs::read(path)?;
-    let image = funktion::object::image(&bytes)?;
-    let recovery = funktion::recover(&image);
+    let image = binform::parse(&bytes)?;
+    let (recovery, diagnostics) =
+        binform::diagnostics::functions(&image, &binform::Limits::DEFAULT);
     let functions: Vec<serde_json::Value> = recovery
         .functions
         .iter()
-        .map(|f| {
+        .zip(&diagnostics)
+        .map(|(f, d)| {
             let refs: Vec<serde_json::Value> = f
                 .refs
                 .iter()
                 .map(|r| {
                     let kind = match r.kind {
-                        funktion::RefKind::Call => "call",
-                        funktion::RefKind::Jump => "jump",
-                        funktion::RefKind::Branch => "branch",
-                        funktion::RefKind::Case => "case",
+                        binform::RefKind::Call => "call",
+                        binform::RefKind::Jump => "jump",
+                        binform::RefKind::Branch => "branch",
+                        binform::RefKind::Case => "case",
                     };
                     json!({
                         "from": r.from,
                         "to": r.to,
                         "kind": kind,
-                        "name": recovery.target_name(&image, r.to),
+                        "name": recovery.name(&image, r.to),
                     })
                 })
                 .collect();
@@ -55,10 +57,11 @@ fn dump(path: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
                 "name": f.name,
                 "size": f.size,
                 "blocks": f.blocks,
-                "edges": f.edges,
+                "edges": d.edges,
                 "complexity": f.complexity,
-                "thunk": f.thunk,
-                "found": f.found.names().collect::<Vec<_>>(),
+                "thunk": d.thunk,
+                "found": d.found,
+                "padded": d.padded,
                 "refs": refs,
             })
         })
@@ -66,9 +69,6 @@ fn dump(path: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     Ok(json!({
         "path": path,
         "arch": format!("{:?}", image.arch),
-        "seeds": image.seeds.len(),
-        "imports": image.imports.len(),
-        "handlers": image.handlers.iter().map(|h| json!([h.function, h.addr])).collect::<Vec<_>>(),
         "code": recovery.code,
         "covered": recovery.covered,
         "invalid": recovery.invalid,

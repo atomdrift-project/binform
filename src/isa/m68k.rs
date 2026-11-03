@@ -15,7 +15,7 @@
 //! bcs default; move.l 12(a3), d0`): the decoder remembers the operand
 //! compared, so the reload carries the bound.
 
-use crate::decode::{Flow, Insn, Mem, Note};
+use crate::isa::{Flow, Insn, Mem, Note};
 
 /// What earlier instructions left that a later one needs.
 #[derive(Clone, Copy, Debug, Default)]

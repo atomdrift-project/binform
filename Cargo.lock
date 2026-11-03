@@ -3,6 +3,25 @@
 version = 4
 
 [[package]]
+name = "binform"
+version = "0.1.0"
+dependencies = [
+ "gimli",
+ "iced-x86",
+ "serde_json",
+ "zstd",
+]
+
+[[package]]
+name = "binform-tools"
+version = "0.0.0"
+dependencies = [
+ "binform",
+ "serde_json",
+ "zstd",
+]
+
+[[package]]
 name = "cc"
 version = "1.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -31,25 +50,6 @@ name = "find-msvc-tools"
 version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
-
-[[package]]
-name = "funktion"
-version = "0.1.0"
-dependencies = [
- "gimli",
- "iced-x86",
- "serde_json",
- "zstd",
-]
-
-[[package]]
-name = "funktion-tools"
-version = "0.0.0"
-dependencies = [
- "funktion",
- "serde_json",
- "zstd",
-]
 
 [[package]]
 name = "getrandom"

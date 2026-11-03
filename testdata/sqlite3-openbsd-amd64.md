@@ -8,5 +8,5 @@ OpenBSD 7.8 on x86-64: the `sqlite3` shell, a PIE whose PLT is split for indirec
 - Size: 417728 bytes (163805 compressed)
 - License: SQLite is public domain
 
-`sqlite3-openbsd-amd64.rizin.json.zst` holds what rizin 0.8.2 found (`funktion-ab --save`);
-`sqlite3-openbsd-amd64.golden` holds what funktion finds (`FUNKTION_BLESS=1 cargo test --test fixtures`).
+`sqlite3-openbsd-amd64.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
+`sqlite3-openbsd-amd64.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).

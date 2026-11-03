@@ -14,7 +14,7 @@
 //! the table's address and load the absolute entry (`l.lwz r3, 0(r3);
 //! l.jr r3`).
 
-use crate::decode::{Extend, Flow, Insn, Mem, Note};
+use crate::isa::{Extend, Flow, Insn, Mem, Note};
 
 /// What earlier instructions left that a later one needs.
 #[derive(Clone, Copy, Debug, Default)]

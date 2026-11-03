@@ -9,5 +9,5 @@ No symbols, no dynamic section: `$gp` comes from the `.got` section (0x7ff0 past
 - Size: 57076 bytes (19088 compressed)
 - **Malware:** this file is hostile. It is kept compressed and only ever parsed; never run it.
 
-`bot-mips-uclibc-static.rizin.json.zst` holds what rizin 0.8.2 found (`funktion-ab --save`);
-`bot-mips-uclibc-static.golden` holds what funktion finds (`FUNKTION_BLESS=1 cargo test --test fixtures`).
+`bot-mips-uclibc-static.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
+`bot-mips-uclibc-static.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).

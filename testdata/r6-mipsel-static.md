@@ -5,7 +5,7 @@ A statically linked, stripped little-endian MIPS32 Release 6 executable (musl). 
 - Source: `r6.c` below, built by `zig cc` 0.16.0 (from the `ziglang` PyPI package): `zig cc -target mipsel-linux-musleabi -mcpu=mips32r6 -O2 -fno-inline -static -s r6.c -o r6-mipsel-static`
 - SHA-256: `aa694ff4c8f54c78f0c4c8343b336c170ebd5f7603d1a878ce4cc42369c9deeb`
 - Size: 23960 bytes (4658 compressed)
-- License: public domain (written for funktion); musl is MIT-licensed
+- License: public domain (written for binform); musl is MIT-licensed
 
 ```c
 extern int puts(const char *);
@@ -35,5 +35,5 @@ int main(int argc, char **argv) {
 }
 ```
 
-`r6-mipsel-static.rizin.json.zst` holds what rizin 0.8.2 found (`funktion-ab --save`);
-`r6-mipsel-static.golden` holds what funktion finds (`FUNKTION_BLESS=1 cargo test --test fixtures`).
+`r6-mipsel-static.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
+`r6-mipsel-static.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).

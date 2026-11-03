@@ -23,7 +23,7 @@
 use std::sync::Arc;
 
 use crate::Segment;
-use crate::decode::{Extend, Flow, Insn, Mem, Note};
+use crate::isa::{Extend, Flow, Insn, Mem, Note};
 
 /// `$zero`.
 const ZERO: u32 = 0;

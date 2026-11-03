@@ -5,7 +5,7 @@ A stripped, statically linked position-independent 64-bit LoongArch executable (
 - Source: `switch.c` below (the same as `ppc-pie`'s), built by `zig cc` 0.16.0 (from the `ziglang` PyPI package): `zig cc -target loongarch64-linux-musl -O2 -fno-inline -fPIE -static-pie -s switch.c -o la64-pie`
 - SHA-256: `cfbac81f27f9e782cade239eafaee6cb8b68b12e338c17aca006225f3e54e855`
 - Size: 10696 bytes (4598 compressed)
-- License: public domain (written for funktion); musl is MIT-licensed
+- License: public domain (written for binform); musl is MIT-licensed
 
 ```c
 extern int puts(const char *);
@@ -45,5 +45,5 @@ int main(int argc, char **argv) {
 }
 ```
 
-`la64-pie.rizin.json.zst` holds what rizin 0.8.2 found (`funktion-ab --save`);
-`la64-pie.golden` holds what funktion finds (`FUNKTION_BLESS=1 cargo test --test fixtures`).
+`la64-pie.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
+`la64-pie.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).

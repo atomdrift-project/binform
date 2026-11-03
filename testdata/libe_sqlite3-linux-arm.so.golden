@@ -1,4 +1,4 @@
-# funktion: 2700 functions, 541260 bytes of code covered, 0 landing pads, 1835 cases
+# binform: 2700 functions, 541260 bytes of code covered, 0 landing pads, 1835 cases
 # rizin: 2728 functions; 2691 shared, 2627 with the same blocks (2623 of 2681 without landing pads)
 only rizin 0x8448 sym.imp.__memcpy_chk: inside 0x8440
 only rizin 0x8490 sym.imp.gettimeofday: inside 0x8488

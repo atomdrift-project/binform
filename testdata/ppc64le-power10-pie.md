@@ -5,7 +5,7 @@ A stripped, statically linked position-independent little-endian 64-bit PowerPC 
 - Source: `switch.c` below, built by `zig cc` 0.16.0 (from the `ziglang` PyPI package): `zig cc -target powerpc64le-linux-musl -mcpu=pwr10 -O2 -fno-inline -fPIE -static-pie -mllvm -ppc-min-jump-table-entries=8 -s switch.c -o ppc64le-power10-pie`
 - SHA-256: `92bc7333a702840f78a46806e00c1c85e738ccabcf7f294a8b0691722270f1e0`
 - Size: 11632 bytes (5003 compressed)
-- License: public domain (written for funktion); musl is MIT-licensed
+- License: public domain (written for binform); musl is MIT-licensed
 
 ```c
 extern int puts(const char *);
@@ -45,5 +45,5 @@ int main(int argc, char **argv) {
 }
 ```
 
-`ppc64le-power10-pie.rizin.json.zst` holds what rizin 0.8.2 found (`funktion-ab --save`);
-`ppc64le-power10-pie.golden` holds what funktion finds (`FUNKTION_BLESS=1 cargo test --test fixtures`).
+`ppc64le-power10-pie.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
+`ppc64le-power10-pie.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).

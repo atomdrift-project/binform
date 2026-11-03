@@ -8,5 +8,5 @@ NetBSD 10 on A64: SQLite 3.53.4 as pkgsrc builds it (GCC; NetBSD marks its binar
 - Size: 1635096 bytes (752688 compressed)
 - License: SQLite is public domain
 
-`libsqlite3-netbsd-arm64.so.rizin.json.zst` holds what rizin 0.8.2 found (`funktion-ab --save`);
-`libsqlite3-netbsd-arm64.so.golden` holds what funktion finds (`FUNKTION_BLESS=1 cargo test --test fixtures`).
+`libsqlite3-netbsd-arm64.so.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
+`libsqlite3-netbsd-arm64.so.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).

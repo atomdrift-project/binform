@@ -3,7 +3,7 @@
 //! addresses, loads and adds that build a target. Every other instruction
 //! falls through, forgetting the registers it may write.
 
-use crate::decode::{Extend, Flow, Insn, Mem, Note};
+use crate::isa::{Extend, Flow, Insn, Mem, Note};
 
 /// What the instructions since the last reset left in each general register.
 #[derive(Clone, Copy, Debug, Default)]

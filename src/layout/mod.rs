@@ -1,4 +1,4 @@
-//! Build an [`Image`] from the bytes of an ELF, PE or Mach-O file.
+//! Build an [`Binary`] from the bytes of an ELF, PE or Mach-O file.
 //!
 //! Everything a loader or linker leaves behind that names function starts
 //! becomes a [`Seed`]: entry points, initializers, TLS callbacks, symbols,
@@ -9,8 +9,8 @@
 use std::borrow::Cow;
 use std::fmt;
 
-use crate::decode::Memory;
-use crate::{Arch, Handler, Image, Import, Origin, Seed, Segment};
+use crate::isa::Memory;
+use crate::{Arch, Binary, Handler, Import, Origin, Seed, Segment};
 
 use elf::Elf;
 use macho::MachO;
@@ -24,13 +24,13 @@ mod pe;
 mod read;
 mod relocate;
 
-/// Why bytes could not become an [`Image`].
+/// Why bytes could not become an [`Binary`].
 #[derive(Debug)]
 #[non_exhaustive]
 pub enum Error {
     /// Not ELF, PE or Mach-O, or too malformed to parse.
     Format(String),
-    /// A format funktion reads, for an instruction set it does not decode.
+    /// A format binform reads, for an instruction set it does not decode.
     Arch(String),
 }
 
@@ -45,9 +45,9 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// The [`Image`] of an ELF, PE or Mach-O file. A universal Mach-O yields its
+/// The [`Binary`] of an ELF, PE or Mach-O file. A universal Mach-O yields its
 /// first slice of a supported architecture.
-pub fn image(bytes: &[u8]) -> Result<Image<'_>, Error> {
+pub fn parse(bytes: &[u8]) -> Result<Binary<'_>, Error> {
     match bytes.get(..4) {
         Some(b"\x7fELF") => elf_image(bytes, &elf::parse(bytes).map_err(Error::Format)?),
         Some([b'M', b'Z', ..]) => pe_image(bytes, &pe::parse(bytes).map_err(Error::Format)?),
@@ -248,7 +248,7 @@ const DT_FINI_ARRAYSZ: u64 = 28;
 const DT_PREINIT_ARRAY: u64 = 32;
 const DT_PREINIT_ARRAYSZ: u64 = 33;
 
-fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Image<'a>, Error> {
+fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Binary<'a>, Error> {
     let arch = elf_arch(elf)?;
     let object = elf.kind == elf::ET_REL;
 
@@ -434,7 +434,7 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Image<'a>, Error> {
             .map(|symbol| symbol.value)
             .or_else(|| {
                 let code = memory.code(elf.entry)?;
-                crate::riscv::gp_setup(code, elf.entry, arch == Arch::RiscV64)
+                crate::isa::riscv::gp_setup(code, elf.entry, arch == Arch::RiscV64)
             })
     } else {
         None
@@ -477,7 +477,7 @@ fn elf_image<'a>(bytes: &'a [u8], elf: &Elf) -> Result<Image<'a>, Error> {
         .filter_map(|reloc| Some((reloc.offset, u64::try_from(reloc.addend?).ok()?)))
         .collect();
 
-    Ok(Image {
+    Ok(Binary {
         arch,
         segments,
         seeds,
@@ -705,7 +705,7 @@ fn elf_initializers(
 const IMAGE_SCN_CNT_CODE: u32 = 0x0000_0020;
 const IMAGE_SCN_MEM_EXECUTE: u32 = 0x2000_0000;
 
-fn pe_image<'a>(bytes: &'a [u8], pe: &Pe<'_>) -> Result<Image<'a>, Error> {
+fn pe_image<'a>(bytes: &'a [u8], pe: &Pe<'_>) -> Result<Binary<'a>, Error> {
     let machine = pe.machine;
     let arch = match machine {
         0x014c => Arch::X86,
@@ -802,7 +802,7 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &Pe<'_>) -> Result<Image<'a>, Error> {
         })
         .collect();
 
-    Ok(Image {
+    Ok(Binary {
         arch,
         segments,
         seeds,
@@ -834,7 +834,7 @@ fn macho_arch(cputype: u32) -> Option<Arch> {
     }
 }
 
-fn fat_image(bytes: &[u8]) -> Result<Image<'_>, Error> {
+fn fat_image(bytes: &[u8]) -> Result<Binary<'_>, Error> {
     let slices = macho::fat(bytes).map_err(Error::Format)?;
     let slice = slices
         .iter()
@@ -844,7 +844,7 @@ fn fat_image(bytes: &[u8]) -> Result<Image<'_>, Error> {
     macho_image(slice, &macho::parse(slice).map_err(Error::Format)?)
 }
 
-fn macho_image<'a>(bytes: &'a [u8], macho: &MachO) -> Result<Image<'a>, Error> {
+fn macho_image<'a>(bytes: &'a [u8], macho: &MachO) -> Result<Binary<'a>, Error> {
     let cputype = macho.cputype;
     let arch =
         macho_arch(cputype).ok_or_else(|| Error::Arch(format!("Mach-O CPU type {cputype:#x}")))?;
@@ -979,7 +979,7 @@ fn macho_image<'a>(bytes: &'a [u8], macho: &MachO) -> Result<Image<'a>, Error> {
     }
     drop(memory);
 
-    Ok(Image {
+    Ok(Binary {
         arch,
         segments,
         seeds,
@@ -1112,9 +1112,9 @@ mod tests {
 
     #[test]
     fn rejects_garbage() {
-        assert!(image(b"").is_err());
-        assert!(image(b"not an executable at all").is_err());
-        assert!(image(b"\x7fELF\x02\x01\x01").is_err());
-        assert!(image(b"MZ\x90\x00").is_err());
+        assert!(parse(b"").is_err());
+        assert!(parse(b"not an executable at all").is_err());
+        assert!(parse(b"\x7fELF\x02\x01\x01").is_err());
+        assert!(parse(b"MZ\x90\x00").is_err());
     }
 }

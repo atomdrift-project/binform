@@ -1,7 +1,7 @@
-//! Compare funktion with rizin, file by file.
+//! Compare binform with rizin, file by file.
 //!
 //! ```text
-//! funktion-ab [--rizin PATH] [--script CMDS] [--timeout SECS] [--jobs N] [--save DIR] PATH...
+//! binform-ab [--rizin PATH] [--script CMDS] [--timeout SECS] [--jobs N] [--save DIR] PATH...
 //! ```
 //!
 //! Directories are walked. Each supported executable is analysed by both
@@ -25,7 +25,8 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
-use funktion::{Arch, Origin, RefKind};
+use binform::diagnostics::{is_code, named};
+use binform::{Arch, RefKind};
 use serde_json::{Value, json};
 
 struct Options {
@@ -64,7 +65,7 @@ fn options() -> Result<Options, String> {
     }
     if options.paths.is_empty() {
         return Err(
-            "usage: funktion-ab [--rizin PATH] [--script CMDS] [--timeout SECS] [--jobs N] PATH..."
+            "usage: binform-ab [--rizin PATH] [--script CMDS] [--timeout SECS] [--jobs N] PATH..."
                 .into(),
         );
     }
@@ -176,8 +177,9 @@ struct RizinFunction {
 fn compare(options: &Options, file: &Path) -> Option<Value> {
     let bytes = std::fs::read(file).ok()?;
     let started = Instant::now();
-    let image = funktion::object::image(&bytes).ok()?;
-    let mut recovery = funktion::recover(&image);
+    let image = binform::parse(&bytes).ok()?;
+    let (mut recovery, diagnostics) =
+        binform::diagnostics::functions(&image, &binform::Limits::DEFAULT);
     // Thumb entries carry their mode in bit 0; rizin's are the even
     // addresses of their first instructions.
     if image.arch == Arch::Arm {
@@ -240,7 +242,7 @@ fn compare(options: &Options, file: &Path) -> Option<Value> {
     if let Some(dir) = &options.save
         && let Err(error) = save(dir, file, &script, &rows)
     {
-        eprintln!("funktion-ab: saving {}: {error}", file.display());
+        eprintln!("binform-ab: saving {}: {error}", file.display());
     }
 
     let mut rizin_shape = Shape::default();
@@ -271,11 +273,17 @@ fn compare(options: &Options, file: &Path) -> Option<Value> {
     let (mut shared, mut same_blocks, mut same_complexity, mut same_size) = (0, 0, 0, 0);
     // Rizin does not walk landing pads: a function with one has blocks it
     // lacks, so those are compared apart.
-    let padded: HashSet<u64> = image.handlers.iter().map(|h| h.function).collect();
+    let padded: HashSet<u64> = recovery
+        .functions
+        .iter()
+        .zip(&diagnostics)
+        .filter(|(_, diagnostic)| diagnostic.padded)
+        .map(|(function, _)| function.entry)
+        .collect();
     let (mut shared_padded, mut same_blocks_padded) = (0, 0);
-    // Functions only funktion found, by how it found them.
+    // Functions only binform found, by how it found them.
     let mut only_native: BTreeMap<String, usize> = BTreeMap::new();
-    for function in &recovery.functions {
+    for (function, diagnostic) in recovery.functions.iter().zip(&diagnostics) {
         if let Some(theirs) = by_entry.get(&function.entry) {
             shared += 1;
             let same = theirs.blocks == u64::from(function.blocks);
@@ -287,8 +295,7 @@ fn compare(options: &Options, file: &Path) -> Option<Value> {
             same_complexity += usize::from(theirs.complexity == u64::from(function.complexity));
             same_size += usize::from(theirs.size == function.size);
         } else {
-            let how: Vec<&str> = function.found.names().collect();
-            *only_native.entry(how.join("|")).or_default() += 1;
+            *only_native.entry(diagnostic.found.join("|")).or_default() += 1;
         }
     }
     // Functions only rizin found: each needs a reason.
@@ -299,7 +306,7 @@ fn compare(options: &Options, file: &Path) -> Option<Value> {
         .map(|(&entry, theirs)| (entry, theirs.name.as_str()))
         .collect();
     only_rizin.sort_unstable();
-    // Those that start inside a function funktion recovered (its first to
+    // Those that start inside a function binform recovered (its first to
     // last byte): a fragment of it, to rizin, or a function it overlaps.
     let mut extents: Vec<(u64, u64)> = recovery
         .functions
@@ -361,23 +368,9 @@ fn save(dir: &Path, file: &Path, script: &str, rows: &[Value]) -> std::io::Resul
     std::fs::write(path, zstd::encode_all(text.as_bytes(), 19)?)
 }
 
-fn is_code(image: &funktion::Image<'_>, addr: u64) -> bool {
-    image.segments.iter().any(|segment| {
-        segment.executable
-            && addr
-                .checked_sub(segment.addr)
-                .is_some_and(|offset| offset < segment.bytes.len() as u64)
-    })
-}
-
-fn default_script(bytes: &[u8], image: &funktion::Image<'_>) -> String {
+fn default_script(bytes: &[u8], image: &binform::Binary<'_>) -> String {
     let pe = bytes.starts_with(b"MZ");
-    let named = image.seeds.iter().any(|seed| {
-        !matches!(
-            seed.origin,
-            Origin::Entry | Origin::Init(_) | Origin::Fini(_) | Origin::Tls(_)
-        )
-    });
+    let named = named(image);
     if pe && matches!(image.arch, Arch::X86 | Arch::X86_64) {
         "aa; aac".into()
     } else if !named {
@@ -454,12 +447,12 @@ fn summarize(reports: &[Value]) {
         reports.len() - compared.len()
     );
     eprintln!(
-        "time: funktion {:.1} s, rizin {:.1} s",
+        "time: binform {:.1} s, rizin {:.1} s",
         sum("native_ms") / 1e3,
         sum("rizin_ms") / 1e3
     );
     eprintln!(
-        "functions: rizin {rizin_fns}, funktion {native_fns}, shared {shared} ({:.1}% of rizin's, {:.1}% of funktion's)",
+        "functions: rizin {rizin_fns}, binform {native_fns}, shared {shared} ({:.1}% of rizin's, {:.1}% of binform's)",
         ratio(shared, rizin_fns),
         ratio(shared, native_fns)
     );
@@ -480,7 +473,7 @@ fn summarize(reports: &[Value]) {
         ratio(sum("same_blocks_padded"), padded),
     );
     eprintln!(
-        "only rizin: {} entries, {} of them inside a function funktion recovered",
+        "only rizin: {} entries, {} of them inside a function binform recovered",
         sum("only_rizin"),
         sum("only_rizin_inside")
     );
@@ -492,7 +485,7 @@ fn summarize(reports: &[Value]) {
             }
         }
     }
-    eprintln!("only funktion, by how it found them: {found:?}");
+    eprintln!("only binform, by how it found them: {found:?}");
     for report in &compared {
         let Some(missed) = report["only_rizin_functions"].as_array() else {
             continue;

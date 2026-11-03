@@ -879,13 +879,13 @@ mod tests {
 
     /// Where the Arm code at `place` in `code` (Thumb when `place` is odd)
     /// calls.
-    fn arm_call(code: &[u8], place: u64) -> crate::decode::Flow {
-        crate::arm::decode(&mut crate::arm::State::default(), code, place).flow
+    fn arm_call(code: &[u8], place: u64) -> crate::isa::Flow {
+        crate::isa::arm::decode(&mut crate::isa::arm::State::default(), code, place).flow
     }
 
     #[test]
     fn arm_calls_switch_modes() {
-        use crate::decode::Flow;
+        use crate::isa::Flow;
         let at = |place: u64, value: u64| Fix {
             value,
             addend: None,
@@ -909,16 +909,16 @@ mod tests {
     }
 
     /// The flow of each RISC-V instruction in `code`, decoded from `addr`.
-    fn riscv_flows(code: &[u8], addr: u64) -> Vec<crate::decode::Flow> {
-        let config = crate::riscv::Config {
+    fn riscv_flows(code: &[u8], addr: u64) -> Vec<crate::isa::Flow> {
+        let config = crate::isa::riscv::Config {
             wide: true,
             gp: None,
         };
-        let mut state = crate::riscv::State::default();
+        let mut state = crate::isa::riscv::State::default();
         let mut flows = Vec::new();
         let mut at = 0;
         while let Some(rest) = code.get(at..).filter(|rest| !rest.is_empty()) {
-            let insn = crate::riscv::decode(&mut state, config, rest, addr + at as u64);
+            let insn = crate::isa::riscv::decode(&mut state, config, rest, addr + at as u64);
             flows.push(insn.flow);
             at += insn.len as usize;
         }
@@ -927,7 +927,7 @@ mod tests {
 
     #[test]
     fn riscv_calls_and_branches() {
-        use crate::decode::Flow;
+        use crate::isa::Flow;
         let at = |place: u64, value: u64| Fix {
             value,
             addend: Some(0),
@@ -960,7 +960,7 @@ mod tests {
 
     #[test]
     fn loongarch_calls_and_addresses() {
-        use crate::decode::{Flow, Note};
+        use crate::isa::{Flow, Note};
         let at = |place: u64, value: u64| Fix {
             value,
             addend: Some(0),
@@ -968,12 +968,12 @@ mod tests {
             undefined: false,
         };
         let decode = |words: &[u32], addr: u64| {
-            let mut state = crate::loongarch::State::default();
+            let mut state = crate::isa::loongarch::State::default();
             words
                 .iter()
                 .enumerate()
                 .map(|(i, w)| {
-                    crate::loongarch::decode(&mut state, &w.to_le_bytes(), addr + 4 * i as u64)
+                    crate::isa::loongarch::decode(&mut state, &w.to_le_bytes(), addr + 4 * i as u64)
                 })
                 .collect::<Vec<_>>()
         };

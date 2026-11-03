@@ -1,4 +1,4 @@
-# funktion: 94 functions, 13802 bytes of code covered, 0 landing pads, 0 cases
+# binform: 94 functions, 13802 bytes of code covered, 0 landing pads, 0 cases
 # rizin: 41 functions; 40 shared, 6 with the same blocks (6 of 40 without landing pads)
 only rizin 0x10752 fcn.00010752: not code
 0x10cf0 size=6 blocks=1 edges=0 cc=1 cases=0 found=LOADER | SYMBOL rizin=5/5

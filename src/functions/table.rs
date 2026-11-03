@@ -21,7 +21,7 @@
 //! nothing else: an instruction it does not model forgets the registers it
 //! writes.
 
-use crate::decode::{Extend, Flow, Mem, Memory, Note};
+use crate::isa::{Extend, Flow, Mem, Memory, Note};
 
 /// Register values along one path through a function.
 #[derive(Clone)]

@@ -1,4 +1,4 @@
-# funktion: 47 functions, 4620 bytes of code covered, 0 landing pads, 20 cases
+# binform: 47 functions, 4620 bytes of code covered, 0 landing pads, 20 cases
 # rizin: 1 functions; 1 shared, 1 with the same blocks (1 of 1 without landing pads)
 0x169c size=30 blocks=1 edges=1 cc=0 cases=0 found=ENTRY rizin=1/1
 0x16ba size=330 blocks=44 edges=68 cc=26 cases=0 found=TAIL_CALL rizin=-

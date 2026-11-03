@@ -1,4 +1,4 @@
-# funktion: 4 functions, 192 bytes of code covered, 0 landing pads, 0 cases
+# binform: 4 functions, 192 bytes of code covered, 0 landing pads, 0 cases
 # rizin: 5 functions; 4 shared, 4 with the same blocks (3 of 3 without landing pads)
 only rizin 0x800005c fcn.0800005c: inside 0x8000040
 0x8000040 size=76 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1

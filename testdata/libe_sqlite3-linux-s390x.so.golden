@@ -1,4 +1,4 @@
-# funktion: 2674 functions, 1016686 bytes of code covered, 0 landing pads, 2499 cases
+# binform: 2674 functions, 1016686 bytes of code covered, 0 landing pads, 2499 cases
 # rizin: 2466 functions; 2466 shared, 630 with the same blocks (630 of 2466 without landing pads)
 0x10a48 size=74 blocks=3 edges=3 cc=2 cases=0 found=LOADER | SYMBOL rizin=3/3
 0x10a94 size=26 blocks=1 edges=0 cc=1 cases=0 found=STUB rizin=-

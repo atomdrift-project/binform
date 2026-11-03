@@ -15,7 +15,7 @@
 //! itself (`addk r3, r3, r3`) before it loads the entry (`lw r3, r3, rT`
 //! or `imm hi; lwi r3, r3, lo`) and jumps (`bra r3`).
 
-use crate::decode::{Extend, Flow, Insn, Mem, Note};
+use crate::isa::{Extend, Flow, Insn, Mem, Note};
 
 /// What earlier instructions left that a later one needs.
 #[derive(Clone, Copy, Debug, Default)]

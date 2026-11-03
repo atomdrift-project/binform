@@ -10,7 +10,7 @@
 //! r1; bsrf r1`). The decoder keeps the constants such loads leave in each
 //! register, and forgets a register any other instruction may write.
 
-use crate::decode::{Flow, Insn, Note};
+use crate::isa::{Flow, Insn, Note};
 
 /// What earlier instructions left in each register: a constant, when known.
 #[derive(Clone, Copy, Debug, Default)]

@@ -1,28 +1,28 @@
-# funktion
+# binform
 
-funktion recovers functions from machine code: where each one starts and
+binform recovers functions from machine code: where each one starts and
 ends, its basic blocks, its cyclomatic complexity, and the calls and jumps it
 makes. It is a pure-Rust library with no `unsafe`, no subprocesses, and no
 I/O: recovery is a function of its input, never panics, and bounds its work by
 configurable `Limits`, because the input is assumed hostile.
 
 It covers x86/x86-64, Arm/Thumb, AArch64, MIPS, PowerPC, RISC-V, LoongArch,
-s390x, SPARC, SuperH, m68k, OpenRISC, MicroBlaze, ARC, C-SKY and Xtensa, plus
-CIL method bodies for .NET. Images come from ELF, PE and Mach-O (the default
-`object` feature), or callers with their own parser can fill in an `Image`
-directly.
+s390x, SPARC, SuperH, m68k, OpenRISC, MicroBlaze, ARC, C-SKY and Xtensa, in
+ELF, PE and Mach-O binaries. The API is two pure functions over plain
+structs, and a caller pays only for what it calls: `parse` reads the
+headers into a `Binary`, and `functions` recovers its functions.
 
 ```rust
 let bytes = std::fs::read("a.out")?;
-let image = funktion::object::image(&bytes)?;
-for f in funktion::recover(&image).functions {
+let bin = binform::parse(&bytes)?;
+for f in binform::functions(&bin, &binform::Limits::DEFAULT).functions {
     println!("{:#x} {} blocks, complexity {}", f.entry, f.blocks, f.complexity);
 }
 ```
 
 ## Where it fits
 
-funktion is part of the [atomdrift project](https://github.com/atomdrift-project),
+binform is part of the [atomdrift project](https://github.com/atomdrift-project),
 where two tools use it:
 
 - **[filefacts](https://github.com/atomdrift-project/filefacts)** turns
@@ -37,14 +37,14 @@ where two tools use it:
   near a string to find XOR keys.
 
 Both shelled out to [rizin](https://rizin.re) for these and are moving to
-funktion in-process, with rizin kept as a fallback for what funktion does
+binform in-process, with rizin kept as a fallback for what binform does
 not read (an unsupported instruction set, a PE with no section table) or
-reads badly (a `Recovery` with little code covered, or many invalid,
+reads badly (a `Functions` with little code covered, or many invalid,
 unresolved or truncated paths).
 
 ### The line
 
-funktion reports what code mechanically does; its callers decide what it
+binform reports what code mechanically does; its callers decide what it
 means. Anything that is per-instruction-set decoding work, and gives the
 same answer whoever asks, belongs here:
 
@@ -60,15 +60,15 @@ classifiers), a PEB walk or an export-directory hash loop (filefacts'
 detectors), an interpreter that follows a decoder loop (stng's).
 
 The test for new code: per-instruction-set work that both tools would
-use goes in funktion; a detector written against one instruction set with
+use goes in binform; a detector written against one instruction set with
 domain meaning stays with its tool.
 
 ## Accuracy
 
 Every fixture in `testdata/` is a real binary checked against rizin: the
 `.golden` file lists both tools' blocks and complexity per function, so any
-change shows up as a diff (`FUNKTION_BLESS=1 cargo test --test fixtures` to
-accept it). `tools/` has `funktion-ab` to compare the two over a corpus, and
+change shows up as a diff (`BINFORM_BLESS=1 cargo test fixtures` to
+accept it). `tools/` has `binform-ab` to compare the two over a corpus, and
 `TODO.md` tracks known gaps per instruction set.
 
 Licensed under Apache-2.0.

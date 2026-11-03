@@ -14,7 +14,7 @@
 //! notes each address one completes: a function whose address is taken,
 //! when it points at code.
 
-use crate::decode::{Extend, Flow, Insn, Mem, Note};
+use crate::isa::{Extend, Flow, Insn, Mem, Note};
 
 /// What earlier instructions left that a later one needs.
 #[derive(Clone, Copy, Debug, Default)]

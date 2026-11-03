@@ -9,7 +9,7 @@
 use std::ops::Range;
 
 use crate::Handler;
-use crate::decode::Memory;
+use crate::isa::Memory;
 
 /// The most landing pads read from one LSDA.
 const MOST_PADS: usize = 1 << 14;

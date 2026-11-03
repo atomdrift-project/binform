@@ -17,7 +17,7 @@
 //! Zba's `sh2add`), add the table's address and load the entry, absolute or
 //! relative to the table (`lw a5, 0(a5); add a5, a5, a4; jr a5`).
 
-use crate::decode::{Extend, Flow, Insn, Mem, Note};
+use crate::isa::{Extend, Flow, Insn, Mem, Note};
 
 /// What earlier instructions left that a later one needs.
 #[derive(Clone, Copy, Debug, Default)]

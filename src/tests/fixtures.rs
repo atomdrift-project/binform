@@ -1,10 +1,10 @@
 //! Recovery on real binaries. Each fixture in `testdata/` is a compressed
 //! binary (`NAME.zst`), where it came from (`NAME.md`), what rizin found in
-//! it (`NAME.rizin.json.zst`, written by `funktion-ab --save`), and what
-//! funktion finds (`NAME.golden`): one line per function, with rizin's
-//! blocks and complexity beside funktion's, and every function only rizin
+//! it (`NAME.rizin.json.zst`, written by `binform-ab --save`), and what
+//! binform finds (`NAME.golden`): one line per function, with rizin's
+//! blocks and complexity beside binform's, and every function only rizin
 //! found, with the reason. An improvement and a regression both show as a
-//! diff of the golden; `FUNKTION_BLESS=1 cargo test --test fixtures`
+//! diff of the golden; `BINFORM_BLESS=1 cargo test fixtures`
 //! rewrites the goldens to accept one.
 //!
 //! Each fixture also makes claims: the gap it was added for, stated as an
@@ -17,7 +17,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
-use funktion::{Found, Image, Recovery, RefKind};
+use super::Recovery;
+use crate::{Binary, Found, RefKind};
 
 /// What rizin found at one entry.
 struct Theirs {
@@ -27,7 +28,7 @@ struct Theirs {
 }
 
 struct Outcome<'a> {
-    image: Image<'a>,
+    image: Binary<'a>,
     recovery: Recovery,
     rizin: BTreeMap<u64, Theirs>,
 }
@@ -50,7 +51,7 @@ impl Outcome<'_> {
             .count()
     }
 
-    fn entries(&self) -> HashMap<u64, &funktion::Function> {
+    fn entries(&self) -> HashMap<u64, &super::Recovered> {
         self.recovery
             .functions
             .iter()
@@ -69,8 +70,8 @@ impl Outcome<'_> {
             .max()
     }
 
-    /// Rizin's entries in executable code that funktion did not find, and
-    /// that lie in no function funktion recovered.
+    /// Rizin's entries in executable code that binform did not find, and
+    /// that lie in no function binform recovered.
     fn missed(&self) -> Vec<u64> {
         let ours = self.entries();
         self.rizin
@@ -85,7 +86,7 @@ impl Outcome<'_> {
     }
 
     /// Shared functions with the same number of blocks, among those rizin
-    /// walks the way funktion does: without landing pads (rizin skips
+    /// walks the way binform does: without landing pads (rizin skips
     /// them), and without a rizin "function" inside (rizin split them).
     fn same_blocks_without_pads(&self) -> (usize, usize) {
         let mut skip: std::collections::HashSet<u64> =
@@ -110,7 +111,7 @@ impl Outcome<'_> {
     }
 }
 
-fn is_code(image: &Image<'_>, addr: u64) -> bool {
+fn is_code(image: &Binary<'_>, addr: u64) -> bool {
     image.segments.iter().any(|segment| {
         segment.executable
             && addr
@@ -152,7 +153,7 @@ fn rizin(name: &str) -> BTreeMap<u64, Theirs> {
         .collect()
 }
 
-/// The golden text: a summary, then why rizin found what funktion did not,
+/// The golden text: a summary, then why rizin found what binform did not,
 /// then every function.
 fn golden(outcome: &Outcome<'_>) -> String {
     let functions = &outcome.recovery.functions;
@@ -187,7 +188,7 @@ fn golden(outcome: &Outcome<'_>) -> String {
     let (same_unpadded, unpadded) = outcome.same_blocks_without_pads();
     let _ = writeln!(
         text,
-        "# funktion: {} functions, {} bytes of code covered, {} landing pads, {} cases",
+        "# binform: {} functions, {} bytes of code covered, {} landing pads, {} cases",
         functions.len(),
         outcome.recovery.covered,
         outcome.image.handlers.len(),
@@ -237,10 +238,10 @@ fn golden(outcome: &Outcome<'_>) -> String {
 
 fn check(name: &str, claims: impl Fn(&Outcome<'_>)) {
     let bytes = read_zst(&format!("{name}.zst"));
-    let image = funktion::object::image(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
-    let mut recovery = funktion::recover(&image);
+    let image = crate::parse(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let mut recovery = super::recover(&image);
     // Thumb entries carry their mode in bit 0; rizin's are even.
-    if image.arch == funktion::Arch::Arm {
+    if image.arch == crate::Arch::Arm {
         for function in &mut recovery.functions {
             function.entry &= !1;
         }
@@ -253,7 +254,7 @@ fn check(name: &str, claims: impl Fn(&Outcome<'_>)) {
     assert!(!outcome.recovery.truncated, "{name}: recovery hit a limit");
     let actual = golden(&outcome);
     let path = testdata(&format!("{name}.golden"));
-    if std::env::var_os("FUNKTION_BLESS").is_some() {
+    if std::env::var_os("BINFORM_BLESS").is_some() {
         std::fs::write(&path, &actual).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     } else {
         let expected = std::fs::read_to_string(&path).unwrap_or_default();
@@ -268,7 +269,7 @@ fn check(name: &str, claims: impl Fn(&Outcome<'_>)) {
                 let _ = writeln!(diff, "+ {line}");
             }
             panic!(
-                "{name}: recovery differs from {} (FUNKTION_BLESS=1 accepts it):\n{diff}",
+                "{name}: recovery differs from {} (BINFORM_BLESS=1 accepts it):\n{diff}",
                 path.display()
             );
         }
@@ -276,7 +277,7 @@ fn check(name: &str, claims: impl Fn(&Outcome<'_>)) {
     claims(&outcome);
 }
 
-/// Every function rizin found in code, funktion finds, or holds inside one
+/// Every function rizin found in code, binform finds, or holds inside one
 /// of its own, except the listed entries, each with its reason.
 fn finds_rizin_except(outcome: &Outcome<'_>, except: &[(u64, &str)]) {
     let missed: Vec<u64> = outcome
@@ -364,15 +365,24 @@ fn names_functions_and_targets(outcome: &Outcome<'_>) {
     assert!(!stubs.is_empty());
     for stub in &stubs {
         let slot = stub.thunk.unwrap_or_default();
-        assert_eq!(stub.name.as_deref(), outcome.image.import(slot), "{:#x}", stub.entry);
+        assert_eq!(
+            stub.name.as_deref(),
+            outcome.image.import(slot),
+            "{:#x}",
+            stub.entry
+        );
     }
-    let named = recovery.functions.iter().filter(|f| f.name.is_some()).count();
+    let named = recovery
+        .functions
+        .iter()
+        .filter(|f| f.name.is_some())
+        .count();
     assert!(named > stubs.len(), "only stubs are named");
     let calls = recovery
         .functions
         .iter()
         .flat_map(|f| &f.refs)
-        .filter(|r| r.kind == funktion::RefKind::Call)
+        .filter(|r| r.kind == crate::RefKind::Call)
         .filter(|r| recovery.function(r.to).is_some_and(|f| f.thunk.is_some()))
         .collect::<Vec<_>>();
     assert!(!calls.is_empty(), "no calls through a stub");
@@ -398,7 +408,7 @@ fn elf_arm64_cxx() {
 #[test]
 fn macho_universal_cxx() {
     check("classic-level-darwin.node", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::X86_64);
+        assert_eq!(outcome.image.arch, crate::Arch::X86_64);
         assert!(outcome.found(Found::STUB) > 0, "no __stubs");
     });
 }
@@ -491,7 +501,7 @@ fn coverage(outcome: &Outcome<'_>) -> u64 {
 #[test]
 fn elf_arm_go() {
     check("does-nothing-linux-arm", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::Arm);
+        assert_eq!(outcome.image.arch, crate::Arch::Arm);
         let named = outcome.found(Found::SYMBOL);
         assert!(named > 2000, "only {named} functions from the Go table");
         finds_all_of_rizin(outcome);
@@ -510,14 +520,14 @@ fn elf_arm_go() {
 #[test]
 fn elf_mips_go() {
     check("does-nothing-linux-mips", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::Mips);
+        assert_eq!(outcome.image.arch, crate::Arch::Mips);
         let named = outcome.found(Found::SYMBOL);
         assert!(named > 2000, "only {named} functions from the Go table");
         assert!(coverage(outcome) >= 99, "covers {}%", coverage(outcome));
         // Rizin starts a function in the epilogue after each `jal
         // runtime.deferreturn`, which the Go runtime resumes at and no
         // instruction reaches, and in the dead epilogue after each `jal
-        // runtime.exit`. Every other function rizin finds, funktion finds or
+        // runtime.exit`. Every other function rizin finds, binform finds or
         // holds.
         let missed = outcome.missed();
         assert!(
@@ -533,7 +543,7 @@ fn elf_mips_go() {
 #[test]
 fn elf_s390x_go() {
     check("does-nothing-linux-s390x", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::S390x);
+        assert_eq!(outcome.image.arch, crate::Arch::S390x);
         let named = outcome.found(Found::SYMBOL);
         assert!(named > 2000, "only {named} functions from the Go table");
         assert!(coverage(outcome) >= 97, "covers {}%", coverage(outcome));
@@ -552,13 +562,13 @@ fn elf_s390x_go() {
 #[test]
 fn elf_thumb_c() {
     check("libe_sqlite3-linux-arm.so", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::Arm);
+        assert_eq!(outcome.image.arch, crate::Arch::Arm);
         // Each stub jumps through its GOT slot; a slot an import fills makes
         // the stub that import's thunk. (Most stubs here call the library's
         // own exported functions, whose slots name no import.)
         let imports: std::collections::HashSet<u64> =
             outcome.image.imports.iter().map(|i| i.slot).collect();
-        let stubs: Vec<&funktion::Function> = outcome
+        let stubs: Vec<&super::Recovered> = outcome
             .recovery
             .functions
             .iter()
@@ -652,7 +662,7 @@ fn mips_got_calls() {
 #[test]
 fn microblaze_static() {
     check("bot-microblaze-static", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::MicroBlaze);
+        assert_eq!(outcome.image.arch, crate::Arch::MicroBlaze);
         assert!(coverage(outcome) >= 99, "covers {}%", coverage(outcome));
         assert!(outcome.cases() >= 160, "only {} cases", outcome.cases());
         assert_eq!(outcome.recovery.unresolved, 0);
@@ -665,7 +675,7 @@ fn microblaze_static() {
 #[test]
 fn microblaze_pic() {
     check("bot-microblaze-pic", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::MicroBlaze);
+        assert_eq!(outcome.image.arch, crate::Arch::MicroBlaze);
         assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
         assert_eq!(outcome.recovery.unresolved, 0);
         assert_eq!(outcome.recovery.invalid, 0);
@@ -686,7 +696,7 @@ fn microblaze_pic() {
 #[test]
 fn arc_static() {
     check("bot-arc-static", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::Arc);
+        assert_eq!(outcome.image.arch, crate::Arch::Arc);
         assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
         assert!(outcome.cases() >= 21, "only {} cases", outcome.cases());
         assert_eq!(outcome.recovery.invalid, 0);
@@ -706,7 +716,7 @@ fn arc_static() {
 #[test]
 fn arcv2_dynamic() {
     check("bot-arcv2-dynamic", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::ArcV2);
+        assert_eq!(outcome.image.arch, crate::Arch::ArcV2);
         assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
         assert_eq!(outcome.recovery.invalid, 0);
         let thunks = outcome
@@ -726,7 +736,7 @@ fn arcv2_dynamic() {
 #[test]
 fn csky_static() {
     check("bot-csky-static", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::CSky);
+        assert_eq!(outcome.image.arch, crate::Arch::CSky);
         // The rest is literal pools.
         assert!(coverage(outcome) >= 85, "covers {}%", coverage(outcome));
         assert!(outcome.recovery.invalid <= 1);
@@ -748,7 +758,7 @@ fn csky_static() {
 #[test]
 fn xtensa_dynamic() {
     check("bot-xtensa-dynamic", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::Xtensa);
+        assert_eq!(outcome.image.arch, crate::Arch::Xtensa);
         assert!(coverage(outcome) >= 70, "covers {}%", coverage(outcome));
         assert_eq!(outcome.recovery.invalid, 0);
         // _start, loaded from the ELF entry point.
@@ -762,7 +772,7 @@ fn xtensa_dynamic() {
 #[test]
 fn openrisc_static() {
     check("bot-openrisc-static", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::OpenRisc);
+        assert_eq!(outcome.image.arch, crate::Arch::OpenRisc);
         assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
         // Tail calls through function pointers loaded from memory.
         assert!(outcome.recovery.unresolved <= 5);
@@ -784,7 +794,7 @@ fn openrisc_static() {
 #[test]
 fn m68k_static() {
     check("bot-m68k-static", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::M68k);
+        assert_eq!(outcome.image.arch, crate::Arch::M68k);
         assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
         assert!(outcome.cases() >= 28, "only {} cases", outcome.cases());
         assert_eq!(outcome.recovery.unresolved, 0);
@@ -807,7 +817,7 @@ fn m68k_static() {
 #[test]
 fn loongarch64_pie() {
     check("la64-pie", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::LoongArch64);
+        assert_eq!(outcome.image.arch, crate::Arch::LoongArch64);
         assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
         assert_eq!(outcome.cases(), 20, "pick's cases");
         // musl's `f->write` tail calls, through a pointer.
@@ -867,7 +877,7 @@ fn cases(outcome: &Outcome<'_>) -> usize {
         .count()
 }
 
-/// The functions funktion and rizin share, and on how many of them, as a
+/// The functions binform and rizin share, and on how many of them, as a
 /// percentage, they agree on blocks (landing pads aside).
 fn agreement(outcome: &Outcome<'_>) -> (usize, usize) {
     let (same, shared) = outcome.same_blocks_without_pads();
@@ -1009,7 +1019,7 @@ fn c_mips64_and_s390x() {
 #[test]
 fn mips_uclibc_static() {
     check("bot-mips-uclibc-static", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::Mips);
+        assert_eq!(outcome.image.arch, crate::Arch::Mips);
         assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
         let pointers = outcome.found(Found::POINTER);
         assert!(
@@ -1017,7 +1027,7 @@ fn mips_uclibc_static() {
             "only {pointers} functions from GOT pointers"
         );
         // Rizin starts these two in a `jr` delay slot; the functions around
-        // them nothing funktion sees reaches.
+        // them nothing binform sees reaches.
         finds_rizin_except(
             outcome,
             &[
@@ -1035,7 +1045,7 @@ fn mips_uclibc_static() {
 #[test]
 fn superh_uclibc_static() {
     check("bot-sh-uclibc-static", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::SuperH);
+        assert_eq!(outcome.image.arch, crate::Arch::SuperH);
         assert!(coverage(outcome) >= 75, "covers {}%", coverage(outcome));
         let pointers = outcome.found(Found::POINTER);
         assert!(
@@ -1059,7 +1069,7 @@ fn superh_uclibc_static() {
 #[test]
 fn s390x_encrypted_payload() {
     check("bot-s390x-static-pie", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::S390x);
+        assert_eq!(outcome.image.arch, crate::Arch::S390x);
         let payload = 0xa0_1000..0xa5_a000;
         let inside: Vec<u64> = outcome
             .recovery
@@ -1086,7 +1096,7 @@ fn s390x_encrypted_payload() {
 #[test]
 fn mips_r6() {
     check("r6-mipsel-static", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::MipsR6El);
+        assert_eq!(outcome.image.arch, crate::Arch::MipsR6El);
         assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
         assert!(outcome.cases() >= 10, "{} cases", outcome.cases());
         finds_rizin_except(outcome, &[]);
@@ -1095,7 +1105,7 @@ fn mips_r6() {
     });
 }
 
-/// Every function rizin finds, but those in `except`, funktion finds too,
+/// Every function rizin finds, but those in `except`, binform finds too,
 /// or `offset` bytes before: rizin starts PowerPC functions after their
 /// first instructions (at `mflr`, past `stwu`; at ELFv2's local entry).
 fn finds_rizin_before(outcome: &Outcome<'_>, offset: u64, except: &[u64]) {
@@ -1118,7 +1128,7 @@ fn finds_rizin_before(outcome: &Outcome<'_>, offset: u64, except: &[u64]) {
 #[test]
 fn powerpc_static() {
     check("bot-ppc-static", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::PowerPc);
+        assert_eq!(outcome.image.arch, crate::Arch::PowerPc);
         assert!(coverage(outcome) >= 95, "covers {}%", coverage(outcome));
         let pointers = outcome.found(Found::POINTER);
         assert!(pointers >= 15, "only {pointers} from built addresses");
@@ -1137,7 +1147,7 @@ fn powerpc_static() {
 #[test]
 fn powerpc_pie() {
     check("ppc-pie", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::PowerPc);
+        assert_eq!(outcome.image.arch, crate::Arch::PowerPc);
         assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
         assert_eq!(outcome.cases(), 20, "pick's cases");
         assert_eq!(outcome.recovery.unresolved, 0);
@@ -1164,7 +1174,7 @@ fn powerpc_pie() {
 #[test]
 fn powerpc64le_power10() {
     check("ppc64le-power10-pie", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::PowerPc64El);
+        assert_eq!(outcome.image.arch, crate::Arch::PowerPc64El);
         assert!(coverage(outcome) >= 80, "covers {}%", coverage(outcome));
         assert_eq!(outcome.cases(), 20, "pick's cases");
         assert_eq!(outcome.recovery.unresolved, 0);
@@ -1179,7 +1189,7 @@ fn powerpc64le_power10() {
 #[test]
 fn riscv64_pie() {
     check("rv64-pie", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::RiscV64);
+        assert_eq!(outcome.image.arch, crate::Arch::RiscV64);
         assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
         assert_eq!(outcome.cases(), 20, "pick's cases");
         // musl's `f->write` tail calls, through a pointer.
@@ -1193,7 +1203,7 @@ fn riscv64_pie() {
 #[test]
 fn powerpc64_elfv1() {
     check("bot-ppc64-elfv1", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::PowerPc64);
+        assert_eq!(outcome.image.arch, crate::Arch::PowerPc64);
         assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
         let pointers = outcome.found(Found::POINTER);
         assert!(pointers >= 20, "only {pointers} from descriptors");
@@ -1224,7 +1234,7 @@ fn powerpc64_elfv1() {
 #[test]
 fn powerpc64le_static() {
     check("ppc64le-static", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::PowerPc64El);
+        assert_eq!(outcome.image.arch, crate::Arch::PowerPc64El);
         assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
         finds_rizin_before(outcome, 8, &[]);
         // No function starts at a local entry.
@@ -1257,7 +1267,7 @@ fn thunks(outcome: &Outcome<'_>) -> usize {
 #[test]
 fn wince_arm() {
     check("bot-wince-arm", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::Arm);
+        assert_eq!(outcome.image.arch, crate::Arch::Arm);
         assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
         assert!(outcome.found(Found::UNWIND) > 80);
         assert!(
@@ -1283,7 +1293,7 @@ fn wince_arm() {
 #[test]
 fn wince_thumb() {
     check("bot-wince-thumb", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::Arm);
+        assert_eq!(outcome.image.arch, crate::Arch::Arm);
         assert!(coverage(outcome) >= 70, "covers {}%", coverage(outcome));
         assert!(
             thunks(outcome) >= 25,
@@ -1301,7 +1311,7 @@ fn wince_thumb() {
 #[test]
 fn pe_armnt() {
     check("e_sqlite3-win-arm.dll", |outcome| {
-        assert_eq!(outcome.image.arch, funktion::Arch::Arm);
+        assert_eq!(outcome.image.arch, crate::Arch::Arm);
         // A case target rizin takes for a function.
         finds_rizin_except(outcome, &[(0x100c_745e, "a case of 0x100a813a")]);
         let (same, shared) = outcome.same_blocks_without_pads();

@@ -13,7 +13,7 @@
 //! runs before its target, so its note is the transfer's, except an
 //! annulled branch's, which runs on one path only.
 
-use crate::decode::{Extend, Flow, Insn, Mem, Note};
+use crate::isa::{Extend, Flow, Insn, Mem, Note};
 
 /// `%o7`, where `call` and `jmpl` leave the caller's address.
 const O7: u32 = 15;

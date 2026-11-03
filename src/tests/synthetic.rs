@@ -1,11 +1,12 @@
-//! Hand-assembled images, one per idiom funktion once missed: each test
+//! Hand-assembled images, one per idiom binform once missed: each test
 //! holds the few instructions that make the idiom and checks what recovery
 //! makes of them.
 
 // A test fails by panicking.
 #![allow(clippy::panic, clippy::indexing_slicing)]
 
-use funktion::{Arch, Found, Function, Handler, Image, Import, Origin, RefKind, Seed, Segment};
+use super::Recovered as Function;
+use crate::{Arch, Binary, Found, Handler, Import, Origin, RefKind, Seed, Segment};
 
 fn segment(addr: u64, bytes: &[u8], executable: bool) -> Segment<'_> {
     Segment {
@@ -22,8 +23,8 @@ fn entry(addr: u64) -> Seed {
     }
 }
 
-fn image(arch: Arch, segments: Vec<Segment<'_>>, seeds: Vec<Seed>) -> Image<'_> {
-    Image {
+fn image(arch: Arch, segments: Vec<Segment<'_>>, seeds: Vec<Seed>) -> Binary<'_> {
+    Binary {
         arch,
         segments,
         seeds,
@@ -91,7 +92,7 @@ fn i386_pic_jump_table() {
         vec![segment(0x1000, &code, true), segment(0x2f00, &table, false)],
         vec![entry(0x1000)],
     );
-    let recovery = funktion::recover(&image);
+    let recovery = super::recover(&image);
     let switch = function(&recovery.functions, 0x1000);
     assert_eq!(cases(switch), [0x1020, 0x1024, 0x1028]);
     assert_eq!(switch.blocks, 6);
@@ -127,7 +128,7 @@ fn i386_call_next_is_not_a_function() {
         vec![segment(0x1000, &code, true), segment(0x2f00, &table, false)],
         vec![entry(0x1000)],
     );
-    let recovery = funktion::recover(&image);
+    let recovery = super::recover(&image);
     assert_eq!(
         recovery
             .functions
@@ -171,7 +172,7 @@ fn a64_byte_table() {
         ],
         vec![entry(0x1_0000)],
     );
-    let recovery = funktion::recover(&image);
+    let recovery = super::recover(&image);
     let switch = function(&recovery.functions, 0x1_0000);
     assert_eq!(cases(switch), [0x1_0020, 0x1_0024, 0x1_0028]);
     assert_eq!(switch.blocks, 6);
@@ -204,7 +205,7 @@ fn a64_absolute_table() {
         ],
         vec![entry(0x1_0000)],
     );
-    let recovery = funktion::recover(&image);
+    let recovery = super::recover(&image);
     assert_eq!(
         cases(function(&recovery.functions, 0x1_0000)),
         [0x1_0018, 0x1_001c]
@@ -262,7 +263,7 @@ fn main_from_libc_start_main() {
                 origin: Origin::Symbol("__libc_start_main".into()),
             });
         }
-        let recovery = funktion::recover(&image);
+        let recovery = super::recover(&image);
         let found = recovery
             .functions
             .iter()
@@ -292,12 +293,12 @@ fn landing_pads_are_explored() {
         vec![segment(0x1000, &code, true)],
         vec![entry(0x1000)],
     );
-    let without = funktion::recover(&image);
+    let without = super::recover(&image);
     image.handlers.push(Handler {
         function: 0x1000,
         addr: 0x1010,
     });
-    let with = funktion::recover(&image);
+    let with = super::recover(&image);
     assert_eq!(function(&without.functions, 0x1000).blocks, 1);
     let thrower = function(&with.functions, 0x1000);
     assert_eq!(thrower.blocks, 2);
@@ -338,7 +339,7 @@ fn unwind_parts_join_the_function_that_runs_into_them() {
         unwind(0x1048),
     ];
     let image = image(Arch::X86_64, vec![segment(0x1000, &code, true)], seeds);
-    let recovery = funktion::recover(&image);
+    let recovery = super::recover(&image);
     let entries: Vec<u64> = recovery.functions.iter().map(|f| f.entry).collect();
     assert_eq!(entries, [0x1000, 0x1020, 0x1025, 0x1030, 0x1040, 0x1048]);
     let joined = function(&recovery.functions, 0x1000);
@@ -365,7 +366,7 @@ fn main_from_an_unnamed_start_routine() {
             vec![segment(0x1000, code, true)],
             vec![entry(0x1000)],
         );
-        let recovery = funktion::recover(&image);
+        let recovery = super::recover(&image);
         let main = recovery.functions.iter().find(|f| f.entry == 0x1100);
         assert_eq!(main.is_some_and(|f| f.found.contains(Found::MAIN)), found);
     }
@@ -400,13 +401,13 @@ fn unbounded_table_cases_lie_in_the_extent() {
         ]
     };
 
-    let alone = funktion::recover(&image(Arch::Arm64, segments(), vec![entry(0x1_0000)]));
+    let alone = super::recover(&image(Arch::Arm64, segments(), vec![entry(0x1_0000)]));
     assert_eq!(alone.unresolved, 1);
     assert_eq!(function(&alone.functions, 0x1_0000).blocks, 1);
 
     let mut spanned = image(Arch::Arm64, segments(), vec![entry(0x1_0000)]);
     spanned.extents.push(0x1_0000..0x1_0030);
-    let recovery = funktion::recover(&spanned);
+    let recovery = super::recover(&spanned);
     assert_eq!(recovery.functions.len(), 1);
     let switch = function(&recovery.functions, 0x1_0000);
     assert_eq!((switch.blocks, switch.size), (3, 0x30));
@@ -419,7 +420,7 @@ fn unbounded_table_cases_lie_in_the_extent() {
 fn weak_recovery_says_so() {
     let mut code = vec![0x90, 0x90, 0x06]; // nop; nop; invalid in 64-bit mode
     code.resize(0x100, 0);
-    let recovery = funktion::recover(&image(
+    let recovery = super::recover(&image(
         Arch::X86_64,
         vec![segment(0x1000, &code, true)],
         vec![entry(0x1000)],
@@ -460,7 +461,7 @@ fn thumb_and_a32_interwork() {
         vec![segment(0x8000, &code, true)],
         vec![entry(0x8001)],
     );
-    let recovery = funktion::recover(&image);
+    let recovery = super::recover(&image);
     let entries: Vec<u64> = recovery.functions.iter().map(|f| f.entry).collect();
     assert_eq!(entries, [0x8001, 0x8015, 0x8020]);
     let main = function(&recovery.functions, 0x8001);
@@ -485,7 +486,7 @@ fn thumb_tbb_table() {
         vec![segment(0x8000, &code, true)],
         vec![entry(0x8001)],
     );
-    let recovery = funktion::recover(&image);
+    let recovery = super::recover(&image);
     let switch = function(&recovery.functions, 0x8001);
     assert_eq!(cases(switch), [0x800d, 0x800f, 0x8011]);
     assert_eq!(switch.blocks, 5);
@@ -519,7 +520,7 @@ fn a32_tables() {
         vec![segment(0x1_0000, &code, true)],
         vec![entry(0x1_0000), entry(0x1_001c)],
     );
-    let recovery = funktion::recover(&image);
+    let recovery = super::recover(&image);
     let branches = function(&recovery.functions, 0x1_0000);
     assert_eq!(cases(branches), [0x1_000c, 0x1_0010, 0x1_0014]);
     let addresses = function(&recovery.functions, 0x1_001c);
@@ -549,7 +550,7 @@ fn sparc_delay_slots() {
         vec![segment(0x1000, &code, true)],
         vec![entry(0x1000)],
     );
-    let recovery = funktion::recover(&image);
+    let recovery = super::recover(&image);
     let main = function(&recovery.functions, 0x1000);
     assert_eq!((main.blocks, main.size), (3, 0x24));
     assert!(
@@ -582,7 +583,7 @@ fn superh_delay_slots() {
         vec![segment(0x1000, &code, true)],
         vec![entry(0x1000)],
     );
-    let recovery = funktion::recover(&image);
+    let recovery = super::recover(&image);
     let main = function(&recovery.functions, 0x1000);
     assert_eq!((main.blocks, main.size), (3, 0x12));
     assert_eq!(function(&recovery.functions, 0x1014).size, 4);
@@ -611,7 +612,7 @@ fn x86_64_inferred_noreturn() {
         vec![segment(0x1000, &code, true)],
         vec![entry(0x1000), entry(0x1030)],
     );
-    let recovery = funktion::recover(&image);
+    let recovery = super::recover(&image);
     assert_eq!(recovery.invalid, 0);
     assert_eq!(function(&recovery.functions, 0x1000).size, 5);
     assert_eq!(function(&recovery.functions, 0x1030).size, 6);

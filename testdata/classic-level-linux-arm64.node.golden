@@ -1,4 +1,4 @@
-# funktion: 1190 functions, 264012 bytes of code covered, 0 landing pads, 0 cases
+# binform: 1190 functions, 264012 bytes of code covered, 0 landing pads, 0 cases
 # rizin: 1139 functions; 1132 shared, 1109 with the same blocks (1109 of 1132 without landing pads)
 only rizin 0x1938c fcn.0001938c: inside 0x19388
 only rizin 0x2dea8 fcn.0002dea8: inside 0x2de78

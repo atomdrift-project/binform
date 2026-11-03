@@ -8,5 +8,5 @@ The same runtime as an A64 Mach-O `MH_OBJECT`. Unlinked, its `bl 0` placeholders
 - Size: 502032 bytes (141280 compressed)
 - License: BSD-3-Clause (the Go license)
 
-`race_darwin_arm64.syso.rizin.json.zst` holds what rizin 0.8.2 found (`funktion-ab --save`);
-`race_darwin_arm64.syso.golden` holds what funktion finds (`FUNKTION_BLESS=1 cargo test --test fixtures`).
+`race_darwin_arm64.syso.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
+`race_darwin_arm64.syso.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
