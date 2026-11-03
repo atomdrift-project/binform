@@ -252,13 +252,34 @@ pub(crate) fn recover(image: &Image<'_>, limits: &Limits) -> Recovery {
         unresolved = unresolved.saturating_add(explored.unresolved);
         functions.push(explored.function);
     }
-    // Callers explored after a function add to how it was found.
+    // Callers explored after a function add to how it was found. A name
+    // comes from a symbol, then an export, then the import a thunk reaches.
+    let mut names: HashMap<u64, &str> = HashMap::new();
+    for seed in &image.seeds {
+        if let Origin::Export(name) = &seed.origin
+            && !name.is_empty()
+        {
+            names.entry(seed.addr).or_insert(name);
+        }
+    }
+    for seed in &image.seeds {
+        if let Origin::Symbol(name) = &seed.origin
+            && !name.is_empty()
+        {
+            names.insert(seed.addr, name);
+        }
+    }
     for function in &mut functions {
         function.found = work
             .entries
             .get(&function.entry)
             .copied()
             .unwrap_or_default();
+        function.name = names
+            .get(&function.entry)
+            .copied()
+            .or_else(|| function.thunk.and_then(|slot| image.import(slot)))
+            .map(str::to_owned);
     }
     functions.sort_by_key(|function| function.entry);
     Recovery {
@@ -1121,6 +1142,7 @@ impl Work<'_> {
                 thunk,
                 // Filled in once every caller is known.
                 found: Found::default(),
+                name: None,
             },
             calls,
             mains,

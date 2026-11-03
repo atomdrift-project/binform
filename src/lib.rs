@@ -320,6 +320,19 @@ pub struct Image<'a> {
     pub rebased: Vec<(u64, u64)>,
 }
 
+impl Image<'_> {
+    /// The name of the import whose slot is at `slot`: what a [`Ref`] that
+    /// goes through a slot (a [`Ref::to`] that is no function's entry)
+    /// calls.
+    #[must_use]
+    pub fn import(&self, slot: u64) -> Option<&str> {
+        self.imports
+            .iter()
+            .find(|import| import.slot == slot)
+            .map(|import| import.name.as_str())
+    }
+}
+
 /// Bounds on the work [`recover_with`] does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
@@ -339,6 +352,18 @@ impl Default for Limits {
             table_entries: 512,
         }
     }
+}
+
+impl Limits {
+    /// Bounds for a caller that scans many files and wants each answer
+    /// quickly: a 64th of the default instruction budget (two million,
+    /// tens of milliseconds on most binaries), at the cost of
+    /// [`Recovery::truncated`] on the largest.
+    pub const QUICK: Self = Self {
+        functions: 1 << 18,
+        instructions: 1 << 21,
+        table_entries: 512,
+    };
 }
 
 /// A recovered function.
@@ -363,6 +388,9 @@ pub struct Function {
     pub thunk: Option<u64>,
     /// Every way its entry was found.
     pub found: Found,
+    /// What the binary calls it: a symbol, else an export, else (for a
+    /// thunk) the import it jumps to.
+    pub name: Option<String>,
 }
 
 /// A set of ways a function's entry was found. Several often agree; a
@@ -521,6 +549,27 @@ pub struct Recovery {
     pub unresolved: u64,
     /// Whether a [`Limits`] bound stopped recovery early.
     pub truncated: bool,
+}
+
+impl Recovery {
+    /// The function whose entry is `addr`: what a [`Ref`] to a function
+    /// calls.
+    #[must_use]
+    pub fn function(&self, addr: u64) -> Option<&Function> {
+        self.functions
+            .binary_search_by_key(&addr, |function| function.entry)
+            .ok()
+            .and_then(|index| self.functions.get(index))
+    }
+
+    /// The name of what `to` (a [`Ref::to`]) reaches: a named function, or
+    /// the import whose slot it is.
+    #[must_use]
+    pub fn target_name<'a>(&'a self, image: &'a Image<'_>, to: u64) -> Option<&'a str> {
+        self.function(to)
+            .and_then(|function| function.name.as_deref())
+            .or_else(|| image.import(to))
+    }
 }
 
 /// Recover the functions of `image` under the default [`Limits`].

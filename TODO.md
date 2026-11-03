@@ -194,10 +194,13 @@ only. Next:
   resolves to a call. Every function opens with `entry`, so the sweep
   seeds each one it finds (word-aligned), and a swept call whose target is
   no frame is a mis-decoded pool word, dropped. `l32i` notes its load, so
-  a GOT read or a jump table through a known address resolves. On the bot
-  with symbols, every one of 494 is found with none past them, 0 invalid,
-  81% covered (the rest is pools); the stripped bot finds 243 of its ~268
-  `entry` prologues, the dynamic one all 42 (`bot-xtensa-dynamic`). Left:
+  a GOT read or a jump table through a known address resolves. Eight-bit
+  branch offsets are signed (`loop`'s alone is not), and `ill` after a
+  call that never returns is a stop. On the bot with symbols, all 494 are
+  found, plus 5 `entry` routines with no symbol (`lib2funcs.S`), 0
+  invalid, 90% covered (the rest is pools); the stripped bot 86%, the
+  dynamic one all 42 and 80% (`bot-xtensa-dynamic`; rizin 0.8.2 cannot
+  decode `beqz.n`/`bnez.n` and loses sync after each). Left:
   the `.plt` stub (`l32r a8, slot; l32i.n a8, a8, 0; jx a8`) is a double
   indirection the thunk walk does not yet fold, so imports are listed but
   their stubs are unlinked; switch tables through `addx4; l32i; jx` leave
@@ -262,12 +265,92 @@ only. Next:
 - **.NET:** `funktion::cil::body` measures CIL method bodies but filefacts
   does not call it yet; wiring it in adds .NET CFG metrics (possible new
   trait hits), so it needs a corpus A/B first.
-- **Integration:** stng/filefacts decide when to fall back to rizin, from
-  `Recovery` (`code`, `covered`, `invalid`, `unresolved`, `truncated`) and
-  `object::Error`. Before dropping rizin for packed files, run a trait-diff
-  A/B through scan's normal pipeline.
 - **Known misses:** `main` in i386/A64 PIE (loaded through the GOT), musl's
   `_start_c`, and the PE x86 start-up patterns; GCC `.cold` fragments count
   as functions of their own; Go's `runtime.debugCallV2` code after a `brk`
   (reached only by a debugger); jump tables whose base register goes through
   a stack spill (i386 PIC).
+
+## Replacing rizin in filefacts and stng
+
+The line (README, "The line"): funktion reports what code mechanically
+does, per instruction set; filefacts and stng decide what it means. Both
+tools decode instructions themselves today (filefacts: ~1600 lines of
+iced-x86 and hand-written AArch64 for syscalls and API hashing; stng:
+~4000 lines for stack strings, `lea`/`adrp` strings and its XOR
+decoders), so the work is as much moving decoding here as dropping rizin.
+In scan's pipeline stng already runs without rizin; only the stng CLI
+(`src/cli/rizin.rs`) calls it.
+
+1. **Names on functions and refs.** `Function` carries no name; rizin's
+   `sym.imp.*`/`fcn.*` name the call-site facts filefacts emits. Add the
+   symbol, export or stub import a function is known by, and a helper
+   that names a `Ref`'s target (an import slot, a stub, a named function).
+   Document the complexity formula (edges − blocks + 2·exits) so filefacts
+   can state what its metrics mean, and `Limits` presets for
+   latency-sensitive callers (funktion is bounded and in-process, so the
+   timeout, retry and process-group machinery go with rizin).
+2. **filefacts primary path.** A tool-agnostic function table (entry,
+   size, complexity, blocks, call sites) that both `RizinRecovery` and a
+   funktion adapter fill; `apply_inner`, the metrics and
+   `pe/api_hash.rs` (`function_ranges`, `direct_call_edges`) read only
+   the table. funktion runs after the native parse; rizin only when
+   `object::image` fails (unparseable, or Nios II, IA-64, MIPS-FPU and
+   PowerPC PE), when `Recovery` looks untrustworthy (`covered/code` low,
+   `invalid`/`unresolved` high, `truncated`), or when a PE has no section
+   table goblin could read. Keep today's admission policy at first so the
+   A/B isolates the change in metrics from the change in which files are
+   analysed; widening it to every executable (funktion costs
+   milliseconds) is a later step. Cache key: funktion's version always,
+   rizin's only when it ran; `rizin_incomplete` applies to the fallback
+   alone. funktion's own ELF/PE/Mach-O reader may disagree with goblin on
+   hostile files: log the disagreements, and consider filling `Image`
+   from goblin later. Check that the universal Mach-O slice funktion
+   picks matches `native_arch_only`.
+3. **A/B.** `funktion-ab` over the corpus for the aggregates, then a
+   trait diff through scan's normal pipeline. Block counts differ from
+   rizin's and are often more accurate (and rizin cannot decode OpenRISC,
+   MicroBlaze, C-SKY or `beqz.n`), so `binary.avg_complexity`,
+   `huge/tiny/leaf_function_count` and kin will move; recalibrate the
+   traits that depend on them, and set the fallback thresholds from the
+   share of files that would still reach rizin and why.
+4. **Instruction facts.** An iterator over a recovered function's
+   instructions that yields facts, not disassembly text: an address
+   built into a register; a call or syscall site with the known constant
+   in each argument register (which register holds the number — `rax`,
+   `x8`, `r7`, `$v0`, Darwin's `x16` — is ABI knowledge the decoders
+   already model); an immediate stored to a stack slot; a xor
+   instruction. The constant tracker exists in every decoder; this
+   exposes exactly what the consumers below need, no more. Start with
+   x86, x86-64, AArch64 and 32-bit Arm.
+   - First consumer and its test: `filefacts/src/formats/elf/syscalls.rs`,
+     which sweeps x86-64 linearly with iced and looks back a fixed window
+     before each AArch64 `svc #0`, so a number set in an earlier block is
+     lost and every other set is ignored. filefacts keeps the
+     number-to-name tables, the libc `syscall()` wrapper (a call fact
+     with known arguments to a PLT or symbol), the JSON and the traits.
+   - Then `pe/api_hash.rs` takes its call graph from `Function`/`Ref`;
+     its PEB and export-walk shape detectors stay, optionally run over
+     funktion's instructions instead of a sweep.
+   - `funktion::cil::body` for .NET CFG metrics (above) is the same
+     shape: wire it in after a corpus A/B.
+5. **stng CLI drops rizin.** `izzj`/`isj` go (stng's extractor and goblin
+   symbols cover them), `iSj` goes (goblin). `aaa; /at xor; /at lea; aoj`
+   becomes xor and address facts; `s entry0; pdf` parsed as text becomes
+   syscall, call and stack-store facts limited to the entry function
+   (first measure whether `scan_binary_for_connect_addrs`, bounded to
+   that function's range, already finds the same addresses on the
+   testdata). Diff CLI output on stng's testdata before and after. stng
+   keeps its own handful of `connect` numbers rather than depending on
+   filefacts.
+6. **Later, in stng:** `instr/amd64.rs` and `instr/arm64.rs` take their
+   addresses from funktion (every instruction set, correct boundaries)
+   and keep the pointer/length pairing; `stack_strings.rs` (a 64-bit
+   iced sweep) moves to stack-store facts once they exist. The AArch64
+   caller-state recognizer, `xor/arm64_stack.rs`, `xor/pointer/arm64/*`
+   and the `xor/pe_decoder.rs` interpreter stay: XOR- and
+   string-specific. `fileid/shellcode.rs`'s GetPC byte checks stay in
+   filefacts: a few byte reads at offset 0 do not justify recovery.
+
+Order: 1–3 make filefacts rizin-free on its primary path with no new
+decoding API; 4 with `syscalls.rs` as its test; then 5 and 6.

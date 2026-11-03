@@ -341,6 +341,7 @@ fn elf_x86_64_cxx() {
     check("classic-level-linux-x64.node", |outcome| {
         assert!(outcome.found(Found::STUB) > 0, "no PLT stubs");
         assert!(outcome.cases() > 0, "no jump tables");
+        names_functions_and_targets(outcome);
         finds_rizin_except(
             outcome,
             &[(
@@ -349,6 +350,39 @@ fn elf_x86_64_cxx() {
             )],
         );
     });
+}
+
+/// Every PLT stub is named for its import, and every call through one
+/// resolves to that name; exported symbols name their functions.
+fn names_functions_and_targets(outcome: &Outcome<'_>) {
+    let recovery = &outcome.recovery;
+    let stubs: Vec<_> = recovery
+        .functions
+        .iter()
+        .filter(|f| f.thunk.is_some())
+        .collect();
+    assert!(!stubs.is_empty());
+    for stub in &stubs {
+        let slot = stub.thunk.unwrap_or_default();
+        assert_eq!(stub.name.as_deref(), outcome.image.import(slot), "{:#x}", stub.entry);
+    }
+    let named = recovery.functions.iter().filter(|f| f.name.is_some()).count();
+    assert!(named > stubs.len(), "only stubs are named");
+    let calls = recovery
+        .functions
+        .iter()
+        .flat_map(|f| &f.refs)
+        .filter(|r| r.kind == funktion::RefKind::Call)
+        .filter(|r| recovery.function(r.to).is_some_and(|f| f.thunk.is_some()))
+        .collect::<Vec<_>>();
+    assert!(!calls.is_empty(), "no calls through a stub");
+    for call in calls {
+        assert!(
+            recovery.target_name(&outcome.image, call.to).is_some(),
+            "call at {:#x} unnamed",
+            call.from
+        );
+    }
 }
 
 /// A64 C++: the PLT, with its 32-byte header.

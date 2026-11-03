@@ -42,11 +42,17 @@ fn dump(path: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
                         funktion::RefKind::Branch => "branch",
                         funktion::RefKind::Case => "case",
                     };
-                    json!({"from": r.from, "to": r.to, "kind": kind})
+                    json!({
+                        "from": r.from,
+                        "to": r.to,
+                        "kind": kind,
+                        "name": recovery.target_name(&image, r.to),
+                    })
                 })
                 .collect();
             json!({
                 "entry": f.entry,
+                "name": f.name,
                 "size": f.size,
                 "blocks": f.blocks,
                 "edges": f.edges,

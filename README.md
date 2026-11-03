@@ -23,21 +23,45 @@ for f in funktion::recover(&image).functions {
 ## Where it fits
 
 funktion is part of the [atomdrift project](https://github.com/atomdrift-project),
-alongside two tools that today shell out to [rizin](https://rizin.re) for the
-same answers:
+where two tools use it:
 
 - **[filefacts](https://github.com/atomdrift-project/filefacts)** turns
-  files into security-relevant facts. It runs rizin for symbol recovery and
-  CFG metrics on stripped binaries; funktion supplies those metrics
-  (function counts, complexity, blocks, calls) in-process, without a
-  subprocess or timeout.
+  files into security-relevant facts. On a stripped binary it needs the
+  function inventory and CFG metrics (function counts, complexity, blocks,
+  calls), the call graph its API-hash detector correlates, and the
+  constant arguments at each syscall.
 - **[stng](https://github.com/atomdrift-project/stng)** extracts strings
-  for malware analysis. It uses function boundaries to place strings and
-  find stack strings, which funktion provides without rizin or radare2
-  installed.
+  for malware analysis. It needs the addresses code builds (`lea`,
+  `adrp; add`, `auipc; addi`, `l32r`) to place strings, the immediates
+  stored to the stack to rebuild stack strings, and the xor instructions
+  near a string to find XOR keys.
 
-Both fall back to rizin when funktion's `Recovery` reports too little code
-covered, or too many invalid, unresolved or truncated paths.
+Both shelled out to [rizin](https://rizin.re) for these and are moving to
+funktion in-process, with rizin kept as a fallback for what funktion does
+not read (an unsupported instruction set, a PE with no section table) or
+reads badly (a `Recovery` with little code covered, or many invalid,
+unresolved or truncated paths).
+
+### The line
+
+funktion reports what code mechanically does; its callers decide what it
+means. Anything that is per-instruction-set decoding work, and gives the
+same answer whoever asks, belongs here:
+
+- instruction boundaries, functions, blocks, complexity, calls and jumps;
+- the constant that reaches an instruction: an address built into a
+  register, the number and arguments at a syscall or call, an immediate
+  stored to a stack slot, a xor instruction.
+
+Anything that needs domain meaning or emulation stays with the caller:
+what a syscall number is called and implies (filefacts' tables and trait
+rules), whether bytes are a string, a key or an indicator (stng's
+classifiers), a PEB walk or an export-directory hash loop (filefacts'
+detectors), an interpreter that follows a decoder loop (stng's).
+
+The test for new code: per-instruction-set work that both tools would
+use goes in funktion; a detector written against one instruction set with
+domain meaning stays with its tool.
 
 ## Accuracy
 

@@ -68,6 +68,11 @@ fn load(dest: u32, base: u32, disp: u32) -> Note {
     }
 }
 
+/// The signed eight-bit branch offset in bits 16..24.
+fn imm8(instr: u32) -> i64 {
+    i64::from(((instr >> 16) & 0xff) as u8 as i8)
+}
+
 /// A branch, jump or call target: `addr + 4 + offset`, the offset from the
 /// instruction's immediate field.
 fn relative(addr: u64, offset: i64) -> u64 {
@@ -102,6 +107,9 @@ pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
     let flow = match op0 {
         // QRST: the register-to-register group. Jumps, calls and returns
         // through a register live here (op1 and op2 zero, r zero).
+        // ill: GCC's trap after a call that never returns (`_start`'s
+        // `callx4 __libc_start_main`).
+        0x0 if instr == 0 => Flow::Stop,
         0x0 if (instr >> 16) == 0 && r == 0 => match t {
             0x8 | 0x9 => Flow::Return,
             0xa => Flow::JumpRegister(s),
@@ -143,8 +151,7 @@ pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
                 }
                 // addi / addmi at, as, imm8: tracked only off a known base.
                 0xc | 0xd => {
-                    let imm8 = ((instr >> 16) & 0xff) as i32 as i64;
-                    let imm = if r == 0xd { imm8 << 8 } else { imm8 };
+                    let imm = if r == 0xd { imm8(instr) << 8 } else { imm8(instr) };
                     if state.known.get(s as usize).copied().unwrap_or(false) && s != SP {
                         note = Note::Offset {
                             reg: t,
@@ -168,15 +175,13 @@ pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
             }
             Flow::Next
         }
-        // CALL: the PC-relative call and jump. The n field is the window.
+        // CALLN: call0/call4/call8/call12 (the n field is the window), to
+        // a word-aligned target.
         0x5 => {
             let offset = ((instr >> 6) ^ 0x2_0000).wrapping_sub(0x2_0000) as i32 as i64;
-            match (instr >> 4) & 3 {
-                // j: PC-relative unconditional jump.
-                0 => Flow::Jump(relative(addr, offset)),
-                // callN: to a word-aligned target.
-                _ => Flow::Call((addr & !3).wrapping_add(4).wrapping_add_signed(offset << 2)),
-            }
+            Flow::Call(
+                ((addr & !3).wrapping_add(4).wrapping_add_signed(offset << 2)) & 0xffff_ffff,
+            )
         }
         // SI: j (again, with n==0), and the twelve- and eight-bit branches.
         0x6 => match (instr >> 4) & 3 {
@@ -190,24 +195,24 @@ pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
                 let imm12 = ((instr >> 12) ^ 0x800).wrapping_sub(0x800) as i32 as i64;
                 Flow::Branch(relative(addr, imm12))
             }
-            // BRI8: the immediate branches (beqi, bnei, ...).
-            2 => {
-                let imm8 = ((instr >> 16) & 0xff) as i32 as i64;
-                Flow::Branch(relative(addr, imm8))
-            }
-            // n == 3: entry (a frame; m == 0) opens no branch, loop and the
-            // remaining immediate branches do.
+            // BRI8: the immediate branches (beqi, bnei, blti, bgei).
+            2 => Flow::Branch(relative(addr, imm8(instr))),
+            // n == 3, m == 0: entry (a frame).
             _ if (instr >> 6) & 3 == 0 => Flow::Next,
-            _ => {
-                let imm8 = ((instr >> 16) & 0xff) as i32 as i64;
-                Flow::Branch(relative(addr, imm8))
-            }
+            // m == 1: bf/bt (signed offset), and loop/loopnez/loopgtz,
+            // whose unsigned offset names the loop's end: loopnez and
+            // loopgtz skip there, loop falls into its body.
+            _ if (instr >> 6) & 3 == 1 => match r {
+                0 | 1 => Flow::Branch(relative(addr, imm8(instr))),
+                0x8 => Flow::Next,
+                0x9 | 0xa => Flow::Branch(relative(addr, i64::from((instr >> 16) & 0xff))),
+                _ => Flow::Invalid,
+            },
+            // m == 2, 3: bltui / bgeui.
+            _ => Flow::Branch(relative(addr, imm8(instr))),
         },
         // B: the register-register branches (beq, bne, blt, ...).
-        0x7 => {
-            let imm8 = ((instr >> 16) & 0xff) as i32 as i64;
-            Flow::Branch(relative(addr, imm8))
-        }
+        0x7 => Flow::Branch(relative(addr, imm8(instr))),
         // L32I.N: narrow word load (base s, displacement r * 4).
         0x8 => {
             note = load(t, s, r * 4);
@@ -220,16 +225,16 @@ pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
             known = Some(r);
             Flow::Next
         }
-        // ST2: movi.n (writes t), or beqz.n / bnez.n.
+        // ST2: movi.n as, imm7 (t below 8), or beqz.n / bnez.n as, imm6
+        // (t 8 and up; the offset is unsigned, t's low bits over r).
         0xc => {
-            if (instr >> 4) & 0x30 == 0x30 {
-                // Narrow compare-with-zero branch: a 6-bit split offset.
-                let imm = ((instr >> 12) & 0xf) | ((instr >> 4) & 0x30);
-                let target = addr.wrapping_add(4).wrapping_add(u64::from(imm)) & 0xffff_ffff;
-                Flow::Branch(target)
+            if t & 8 != 0 {
+                let imm = (t & 3) << 4 | r;
+                Flow::Branch(relative(addr, i64::from(imm)))
             } else {
-                let imm = ((instr >> 4) & 0x70 | r) as i32;
-                let imm = (imm ^ 0x40) - 0x40;
+                // imm7 runs from -32 to 95.
+                let imm = ((t & 7) << 4 | r) as i32;
+                let imm = if imm >= 96 { imm - 128 } else { imm };
                 note = Note::Address {
                     reg: s,
                     addr: imm as u32 as u64,
@@ -243,6 +248,8 @@ pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
             if r == 0xf {
                 match t {
                     0 | 1 => Flow::Return,
+                    // ill.n
+                    6 => Flow::Stop,
                     _ => Flow::Next,
                 }
             } else {
@@ -250,7 +257,8 @@ pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
                 Flow::Next
             }
         }
-        _ => Flow::Next,
+        // Reserved (or FLIX bundles, which no configuration seen uses).
+        _ => Flow::Invalid,
     };
     if let Some(reg) = known {
         state.set(reg, false);
@@ -335,6 +343,34 @@ mod tests {
         assert_eq!(
             run(&[0xa0, 0x08, 0x00], 0x400c60)[0].flow,
             Flow::JumpRegister(8)
+        );
+    }
+
+    #[test]
+    fn signed_and_narrow_branches() {
+        // bnei a2, 1, .-0x10 (imm8 0xf0: a backward branch)
+        assert_eq!(
+            run(&[0x66, 0x12, 0xf0], 0x401000)[0].flow,
+            Flow::Branch(0x400ff4)
+        );
+        // bne a2, a3, .-0x4
+        assert_eq!(
+            run(&[0x37, 0x92, 0xfc], 0x401000)[0].flow,
+            Flow::Branch(0x401000)
+        );
+        // beqz.n a2, .+0x24 (imm6 0x20: t 0b1010, r 0)
+        assert_eq!(
+            run(&[0xac, 0x02], 0x401000)[0].flow,
+            Flow::Branch(0x401024)
+        );
+        // movi.n a2, -1 (imm7 0x7f: t 0b0111, r 0xf) is no branch.
+        let insns = run(&[0x7c, 0xf2], 0x401000);
+        assert_eq!(insns[0].flow, Flow::Next);
+        assert_eq!(insns[0].note, Note::Address { reg: 2, addr: 0xffff_ffff });
+        // call0 .+0x8
+        assert_eq!(
+            run(&[0x45, 0x00, 0x00], 0x401000)[0].flow,
+            Flow::Call(0x401008)
         );
     }
 
