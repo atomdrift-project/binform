@@ -1,0 +1,7 @@
+# funktion: 4 functions, 284 bytes of code covered, 0 landing pads, 0 cases
+# rizin: 5 functions; 4 shared, 4 with the same blocks (4 of 4 without landing pads)
+only rizin 0x8000040 sym..text: missed
+0x800005c size=100 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
+0x80000dc size=60 blocks=3 edges=2 cc=3 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
+0x8000134 size=44 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/1
+0x800017c size=80 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | UNWIND rizin=1/1
