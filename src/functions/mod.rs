@@ -616,10 +616,11 @@ impl Work<'_> {
                 let Some(insn) = self.decode(rest, addr) else {
                     return;
                 };
-                if self.decoder.starts_function(rest)
-                    || ((after_end || self.decoder.calls_open_frames())
-                        && addr.is_multiple_of(self.decoder.function_alignment())
-                        && self.decoder.starts_frame(rest))
+                if let Some(entry) = self.decoder.entry_of(rest, addr) {
+                    self.add_entry(entry, Found::SWEEP, most);
+                } else if (after_end || self.decoder.calls_open_frames())
+                    && addr.is_multiple_of(self.decoder.function_alignment())
+                    && self.decoder.starts_frame(rest)
                 {
                     self.add_entry(addr, Found::SWEEP, most);
                 }

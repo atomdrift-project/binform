@@ -331,17 +331,31 @@ fn compare(options: &Options, file: &Path) -> Option<Value> {
         .map(|f| (f.entry, f.entry.saturating_add(f.size)))
         .collect();
     extents.sort_unstable();
-    let inside = only_rizin
+    let within = |entry: u64| {
+        let i = extents.partition_point(|&(start, _)| start <= entry);
+        i > 0 && entry < extents[i - 1].1
+    };
+    let inside = only_rizin.iter().filter(|&&(entry, _)| within(entry)).count();
+    // The rest that start in an executable section: rizin also makes
+    // functions of the strings and tables in `.rodata` or the headers when
+    // an executable segment maps them, which no recovery should match.
+    let code: Vec<&binform::Section> = image.sections.iter().filter(|s| s.executable).collect();
+    let in_code = |entry: u64| {
+        code.is_empty()
+            || code
+                .iter()
+                .any(|s| entry >= s.addr && entry - s.addr < s.size)
+    };
+    let outside_code = only_rizin
         .iter()
-        .filter(|&&(entry, _)| {
-            let i = extents.partition_point(|&(start, _)| start <= entry);
-            i > 0 && entry < extents[i - 1].1
-        })
+        .filter(|&&(entry, _)| !within(entry) && in_code(entry))
         .count();
     report["rizin"] = rizin_shape.json();
     report["shared"] = json!(shared);
-    report["only_rizin"] = json!(by_entry.len() - shared);
-    report["only_native"] = json!(recovery.functions.len() - shared);
+    // Counted from the lists themselves: `shared` pairs entries, and an
+    // entry both sides list twice would make the differences underflow.
+    report["only_rizin"] = json!(only_rizin.len());
+    report["only_native"] = json!(recovery.functions.len().saturating_sub(shared));
     report["only_native_found"] = json!(only_native);
     report["only_rizin_functions"] = only_rizin
         .iter()
@@ -353,6 +367,7 @@ fn compare(options: &Options, file: &Path) -> Option<Value> {
     report["shared_padded"] = json!(shared_padded);
     report["same_blocks_padded"] = json!(same_blocks_padded);
     report["only_rizin_inside"] = json!(inside);
+    report["only_rizin_code"] = json!(outside_code);
     Some(report)
 }
 

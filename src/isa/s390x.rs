@@ -53,6 +53,9 @@ pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
     let mut falls = false;
     let mut pad = false;
     let flow = match first {
+        // `0x0001`: the breakpoint Linux traps on, which LLVM and V8 emit
+        // after a call that never returns (`llvm.trap`).
+        0x00 if byte(1) == 0x01 => Flow::Stop,
         // An all-zero halfword is no valid instruction.
         0x00 => Flow::Invalid,
         // BCR M1, R2: `br r14` returns.
@@ -426,6 +429,7 @@ mod tests {
             decode(&mut State::default(), &[0, 0], 0).flow,
             Flow::Invalid
         );
+        assert_eq!(decode(&mut State::default(), &[0, 1], 0).flow, Flow::Stop);
         assert_eq!(
             decode(&mut State::default(), &[0xc0, 0xe5, 0], 0).flow,
             Flow::Invalid

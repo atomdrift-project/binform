@@ -94,6 +94,8 @@ pub enum Arch {
     SuperH,
     /// 32-bit PowerPC, big-endian.
     PowerPc,
+    /// 32-bit PowerPC, little-endian: Windows NT's.
+    PowerPcEl,
     /// 64-bit PowerPC, big-endian (the ELFv1 ABI, with function
     /// descriptors).
     PowerPc64,
@@ -128,6 +130,8 @@ pub enum Arch {
     /// Programs are relocatable objects, one function per program section
     /// and its static subprograms.
     Bpf,
+    /// Intel (Altera) Nios II, R1, little-endian.
+    Nios2,
 }
 
 impl Arch {
@@ -188,6 +192,7 @@ impl Arch {
             | Self::Sparc
             | Self::SuperH
             | Self::PowerPc
+            | Self::PowerPcEl
             | Self::RiscV32
             | Self::M68k
             | Self::OpenRisc
@@ -197,6 +202,7 @@ impl Arch {
             | Self::ArcV2
             | Self::CSky
             | Self::MCore
+            | Self::Nios2
             | Self::Xtensa => 4,
             Self::X86_64
             | Self::Arm64

@@ -769,6 +769,39 @@ fn mcore_static() {
     });
 }
 
+/// Nios II: PLT stubs that load their GOT slot through a constant, and the
+/// symbol table's functions with their real extents.
+#[test]
+fn nios2_dynamic() {
+    check("bot-nios2-dynamic", |outcome| {
+        assert_eq!(outcome.image.arch, Some(crate::Arch::Nios2));
+        assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
+        assert_eq!(outcome.recovery.invalid, 0);
+        let functions = &outcome.recovery.functions;
+        let stubs = functions.iter().filter(|f| f.thunk.is_some()).count();
+        assert!(stubs >= 30, "only {stubs} import stubs");
+        let main = functions
+            .iter()
+            .find(|f| f.name.as_deref() == Some("main"))
+            .unwrap_or_else(|| panic!("no main"));
+        assert!(main.refs.iter().any(|r| r.kind == RefKind::Call));
+    });
+}
+
+/// PE on MIPS (Windows CE) and on little-endian PowerPC (Windows NT): the
+/// machines map to decoders binform has.
+#[test]
+fn pe_mips_and_powerpc() {
+    check("wince-mips.exe", |outcome| {
+        assert_eq!(outcome.image.arch, Some(crate::Arch::MipsEl));
+        assert!(outcome.recovery.functions.len() >= 60);
+    });
+    check("winnt-ppc.exe", |outcome| {
+        assert_eq!(outcome.image.arch, Some(crate::Arch::PowerPcEl));
+        assert!(outcome.recovery.functions.len() >= 100);
+    });
+}
+
 /// eBPF: one program, named by its symbol, covered whole.
 #[test]
 fn ebpf_object() {

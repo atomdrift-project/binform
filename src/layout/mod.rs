@@ -197,6 +197,7 @@ const EM_CSKY: u16 = 252;
 const EM_XTENSA: u16 = 94;
 const EM_MCORE: u16 = 39;
 const EM_BPF: u16 = 247;
+const EM_ALTERA_NIOS2: u16 = 113;
 /// `e_flags`' ABI field: ABIv1 is 1.
 const EF_CSKY_ABI_V1: u32 = 1 << 28;
 const EM_S390: u16 = 22;
@@ -232,7 +233,8 @@ fn elf_arch(elf: &Elf) -> Option<Arch> {
         (EM_SPARC | EM_SPARC32PLUS, _) => Arch::Sparc,
         (EM_SPARCV9, _) => Arch::Sparc64,
         (EM_SH, _) => Arch::SuperH,
-        (EM_PPC, false) => Arch::PowerPc,
+        (EM_PPC, false) if elf.big => Arch::PowerPc,
+        (EM_PPC, false) => Arch::PowerPcEl,
         (EM_PPC64, true) if elf.big => Arch::PowerPc64,
         (EM_PPC64, true) => Arch::PowerPc64El,
         (EM_RISCV, false) => Arch::RiscV32,
@@ -251,6 +253,7 @@ fn elf_arch(elf: &Elf) -> Option<Arch> {
         (EM_XTENSA, false) if !elf.big => Arch::Xtensa,
         (EM_MCORE, false) if !elf.big => Arch::MCore,
         (EM_BPF, true) if !elf.big => Arch::Bpf,
+        (EM_ALTERA_NIOS2, false) if !elf.big => Arch::Nios2,
         (EM_LOONGARCH, false) => return None,
         _ => return None,
     };
@@ -951,6 +954,11 @@ fn pe_arch(machine: u16) -> Option<Arch> {
         // Windows CE on Arm, with Thumb (`THUMB`) or without; ARMNT,
         // Windows on 32-bit Arm, which runs Thumb-2 only.
         0x01c0 | 0x01c2 | 0x01c4 => Arch::Arm,
+        // MIPS R3000, R4000, R10000, WCE MIPS v2 and MIPS with FPU, all
+        // little-endian. (MIPS16 is a different encoding.)
+        0x0162 | 0x0166 | 0x0168 | 0x0169 | 0x0366 => Arch::MipsEl,
+        // Windows NT on PowerPC, little-endian, with FPU or without.
+        0x01f0 | 0x01f1 => Arch::PowerPcEl,
         _ => return None,
     })
 }
@@ -1500,14 +1508,14 @@ mod tests {
         assert_eq!(pick(&[]), None);
     }
 
-    /// An instruction set binform does not decode (Nios II, machine 113)
+    /// An instruction set binform does not decode (IA-64, machine 50)
     /// leaves the layout readable and no code to recover.
     #[test]
     fn an_unknown_instruction_set_has_layout_only() {
         let mut header = vec![0_u8; 64];
         header[..7].copy_from_slice(b"\x7fELF\x02\x01\x01");
         header[16..18].copy_from_slice(&2_u16.to_le_bytes());
-        header[18..20].copy_from_slice(&113_u16.to_le_bytes());
+        header[18..20].copy_from_slice(&50_u16.to_le_bytes());
         header[24..32].copy_from_slice(&0x1000_u64.to_le_bytes());
         let bin = parse(&header).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(

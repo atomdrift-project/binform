@@ -10,6 +10,7 @@ pub(crate) mod loongarch;
 pub(crate) mod m68k;
 pub(crate) mod microblaze;
 pub(crate) mod mips;
+pub(crate) mod nios2;
 pub(crate) mod openrisc;
 pub(crate) mod ppc;
 pub(crate) mod riscv;
@@ -253,6 +254,7 @@ pub(crate) enum Decoder {
     CSky(Box<crate::isa::csky::State>),
     Xtensa(Box<crate::isa::xtensa::State>),
     Bpf,
+    Nios2(Box<crate::isa::nios2::State>),
 }
 
 impl Decoder {
@@ -286,7 +288,15 @@ impl Decoder {
                 big: arch.big_endian(),
                 wide: arch.address_width() == 8,
                 r6: arch.mips_r6(),
-                got: crate::isa::mips::Got::new(image.got, &image.segments),
+                got: crate::isa::mips::Got::new(image.got, &image.segments).learn(
+                    arch.big_endian(),
+                    image
+                        .seeds
+                        .iter()
+                        .map(|seed| seed.addr)
+                        .chain(image.extents.iter().map(|range| range.start)),
+                    &image.segments,
+                ),
                 state: crate::isa::mips::State::default(),
             },
             Arch::S390x => Self::S390x(crate::isa::s390x::State::default()),
@@ -299,7 +309,7 @@ impl Decoder {
                 state: crate::isa::sparc::State::default(),
             },
             Arch::SuperH => Self::SuperH(crate::isa::superh::State::default()),
-            arch @ (Arch::PowerPc | Arch::PowerPc64 | Arch::PowerPc64El) => Self::PowerPc {
+            arch @ (Arch::PowerPc | Arch::PowerPcEl | Arch::PowerPc64 | Arch::PowerPc64El) => Self::PowerPc {
                 big: arch.big_endian(),
                 wide: arch.address_width() == 8,
                 toc: image.got,
@@ -325,6 +335,7 @@ impl Decoder {
             },
             Arch::CSky | Arch::MCore => Self::CSky(Box::default()),
             Arch::Bpf => Self::Bpf,
+            Arch::Nios2 => Self::Nios2(Box::default()),
             Arch::Xtensa => Self::Xtensa(Box::default()),
         }
     }
@@ -348,6 +359,7 @@ impl Decoder {
             Self::Arc { state, .. } => **state = crate::isa::arc::State::default(),
             Self::CSky(state) => state.reset(),
             Self::Xtensa(state) => **state = crate::isa::xtensa::State::default(),
+            Self::Nios2(state) => **state = crate::isa::nios2::State::default(),
             _ => {}
         }
     }
@@ -385,6 +397,7 @@ impl Decoder {
             Self::CSky(state) => crate::isa::csky::decode(state, bytes, addr),
             Self::Xtensa(state) => crate::isa::xtensa::decode(state, bytes, addr),
             Self::Bpf => crate::isa::bpf::decode(bytes, addr),
+            Self::Nios2(state) => crate::isa::nios2::decode(state, bytes, addr),
         }
     }
 
@@ -409,7 +422,8 @@ impl Decoder {
             | Self::MicroBlaze { .. }
             | Self::Arc { .. }
             | Self::CSky(_)
-            | Self::Xtensa(_) => 4,
+            | Self::Xtensa(_)
+            | Self::Nios2(_) => 4,
             Self::RiscV { config, .. } if !config.wide => 4,
             Self::X86 { .. }
             | Self::Arm64(_)
@@ -442,7 +456,8 @@ impl Decoder {
             | Self::PowerPc { .. }
             | Self::LoongArch(_)
             | Self::OpenRisc(_)
-            | Self::MicroBlaze { .. } => 4,
+            | Self::MicroBlaze { .. }
+            | Self::Nios2(_) => 4,
             Self::Bpf => 8,
         }
     }
@@ -514,6 +529,7 @@ impl Decoder {
                 | Self::Arc { .. }
                 | Self::CSky(_)
                 | Self::Xtensa(_)
+                | Self::Nios2(_)
         )
     }
 
@@ -560,6 +576,7 @@ impl Decoder {
             Self::Arc { v2, .. } => crate::isa::arc::starts_frame(bytes, *v2),
             Self::CSky(_) => crate::isa::csky::starts_frame(bytes),
             Self::Xtensa(_) => crate::isa::xtensa::starts_frame(bytes),
+            Self::Nios2(_) => crate::isa::nios2::starts_frame(bytes),
             _ => false,
         }
     }
@@ -600,6 +617,19 @@ impl Decoder {
             } => crate::isa::ppc::global_entry(*big, bytes),
             Self::Arc { .. } => crate::isa::arc::millicode(bytes),
             _ => false,
+        }
+    }
+
+    /// The entry of the function whose start the instruction at `addr`
+    /// gives away: `addr` itself for one [`starts_function`] recognises, or
+    /// on MIPS the entry a `$gp` setup computes from `$t9`, a few
+    /// instructions before it in n64 code.
+    pub(crate) fn entry_of(&self, bytes: &[u8], addr: u64) -> Option<u64> {
+        match self {
+            Self::Mips { big, wide, got, .. } => {
+                crate::isa::mips::gp_entry(*big, *wide, got.gps(), bytes, addr)
+            }
+            _ => self.starts_function(bytes).then_some(addr),
         }
     }
 

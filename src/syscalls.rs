@@ -14,7 +14,7 @@ fn table(arch: Arch) -> Option<&'static [(u16, &'static str)]> {
         Arch::Arm => &ARM,
         Arch::Mips | Arch::MipsEl | Arch::MipsR6 | Arch::MipsR6El => &MIPS,
         Arch::Mips64 | Arch::Mips64El | Arch::Mips64R6 | Arch::Mips64R6El => &MIPS64,
-        Arch::PowerPc => &POWERPC,
+        Arch::PowerPc | Arch::PowerPcEl => &POWERPC,
         Arch::PowerPc64 | Arch::PowerPc64El => &POWERPC64,
         Arch::S390x => &S390X,
         Arch::Sparc => &SPARC,

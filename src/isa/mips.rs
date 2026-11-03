@@ -66,6 +66,9 @@ pub(crate) struct State {
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Got {
     pub(crate) gp: Option<u64>,
+    /// The other values `$gp` takes in a binary linked with several GOTs,
+    /// as the known functions' `$gp` setups compute them; none is recorded.
+    others: Arc<[u64]>,
     /// The bytes of each segment within `$gp`'s reach, by address.
     pieces: Arc<[(u64, Box<[u8]>)]>,
 }
@@ -91,8 +94,45 @@ impl Got {
             .collect();
         Self {
             gp: Some(gp),
+            others: Arc::default(),
             pieces,
         }
+    }
+
+    /// The values of `$gp` the `$gp` setups of the functions at `entries`
+    /// compute (`entry + d`), other than `gp`, that two or more agree on: a
+    /// multi-GOT binary's secondary GOTs, which no header records.
+    pub(crate) fn learn(
+        mut self,
+        big: bool,
+        entries: impl Iterator<Item = u64>,
+        segments: &[Segment<'_>],
+    ) -> Self {
+        let mut counts: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
+        for entry in entries {
+            let Some(code) = segments.iter().filter(|s| s.executable).find_map(|s| {
+                let at = usize::try_from(entry.checked_sub(s.addr)?).ok()?;
+                s.bytes.get(at..)
+            }) else {
+                continue;
+            };
+            // The setup is within the first eight instructions.
+            if let Some(d) = (0..8).find_map(|i| gp_setup(big, code.get(i * 4..)?).map(|(d, _)| d)) {
+                *counts.entry(entry.wrapping_add_signed(d)).or_default() += 1;
+            }
+        }
+        let mut others: Vec<(u64, u32)> = counts
+            .into_iter()
+            .filter(|&(gp, n)| n >= 2 && Some(gp) != self.gp)
+            .collect();
+        others.sort_unstable_by_key(|&(gp, n)| (std::cmp::Reverse(n), gp));
+        self.others = others.into_iter().take(8).map(|(gp, _)| gp).collect();
+        self
+    }
+
+    /// Every value `$gp` is known to take.
+    pub(crate) fn gps(&self) -> impl Iterator<Item = u64> + '_ {
+        self.gp.into_iter().chain(self.others.iter().copied())
     }
 
     /// The `size`-byte word at `gp + offset`.
@@ -126,6 +166,9 @@ pub(crate) fn decode(
     let Some(word) = read_word(big, bytes) else {
         return Insn::new(4, Flow::Invalid);
     };
+    if !r6 && reserved(word) {
+        return Insn::new(4, Flow::Invalid);
+    }
     let Some((flow, compact)) = flow(word, addr, wide, r6) else {
         track(state, word, got, (big, wide));
         let mut insn = Insn::new(4, Flow::Next);
@@ -158,7 +201,11 @@ pub(crate) fn decode(
         return insn;
     }
     // A transfer with no slot after it is cut short: the slot is not code.
-    let Some(slot) = bytes.get(4..8).and_then(|slot| read_word(big, slot)) else {
+    let Some(slot) = bytes
+        .get(4..8)
+        .and_then(|slot| read_word(big, slot))
+        .filter(|&slot| r6 || !reserved(slot))
+    else {
         return Insn::new(4, Flow::Invalid);
     };
     // The slot runs before the target: GCC puts a table's low address
@@ -484,6 +531,88 @@ fn track(state: &mut State, word: u32, got: &Got, (big, wide): (bool, bool)) {
     }
 }
 
+/// The `$gp` setup at the start of `bytes`: `lui $gp, %hi(d)` then, in some
+/// order within three instructions, `(d)addu $gp, $gp, $t9` and `(d)addiu
+/// $gp, $gp, %lo(d)`, or Release 6's `aui $gp, $t9, %hi(d)` and the `addiu`.
+/// It computes `$gp` from `$t9`, the function's own address: `d = _gp -
+/// entry`. Returns `d`, and whether it is o32's `.cpload` (`lui; addiu;
+/// addu`, in that order), which is a function's first instruction.
+fn gp_setup(big: bool, bytes: &[u8]) -> Option<(i64, bool)> {
+    let word = |i: usize| bytes.get(i * 4..).and_then(|rest| read_word(big, rest));
+    let first = word(0)?;
+    let aui = first >> 16 == 0x3f3c;
+    if first >> 16 != 0x3c1c && !aui {
+        return None;
+    }
+    let addiu = |w: u32| w >> 16 == 0x279c || w >> 16 == 0x679c;
+    let add_t9 = |w: u32| w == 0x0399_e021 || w == 0x0399_e02d;
+    let rest: Vec<u32> = (1..4).filter_map(word).collect();
+    let low = rest.iter().copied().find(|&w| addiu(w))?;
+    if !aui && !rest.iter().copied().any(add_t9) {
+        return None;
+    }
+    let cpload = !aui
+        && matches!(rest.as_slice(), [second, third, ..] if addiu(*second) && *third == 0x0399_e021);
+    let hi = i64::from(((first & 0xffff) << 16).cast_signed());
+    let lo = i64::from((low & 0xffff) as u16 as i16);
+    Some((hi + lo, cpload))
+}
+
+/// The entry of the position-independent function whose `$gp` setup (see
+/// [`gp_setup`]) starts at `addr`. o32's `.cpload` is its own entry,
+/// whatever `_gp` is. n64 and Release 6 code set `$gp` a few instructions
+/// in, after the frame, so their entry is the one `d` names from one of the
+/// values `$gp` is known to take (`gps`). Such functions are often reached
+/// only through pointers (callbacks, vtables, local GOT entries), so the
+/// sweep seeds them.
+pub(crate) fn gp_entry(
+    big: bool,
+    wide: bool,
+    gps: impl Iterator<Item = u64>,
+    bytes: &[u8],
+    addr: u64,
+) -> Option<u64> {
+    let (d, cpload) = gp_setup(big, bytes)?;
+    if cpload {
+        return Some(addr);
+    }
+    let mask = if wide { u64::MAX } else { 0xffff_ffff };
+    gps.map(|gp| gp.wrapping_sub_signed(d) & mask)
+        .find(|&entry| entry <= addr && addr - entry <= 32 && entry.is_multiple_of(4))
+}
+
+/// Whether `word` is an encoding releases before 6 leave reserved, or an
+/// instruction with a field they require to be zero set: data, which a
+/// walk into the literals and tables GCC and Go place in `.text` would
+/// otherwise decode on through. Release 6 reassigns much of this space, and
+/// MSA (opcode `0x1e`) and the DSP and MIPS-3D extensions are left alone.
+fn reserved(word: u32) -> bool {
+    let rs = (word >> 21) & 0x1f;
+    let rt = (word >> 16) & 0x1f;
+    let sa = (word >> 6) & 0x1f;
+    match word >> 26 {
+        // SPECIAL
+        0x00 => match word & 0x3f {
+            // (0x05 and 0x15 are MSA's `lsa` and `dlsa`.)
+            0x0e | 0x28 | 0x29 | 0x35 | 0x37 | 0x39 | 0x3d => true,
+            // sll, sra, dsll, dsra, dsll32, dsra32 take no `rs`; srl and
+            // the doubleword right shifts only `rs` 1, as rotations.
+            0x00 | 0x03 | 0x38 | 0x3b | 0x3c | 0x3f => rs != 0,
+            0x02 | 0x3a | 0x3e => rs > 1,
+            // The three-register ALU operations take no shift amount.
+            0x20..=0x2f => sa != 0,
+            _ => false,
+        },
+        // REGIMM
+        0x01 => matches!(rt, 0x04..=0x07 | 0x0d | 0x0f | 0x14..=0x1b | 0x1d),
+        // COP1: the formats and moves with no assignment, and MIPS-3D's
+        // `bc1any2` and `bc1any4`, which no current core has.
+        0x11 => matches!(rs, 0x09..=0x0f | 0x12 | 0x13 | 0x17..=0x1f),
+        0x3b => true,
+        _ => false,
+    }
+}
+
 fn read_word(big: bool, bytes: &[u8]) -> Option<u32> {
     let bytes: [u8; 4] = bytes.get(..4)?.try_into().ok()?;
     Some(if big {
@@ -494,7 +623,6 @@ fn read_word(big: bool, bytes: &[u8]) -> Option<u32> {
 }
 
 /// Where control goes after the transfer at `addr` and its slot; `None`
-/// for an instruction that is no transfer.
 /// for an instruction that is no transfer. Release 6's compact transfers
 /// come with `true`: they have no slot.
 fn flow(word: u32, addr: u64, wide: bool, r6: bool) -> Option<(Flow, bool)> {
@@ -589,6 +717,33 @@ fn flow(word: u32, addr: u64, wide: bool, r6: bool) -> Option<(Flow, bool)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pic_entries() {
+        let be = |words: &[u32]| -> Vec<u8> { words.iter().flat_map(|w| w.to_be_bytes()).collect() };
+        let le = |words: &[u32]| -> Vec<u8> { words.iter().flat_map(|w| w.to_le_bytes()).collect() };
+        // o32 at 0xac124: lui gp, 0x8e; addiu gp, gp, -0x1da4; addu gp, gp, t9,
+        // with _gp = 0xac124 + 0x8e0000 - 0x1da4.
+        let o32 = [0x3c1c_008e, 0x279c_e25c, 0x0399_e021];
+        let gp = 0xac124 + 0x8e_0000 - 0x1da4;
+        assert_eq!(gp_entry(true, false, Some(gp).into_iter(), &be(&o32), 0xac124), Some(0xac124));
+        assert_eq!(gp_entry(false, false, Some(gp).into_iter(), &le(&o32), 0xac124), Some(0xac124));
+        // A `.cpload` is its function's entry whatever `_gp` is: a multi-GOT
+        // executable has several.
+        assert_eq!(gp_entry(true, false, Some(gp).into_iter(), &be(&o32), 0xac200), Some(0xac200));
+        // Without _gp, o32's order at the start.
+        assert_eq!(gp_entry(true, false, None.into_iter(), &be(&o32), 0x1000), Some(0x1000));
+        assert_eq!(gp_entry(false, false, None.into_iter(), &be(&o32), 0x1000), None);
+        // n64, 8 bytes after the entry 0x17ee8: lui gp, 2; daddu gp, gp, t9;
+        // daddiu gp, gp, 0x7f18 (d = _gp - entry = 0x2_7f18 - 0x1_0000).
+        let n64 = [0x3c1c_0002, 0x0399_e02d, 0x679c_7f18];
+        let gp = 0x17ee8 + 0x2_7f18;
+        assert_eq!(gp_entry(true, true, Some(gp).into_iter(), &be(&n64), 0x17ef0), Some(0x17ee8));
+        // ... but not when no _gp names the entry.
+        assert_eq!(gp_entry(true, true, None.into_iter(), &be(&n64), 0x17ef0), None);
+        // A lui of another register is none.
+        assert_eq!(gp_entry(true, false, None.into_iter(), &be(&[0x3c04_008e, 0x279c_e25c, 0x0399_e021]), 0), None);
+    }
 
     fn one(words: &[u32], addr: u64) -> Insn {
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
@@ -719,11 +874,26 @@ mod tests {
     }
 
     #[test]
+    fn reserved_encodings_are_no_code() {
+        // A word of the data frida keeps in `.text`: COP1 format 0x0a.
+        assert_eq!(one(&[0x454f_3090], 0x1000).flow, Flow::Invalid);
+        // sll with an `rs`; addu with a shift amount; REGIMM rt 0x14.
+        assert_eq!(one(&[0x0021_0800], 0x1000).flow, Flow::Invalid);
+        assert_eq!(one(&[0x0043_0861], 0x1000).flow, Flow::Invalid);
+        assert_eq!(one(&[0x0414_0001], 0x1000).flow, Flow::Invalid);
+        // rotr (srl with `rs` 1), ehb, and a plain addu are code.
+        assert_eq!(one(&[0x0021_0842], 0x1000).flow, Flow::Next);
+        assert_eq!(one(&[0x0000_00c0], 0x1000).flow, Flow::Next);
+        assert_eq!(one(&[0x0043_0821], 0x1000).flow, Flow::Next);
+    }
+
+    #[test]
     fn switch_notes() {
         let gp = 0x2_7ff0;
         let got = Got {
             gp: Some(gp),
             pieces: vec![(gp - 0x7ff0, vec![0, 1, 0, 0].into())].into(),
+            others: Arc::default(),
         };
         let code = [
             0x2c81_0010, // sltiu $at, $a0, 16
@@ -799,6 +969,7 @@ mod tests {
         let got = Got {
             gp: Some(0x2_7ff0),
             pieces: vec![(0x2_0018, vec![0, 1, 0, 0].into())].into(),
+            others: Arc::default(),
         };
         let words = [0x8f99_8028, 0x2739_0008, 0x0320_f809, 0];
         let calls: Vec<Flow> = insns(&words, 0x1000, &got)

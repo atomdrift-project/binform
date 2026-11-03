@@ -59,6 +59,15 @@ pub(crate) fn decode(state: &mut State, wide: bool, bytes: &[u8], addr: u64) -> 
         flow => flow,
     };
     let mut insn = Insn::new(8, flow);
+    // The 32-bit ABI's struct return: the caller follows the call's slot with
+    // `unimp size`, and the callee returns past it, to `%o7 + 12`
+    // (`jmp %i7 + 12`). The word is the call's, not code.
+    if !wide
+        && matches!(flow, Flow::Call(_) | Flow::CallIndirect)
+        && bytes.get(8..12).and_then(read_word).is_some_and(struct_size)
+    {
+        insn.len = 12;
+    }
     // An annulled branch (bit 29) runs its slot only when taken.
     let annulled = word >> 30 == 0 && word & 0x2000_0000 != 0;
     if !annulled {
@@ -224,6 +233,13 @@ fn note(state: &mut State, word: u32, wide: bool, addr: u64) -> Note {
     note
 }
 
+/// Whether `word` is the `unimp size` a 32-bit caller places after a call
+/// to a function returning a structure: a nonzero size within the 12 bits
+/// the callee's check reads.
+fn struct_size(word: u32) -> bool {
+    word >> 22 == 0 && (1..0x1000).contains(&(word & 0x3f_ffff))
+}
+
 /// Whether a call's delay slot `word` makes the callee return past the
 /// caller: a `restore`, or arithmetic that writes `%o7`.
 fn returns_elsewhere(word: u32) -> bool {
@@ -285,8 +301,13 @@ fn flow(word: u32, addr: u64, wrap: impl Fn(u64) -> u64) -> Option<Flow> {
             let rs1 = (word >> 14) & 0x1f;
             let immediate = word & 0x2000 != 0;
             match (word >> 19) & 0x3f {
-                // JMPL: `ret` and `retl` jump past the call's slot.
-                0x38 if rd == 0 && immediate && word & 0x1fff == 8 && (rs1 == I7 || rs1 == O7) => {
+                // JMPL: `ret` and `retl` jump past the call's slot; a function
+                // returning a structure, past the `unimp` after it too.
+                0x38 if rd == 0
+                    && immediate
+                    && matches!(word & 0x1fff, 8 | 12)
+                    && (rs1 == I7 || rs1 == O7) =>
+                {
                     Some(Flow::Return)
                 }
                 0x38 if rd == O7 => Some(Flow::CallIndirect),
@@ -439,6 +460,24 @@ mod tests {
         assert_eq!(one(&[0x81c0_6000, NOP], 0x1000).flow, Flow::JumpRegister(1));
         // brz %o0, +8 (BPr)
         assert_eq!(one(&[0x02c2_0002, NOP], 0x1000).flow, Flow::Branch(0x1008));
+    }
+
+    /// The 32-bit struct-return convention: `call f; nop; unimp 20`
+    /// returns past the `unimp`, which `f` leaves by `jmp %i7 + 12`.
+    #[test]
+    fn struct_returns() {
+        let call = one(&[0x4000_0010, NOP, 0x0000_0014], 0x1_0000);
+        assert_eq!((call.len, call.flow), (12, Flow::Call(0x1_0040)));
+        // Zeros after a call are no size: a call that never returns.
+        assert_eq!(one(&[0x4000_0010, NOP, 0], 0x1_0000).len, 8);
+        // 64-bit code has no such word.
+        let bytes: Vec<u8> = [0x4000_0010_u32, NOP, 0x14]
+            .iter()
+            .flat_map(|w| w.to_be_bytes())
+            .collect();
+        assert_eq!(decode(&mut State::default(), true, &bytes, 0x1_0000).len, 8);
+        // jmp %i7 + 12; restore
+        assert_eq!(one(&[0x81c7_e00c, 0x81e8_0000], 0x1000).flow, Flow::Return);
     }
 
     #[test]

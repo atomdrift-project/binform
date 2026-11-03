@@ -198,7 +198,7 @@ Decisions taken while building it:
   ordinals are stable (`pe/ordinals.rs`), so binform does not ship rizin's
   3 MB ordinal database.
 - `arch` is `Option`: a file of an instruction set binform does not decode
-  (eBPF, M*Core, Nios II, IA-64, MIPS-FPU and PowerPC PE) parses to its
+  (IA-64, big-endian M*Core or eBPF) parses to its
   layout, and `functions` returns nothing for it. `Error::Arch` is gone.
 - ELF sections come from the section headers only. Rizin's `iS` does not
   synthesise them from program headers either (those are `iSS`), and

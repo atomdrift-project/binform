@@ -30,6 +30,20 @@ only. Next:
 - **Not read:** big-endian Arm and SuperH, 31-bit s390,
   `.ARM.exidx` unwind entries, and LSDAs on big-endian sets
   (`eh::landing_pads` reads little-endian).
+- **MIPS position-independent entries:** functions reached only through
+  pointers are seeded from their `$gp` setup: o32's `.cpload` (`lui; addiu;
+  addu $gp, $gp, $t9`) is a function's first instruction; n64's (`lui;
+  daddu; daddiu`, after the frame) names its entry as `_gp - d`, checked
+  against the `_gp` the dynamic table gives and, in multi-GOT binaries, the
+  other values the known functions' setups agree on (`Got::learn`).
+  frida-gadget for o32 went from 69% to 97% covered, n64 from 66% to 87%.
+  Words pre-Release 6 leaves reserved (unassigned SPECIAL, REGIMM and COP1
+  encodings, shifts with an `rs`, ALU operations with a shift amount) are
+  no code, so a walk stops at the data frida keeps in `.text` instead of
+  merging megabytes of it into one function. Left: multi-GOT n64
+  `frida-server` at 60% (the rest has no `$gp` setup a known `_gp` names);
+  Go's `deferreturn` tails (`jal runtime.deferreturn; ...; jr $ra`, reached
+  only by panics) are outside their functions, as rizin's are.
 - **MIPS16e:** OpenWrt builds its MIPS packages as MIPS16e (`e_flags` has
   `EF_MIPS_ARCH_ASE_M16`; functions at odd addresses, as Thumb's are), which
   neither binform nor rizin decodes: OpenWrt 24.10's `busybox` and
@@ -54,8 +68,9 @@ only. Next:
   was read: the 1.16 and 1.18 magic numbers had been swapped, which also
   cost `s390x/pkg-esbuild` and `mips/pkg-turbo` a fifth of their code).
   Power10's eight-byte prefixed instructions decode, with `pla` addresses
-  and `pld` GOT slots PC-relative (`ppc64le-power10-pie`). Left: 32-bit
-  little-endian PowerPC (no sample), and the data word after the 64-bit
+  and `pld` GOT slots PC-relative (`ppc64le-power10-pie`). 32-bit
+  little-endian PowerPC decodes too (`winnt-ppc.exe`: 116 functions to
+  rizin's 77). Left: the data word after the 64-bit
   call to musl's `_start_c`, which reads as an invalid instruction: its
   `__libc_start_main` reaches the second stage through an opaque register
   (`stage2(main, argc, argv)`), so the walk cannot tell it never returns.
@@ -206,9 +221,13 @@ only. Next:
   their stubs are unlinked; switch tables through `addx4; l32i; jx` leave
   a handful of jumps unresolved; no call0 ABI or big-endian Xtensa.
 - **Not supported at all:** AIX (XCOFF), and these corpus sets:
-  Nios II, IA-64, MIPS-FPU and PowerPC PE files, and big-endian M*Core
-  and eBPF. (Little-endian M*Core decodes as C-SKY ABIv1, 79% of
-  `bot-mcore-static`; eBPF objects as `isa/bpf.rs`, whole programs.)
+  IA-64 PE files (13 functions to rizin across the set; not worth a
+  bundle decoder), and big-endian M*Core and eBPF. (Little-endian M*Core
+  decodes as C-SKY ABIv1, 79% of `bot-mcore-static`; eBPF objects as
+  `isa/bpf.rs`, whole programs; Nios II as `isa/nios2.rs`, 97% of
+  `bot-nios2-dynamic` with its PLT stubs named; Windows CE's MIPS and NT's
+  little-endian PowerPC PE files as MIPS and PowerPC, `wince-mips.exe` and
+  `winnt-ppc.exe`.)
 
 - **From the exotic-binaries survey** (`C:\data\exotic_binaries`, all
   hostile: parse only):
