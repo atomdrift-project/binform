@@ -613,6 +613,20 @@ fn mips_got_calls() {
     check("calls-mips64el.so", links_calls);
 }
 
+/// RISC-V objects built for relaxation: calls are `auipc; jalr` pairs,
+/// branches are relocated, and a jump table's entries are differences
+/// (`ADD32`/`SUB32`).
+#[test]
+fn riscv_objects() {
+    check("calls-riscv64.o", links_calls);
+    check("rv64-switch.o", |outcome| {
+        assert_eq!(outcome.recovery.functions.len(), 4);
+        assert_eq!(outcome.cases(), 20, "pick's cases");
+        assert_eq!(outcome.recovery.unresolved, 0);
+        assert_eq!(coverage(outcome), 100);
+    });
+}
+
 #[test]
 fn s390x_object() {
     check("calls-s390x.o", links_calls);

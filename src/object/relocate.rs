@@ -85,6 +85,9 @@ pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf, arch: Arch) -> Layout<'a> {
         }
     };
 
+    // RISC-V's PC-relative low parts name the `auipc` their high part
+    // fixed: its place, and the `S + A - P` it used.
+    let mut high = HashMap::new();
     for &(target, ref relocs) in &elf.relocations {
         let Some(place_base) = addrs.get(target).copied() else {
             continue;
@@ -118,6 +121,7 @@ pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf, arch: Arch) -> Layout<'a> {
                 arch if arch.mips() => mips(section, offset, reloc.kind, fix, arch.big_endian()),
                 Arch::S390x => s390x(section, offset, reloc.kind, fix),
                 Arch::Sparc | Arch::Sparc64 => sparc(section, offset, reloc.kind, fix),
+                Arch::RiscV32 | Arch::RiscV64 => riscv(section, offset, reloc.kind, fix, &mut high),
                 // SuperH objects are laid out but not linked: their calls
                 // read as calls to themselves.
                 _ => None,
@@ -579,6 +583,148 @@ fn sparc(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix) -> Option<()> {
     }
 }
 
+/// The `(value + 0x800) >> 12` an `auipc`/`lui` holds, and the low 12
+/// bits its partner adds.
+fn split(value: i64) -> Option<(u32, u32)> {
+    let high = fits(value.wrapping_add(0x800) >> 12, 20)?;
+    let low = u32::try_from(value & 0xfff).ok()?;
+    Some((high, low))
+}
+
+/// RISC-V: RELA, little-endian. Calls are `auipc; jalr` pairs (`CALL`),
+/// and branches within a section are relocated too, as the linker may
+/// relax what lies between.
+fn riscv(
+    bytes: &mut [u8],
+    offset: usize,
+    kind: u32,
+    fix: Fix,
+    high: &mut HashMap<u64, i64>,
+) -> Option<()> {
+    let target = fix.value.wrapping_add_signed(fix.addend?);
+    let relative = target.wrapping_sub(fix.place).cast_signed();
+    let insn = word_at(bytes, offset, false).unwrap_or(0);
+    let half = u16::from_le_bytes(field::<2>(bytes, offset)?);
+    let u_type = |insn: u32, value: u32| insn & 0xfff | value << 12;
+    let i_type = |insn: u32, value: u32| insn & 0x000f_ffff | value << 20;
+    let s_type =
+        |insn: u32, value: u32| insn & 0x01ff_f07f | (value >> 5) << 25 | (value & 0x1f) << 7;
+    match kind {
+        // R_RISCV_32, R_RISCV_64, R_RISCV_32_PCREL
+        1 => put(bytes, offset, &low32(target)),
+        2 => put(bytes, offset, &target.to_le_bytes()),
+        57 => put(bytes, offset, &fits(relative, 32)?.to_le_bytes()),
+        // ADD32, SUB32, ADD64, SUB64: `.eh_frame`'s and the debug
+        // sections' differences.
+        35 | 39 => {
+            let old = u32::from_le_bytes(field::<4>(bytes, offset)?);
+            let target = u32::from_le_bytes(low32(target));
+            let new = if kind == 35 {
+                old.wrapping_add(target)
+            } else {
+                old.wrapping_sub(target)
+            };
+            put(bytes, offset, &new.to_le_bytes())
+        }
+        36 | 40 => {
+            let old = u64::from_le_bytes(field::<8>(bytes, offset)?);
+            let new = if kind == 36 {
+                old.wrapping_add(target)
+            } else {
+                old.wrapping_sub(target)
+            };
+            put(bytes, offset, &new.to_le_bytes())
+        }
+        // BRANCH: B-type, 13 bits.
+        16 => {
+            let imm = fits(relative, 13)?;
+            let field = (imm >> 12 & 1) << 31
+                | (imm >> 5 & 0x3f) << 25
+                | (imm >> 1 & 0xf) << 8
+                | (imm >> 11 & 1) << 7;
+            put_word(bytes, offset, insn & 0x01ff_f07f | field, false)
+        }
+        // JAL: J-type, 21 bits.
+        17 => {
+            let imm = fits(relative, 21)?;
+            let field = (imm >> 20 & 1) << 31
+                | (imm >> 1 & 0x3ff) << 21
+                | (imm >> 11 & 1) << 20
+                | (imm >> 12 & 0xff) << 12;
+            put_word(bytes, offset, insn & 0xfff | field, false)
+        }
+        // CALL, CALL_PLT: `auipc` and the `jalr` after it.
+        18 | 19 => {
+            let (hi, lo) = split(relative)?;
+            let next = offset.checked_add(4)?;
+            let jalr = word_at(bytes, next, false)?;
+            put_word(bytes, offset, u_type(insn, hi), false)?;
+            put_word(bytes, next, i_type(jalr, lo), false)
+        }
+        // PCREL_HI20; GOT_HI20 for imports, whose slot stands in for the
+        // GOT entry.
+        20 | 23 if kind == 23 || fix.undefined => {
+            high.insert(fix.place, relative);
+            put_word(bytes, offset, u_type(insn, split(relative)?.0), false)
+        }
+        // PCREL_LO12_I, PCREL_LO12_S: the symbol is the `auipc`.
+        24 | 25 => {
+            let (_, lo) = split(*high.get(&target)?)?;
+            let insn = if kind == 24 {
+                i_type(insn, lo)
+            } else {
+                s_type(insn, lo)
+            };
+            put_word(bytes, offset, insn, false)
+        }
+        // HI20, LO12_I, LO12_S: absolute `lui; addi`.
+        26 => put_word(
+            bytes,
+            offset,
+            u_type(insn, split(target.cast_signed())?.0),
+            false,
+        ),
+        27 => put_word(
+            bytes,
+            offset,
+            i_type(insn, split(target.cast_signed())?.1),
+            false,
+        ),
+        28 => put_word(
+            bytes,
+            offset,
+            s_type(insn, split(target.cast_signed())?.1),
+            false,
+        ),
+        // RVC_BRANCH: CB, 9 bits.
+        44 => {
+            let imm = fits(relative, 9)?;
+            let field = (imm >> 8 & 1) << 12
+                | (imm >> 3 & 3) << 10
+                | (imm >> 6 & 3) << 5
+                | (imm >> 1 & 3) << 3
+                | (imm >> 5 & 1) << 2;
+            let field = u16::try_from(field).ok()?;
+            put(bytes, offset, &(half & 0xe383 | field).to_le_bytes())
+        }
+        // RVC_JUMP: CJ, 12 bits.
+        45 => {
+            let imm = fits(relative, 12)?;
+            let field = (imm >> 11 & 1) << 12
+                | (imm >> 4 & 1) << 11
+                | (imm >> 8 & 3) << 9
+                | (imm >> 10 & 1) << 8
+                | (imm >> 6 & 1) << 7
+                | (imm >> 7 & 1) << 6
+                | (imm >> 1 & 7) << 3
+                | (imm >> 5 & 1) << 2;
+            let field = u16::try_from(field).ok()?;
+            put(bytes, offset, &(half & 0xe003 | field).to_le_bytes())
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -670,6 +816,56 @@ mod tests {
         let mut code = [0xff, 0xf7, 0xfe, 0xff];
         arm(&mut code, 0, 10, at(0x800_0102, 0x800_0041));
         assert_eq!(arm_call(&code, 0x800_0103), Flow::Call(0x800_0041));
+    }
+
+    /// The flow of each RISC-V instruction in `code`, decoded from `addr`.
+    fn riscv_flows(code: &[u8], addr: u64) -> Vec<crate::decode::Flow> {
+        let config = crate::riscv::Config {
+            wide: true,
+            gp: None,
+        };
+        let mut state = crate::riscv::State::default();
+        let mut flows = Vec::new();
+        let mut at = 0;
+        while let Some(rest) = code.get(at..).filter(|rest| !rest.is_empty()) {
+            let insn = crate::riscv::decode(&mut state, config, rest, addr + at as u64);
+            flows.push(insn.flow);
+            at += insn.len as usize;
+        }
+        flows
+    }
+
+    #[test]
+    fn riscv_calls_and_branches() {
+        use crate::decode::Flow;
+        let at = |place: u64, value: u64| Fix {
+            value,
+            addend: Some(0),
+            place,
+            undefined: false,
+        };
+        let mut high = HashMap::new();
+        // auipc ra, 0; jalr ra, 0(ra)
+        let mut code: Vec<u8> = [0x0000_0097_u32, 0x0000_80e7]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        riscv(&mut code, 0, 19, at(0x800_1000, 0x801_3a00), &mut high);
+        assert_eq!(riscv_flows(&code, 0x800_1000)[1], Flow::Call(0x801_3a00));
+        // beq a0, a1, 0, backwards; jal ra, 0, forwards.
+        let mut code = 0x00b5_0063_u32.to_le_bytes();
+        riscv(&mut code, 0, 16, at(0x800_1000, 0x800_0f00), &mut high);
+        assert_eq!(riscv_flows(&code, 0x800_1000), [Flow::Branch(0x800_0f00)]);
+        let mut code = 0x0000_00ef_u32.to_le_bytes();
+        riscv(&mut code, 0, 17, at(0x800_1000, 0x808_0000), &mut high);
+        assert_eq!(riscv_flows(&code, 0x800_1000), [Flow::Call(0x808_0000)]);
+        // c.beqz a0, 0; c.j 0.
+        let mut code = 0xc101_u16.to_le_bytes();
+        riscv(&mut code, 0, 44, at(0x800_1000, 0x800_0f42), &mut high);
+        assert_eq!(riscv_flows(&code, 0x800_1000), [Flow::Branch(0x800_0f42)]);
+        let mut code = 0xa001_u16.to_le_bytes();
+        riscv(&mut code, 0, 45, at(0x800_1000, 0x800_17fe), &mut high);
+        assert_eq!(riscv_flows(&code, 0x800_1000), [Flow::Jump(0x800_17fe)]);
     }
 
     #[test]

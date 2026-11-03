@@ -75,10 +75,13 @@ only. Next:
   `sh*add`, `slli.uw` and `zext.w` (`rv64-pie`; `jq` 1.8.1 covers 99%,
   with 9564 cases in its tables and 165 unresolved jumps, mostly
   oniguruma's dispatch through pointers loaded from structs; Go and the
-  bots 87-98%). Left: relocating RISC-V objects (`relocate` has no
-  RISC-V arm, so a `.syso`'s `auipc; jalr` calls are unlinked), and
-  rizin finds next to nothing on RISC-V to compare against (`aa` keeps
-  only the entry point).
+  bots 87-98%). Objects are linked, relaxation's branch relocations and
+  `ADD32`/`SUB32` table entries included (`calls-riscv64.o`,
+  `rv64-switch.o`; the corpus's Go race `.syso` drops from 3731
+  "functions", one per unlinked call, to 758). Tables of sign-extended
+  32-bit absolute addresses (`lw; jr`, code linked below 2 GiB) resolve
+  on every 64-bit set. Rizin finds next to nothing on RISC-V to compare
+  against (`aa` keeps only the entry point).
 - **Not supported at all:** AIX (XCOFF), and these corpus sets:
   LoongArch, m68k, C-SKY, ARC, MicroBlaze, Xtensa, OpenRISC, Nios II,
   M*Core, BPF, and IA-64, MIPS-FPU and PowerPC PE files.

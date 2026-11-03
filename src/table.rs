@@ -319,8 +319,14 @@ impl Tracker {
                 shift,
                 ..self.load(mem, size.max(1), false)?
             }),
+            // Absolute entries fill the register, or fill it sign-extended
+            // (RV64's `lw; jr` in code linked below 2 GiB).
             Flow::JumpRegister(reg) => match self.get(reg)? {
-                Value::Entry(table) if table.base.is_some() || table.size == self.width => {
+                Value::Entry(table)
+                    if table.base.is_some()
+                        || table.size == self.width
+                        || (table.size == 4 && table.signed) =>
+                {
                     Some(table)
                 }
                 _ => None,
