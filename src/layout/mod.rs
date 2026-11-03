@@ -967,9 +967,6 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &Pe<'_>) -> Option<Binary<'a>> {
     let machine = pe.machine;
     let arch = pe_arch(machine)?;
     let (tables, slots) = pe_tables(pe);
-    // ARMNT code addresses carry Thumb's bit 0, as `.pdata` writes them;
-    // Windows CE's set it for Thumb code only.
-    let code = |addr: u64| if machine == 0x01c4 { addr | 1 } else { addr };
     let base = pe.image_base;
     let at = |rva: u32| base.wrapping_add(u64::from(rva));
     let resources = pe.resources();
@@ -998,6 +995,12 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &Pe<'_>) -> Option<Binary<'a>> {
         })
         .collect();
 
+    let go = pe_gopclntab(&segments);
+    // ARMNT code addresses carry Thumb's bit 0, as `.pdata` writes them;
+    // Windows CE's set it for Thumb code only. Go's `windows/arm` port is
+    // the exception: it emits A32 code under the ARMNT machine.
+    let thumb = machine == 0x01c4 && go.is_empty();
+    let code = |addr: u64| if thumb { addr | 1 } else { addr };
     let mut seeds = Vec::new();
     if pe.entry != 0 {
         seeds.push(seed(code(at(pe.entry)), Origin::Entry));
@@ -1012,11 +1015,7 @@ fn pe_image<'a>(bytes: &'a [u8], pe: &Pe<'_>) -> Option<Binary<'a>> {
             .zip(pe.tls_callbacks())
             .map(|(i, addr)| seed(code(addr), Origin::Tls(i))),
     );
-    seeds.extend(
-        pe_gopclntab(&segments)
-            .into_iter()
-            .map(|(addr, name)| seed(addr, Origin::Symbol(name))),
-    );
+    seeds.extend(go.into_iter().map(|(addr, name)| seed(addr, Origin::Symbol(name))));
     let mut extents = Vec::new();
     match arch {
         Arch::Arm64 => seeds.extend(

@@ -1,4 +1,4 @@
-# binform: 2634 functions, 971890 bytes of code covered, 0 landing pads, 0 cases
+# binform: 2633 functions, 971692 bytes of code covered, 0 landing pads, 0 cases
 # rizin: 1863 functions; 1863 shared, 1815 with the same blocks (1815 of 1863 without landing pads)
 0x11000 size=236 blocks=11 edges=13 cc=6 cases=0 found=SYMBOL | CALL | SWEEP rizin=11/5
 0x110fc size=12 blocks=1 edges=0 cc=1 cases=0 found=SYMBOL | CALL | SWEEP rizin=1/1
@@ -951,13 +951,13 @@
 0x714c0 size=448 blocks=18 edges=25 cc=9 cases=0 found=SYMBOL | CALL | SWEEP rizin=18/9
 0x71698 size=108 blocks=6 edges=8 cc=4 cases=0 found=SYMBOL | CALL | SWEEP rizin=6/4
 0x7170c size=52 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL rizin=-
-0x71748 size=36 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | CALL | SWEEP rizin=3/2
-0x7176c size=36 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | CALL | SWEEP rizin=3/2
-0x71790 size=36 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | CALL | SWEEP rizin=3/2
-0x717b4 size=36 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | CALL | SWEEP rizin=3/2
-0x717d8 size=36 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | CALL | SWEEP rizin=3/2
-0x717fc size=36 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | CALL | SWEEP rizin=3/2
-0x71820 size=36 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | CALL | SWEEP rizin=3/2
+0x71748 size=36 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | CALL rizin=3/2
+0x7176c size=36 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | CALL rizin=3/2
+0x71790 size=36 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | CALL rizin=3/2
+0x717b4 size=36 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | CALL rizin=3/2
+0x717d8 size=36 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | CALL rizin=3/2
+0x717fc size=36 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | CALL rizin=3/2
+0x71820 size=36 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | CALL rizin=3/2
 0x71844 size=1312 blocks=75 edges=106 cc=41 cases=0 found=SYMBOL | CALL | SWEEP rizin=75/41
 0x71da0 size=360 blocks=12 edges=15 cc=7 cases=0 found=SYMBOL | CALL | SWEEP rizin=12/6
 0x71f30 size=916 blocks=20 edges=26 cc=10 cases=0 found=SYMBOL | CALL | SWEEP rizin=20/9
@@ -1596,7 +1596,6 @@
 0xa3980 size=160 blocks=6 edges=7 cc=3 cases=0 found=SYMBOL rizin=-
 0xa3a44 size=160 blocks=6 edges=7 cc=3 cases=0 found=SYMBOL rizin=-
 0xa3b08 size=160 blocks=6 edges=7 cc=3 cases=0 found=SYMBOL rizin=-
-0xa3baa size=47212 blocks=184 edges=186 cc=2 cases=0 found=SWEEP rizin=-
 0xa3bcc size=160 blocks=6 edges=7 cc=3 cases=0 found=SYMBOL rizin=-
 0xa3c90 size=160 blocks=6 edges=7 cc=3 cases=0 found=SYMBOL rizin=-
 0xa3d54 size=160 blocks=6 edges=7 cc=3 cases=0 found=SYMBOL rizin=-

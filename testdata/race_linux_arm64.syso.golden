@@ -456,7 +456,7 @@
 0x80105d0 size=164 blocks=7 edges=10 cc=3 cases=0 found=SYMBOL | UNWIND rizin=7/3
 0x8010674 size=52 blocks=3 edges=3 cc=2 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=3/2
 0x80106b0 size=152 blocks=9 edges=11 cc=6 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=9/6
-0x8010750 size=4 blocks=1 edges=1 cc=0 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=1/0
+0x8010750 size=4 blocks=1 edges=1 cc=0 cases=0 found=SYMBOL | UNWIND | CALL rizin=1/0
 0x8010754 size=40 blocks=3 edges=2 cc=3 cases=0 found=SYMBOL | UNWIND rizin=3/3
 0x8010780 size=108 blocks=5 edges=7 cc=2 cases=0 found=SYMBOL | UNWIND | CALL | SWEEP rizin=5/2
 0x80107f0 size=340 blocks=17 edges=27 cc=12 cases=0 found=SYMBOL | UNWIND rizin=17/12

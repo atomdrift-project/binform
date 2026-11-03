@@ -247,6 +247,15 @@ fn returns_elsewhere(word: u32) -> bool {
     word >> 30 == 2 && (op3 == 0x3d || ((word >> 25) & 0x1f == O7 && op3 < 0x30))
 }
 
+/// Whether `bytes` begin a frame: `save %sp, -n, %sp`, or, for a frame
+/// past `simm13`'s reach, `save %sp, %g1, %sp` after `sethi; or` builds the
+/// size in `%g1`.
+pub(crate) fn starts_frame(bytes: &[u8]) -> bool {
+    read_word(bytes).is_some_and(|w| {
+        (w & 0xffff_f000 == 0x9de3_b000) || w == 0x9de3_8001
+    })
+}
+
 fn read_word(bytes: &[u8]) -> Option<u32> {
     Some(u32::from_be_bytes(bytes.get(..4)?.try_into().ok()?))
 }
@@ -336,6 +345,18 @@ mod tests {
     fn one(words: &[u32], addr: u64) -> Insn {
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
         decode(&mut State::default(), false, &bytes, addr)
+    }
+
+    #[test]
+    fn frames() {
+        let starts = |w: u32| starts_frame(&w.to_be_bytes());
+        // save %sp, -96, %sp; save %sp, -0x1000, %sp; save %sp, %g1, %sp
+        assert!(starts(0x9de3_bfa0));
+        assert!(starts(0x9de3_b000));
+        assert!(starts(0x9de3_8001));
+        // save %sp, 96, %sp (a positive size) and restore are not.
+        assert!(!starts(0x9de3_a060));
+        assert!(!starts(0x81e8_0000));
     }
 
     /// Each instruction of `words` at `addr` on, in order.

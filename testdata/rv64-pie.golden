@@ -33,7 +33,7 @@
 0x21b8 size=206 blocks=16 edges=22 cc=10 cases=0 found=CALL | SWEEP rizin=-
 0x2286 size=136 blocks=8 edges=11 cc=5 cases=0 found=CALL | SWEEP rizin=-
 0x230e size=102 blocks=10 edges=14 cc=6 cases=0 found=CALL | SWEEP rizin=-
-0x2374 size=2 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=-
+0x2374 size=2 blocks=1 edges=0 cc=1 cases=0 found=CALL rizin=-
 0x2376 size=38 blocks=1 edges=0 cc=1 cases=0 found=POINTER rizin=-
 0x23a6 size=74 blocks=4 edges=5 cc=3 cases=0 found=POINTER rizin=-
 0x23f0 size=244 blocks=10 edges=14 cc=6 cases=0 found=CALL | SWEEP rizin=-

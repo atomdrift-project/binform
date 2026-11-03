@@ -638,11 +638,24 @@ impl Work<'_> {
                             .code(target)
                             .is_some_and(|code| work.decoder.starts_frame(code))
                 };
+                // A small negative integer in a literal pool decodes as a
+                // call a few bytes back (Arm's `0xfbfffffc`, `blx` six
+                // bytes back): no function calls just behind itself. (A call
+                // to itself is `bl .`, a weak symbol left unresolved; a call
+                // just ahead may be real: musl's `_start` calls the
+                // `_start_c` that follows it.) The sweep reads one Arm mode;
+                // a call into the other (a `blx` from A32) is more often a
+                // data word (`0xfafafafa`) than code, and a walk follows the
+                // real ones.
+                let near = |target: u64| target < (addr & !1) && (addr & !1) - target <= 16;
+                let same_mode = |target: u64| target & 1 == mode;
                 match insn.flow {
-                    Flow::Call(target) if framed(self, target) => {
+                    Flow::Call(target)
+                        if framed(self, target) && !near(target) && same_mode(target) =>
+                    {
                         self.add_entry(target, Found::SWEEP, most);
                     }
-                    Flow::Jump(target) => {
+                    Flow::Jump(target) if !self.decoder.frames_late() => {
                         let frame = self
                             .memory
                             .code(target)

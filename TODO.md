@@ -251,7 +251,22 @@ only. Next:
     (`pe-arm/bad-47897`) embeds x86 code in `.text` that `.pdata` points
     into.
   - The small ARMNT DLLs with no functions have no code: resource-only
-    (MUI) DLLs, API-set forwarders, IL-only and MDIL assemblies.
+    (MUI) DLLs, API-set forwarders, IL-only and MDIL assemblies (whose
+    `.text` holds binding tokens, not final code: rizin's thousands of
+    functions there are decodes of those).
+  - Go's `windows/arm` port emits A32 code under the ARMNT machine, so a
+    Go PE's starts keep bit 0 clear; and the sweep no longer takes a call
+    into the other Arm mode (`0xfafafafa` reads as `blx`) or a few bytes
+    behind itself (a literal pool's `0xfbfffffc`). Each such data word
+    used to seed a Thumb walk through A32 code that ran the whole budget
+    out: `armnt/pkg-v2fly-v2ray` went from 2,695 functions, truncated, to
+    all 43,939 of its `.gopclntab`, with 34 unresolved jumps (577,070
+    before). rizin decodes the file as Thumb.
+  - SPARC and MIPS frames (`save %sp, -n, %sp`, `addiu $sp, $sp, -n`)
+    vet the pointers found in data, as other sets' do: 443 more of
+    `libsqlite3-linux-sparc64.so`'s functions (its method tables), and
+    15% more code. A jump to one is not a tail call there: GCC
+    shrink-wraps the frame past an early return (`Decoder::frames_late`).
   - Packed MIPS bots (no section headers, UPX-style stubs) cover under
     35%; unpacking is out of scope.
 

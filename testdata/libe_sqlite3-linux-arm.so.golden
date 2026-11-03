@@ -39,223 +39,223 @@ only rizin 0xae27c obj.aOp.44259: not code
 only rizin 0xaf84c fcn.000af84c: not code
 0x80e0 size=12 blocks=1 edges=0 cc=1 cases=0 found=LOADER | SYMBOL rizin=1/1
 0x80ec size=16 blocks=1 edges=0 cc=1 cases=0 found=STUB rizin=-
-0x8100 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x810c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8118 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8124 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8130 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x813c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8148 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8154 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8160 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x816c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8178 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8184 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8190 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x819c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x81a8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x81b4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x81c0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x81cc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x81d8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x81e4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x81f0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x81fc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8208 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8214 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8220 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x822c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8238 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8244 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8250 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x825c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8268 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8274 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8280 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x828c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8298 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x82a4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x82b0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x82bc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x82c8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x82d4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x82e0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x82ec size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x82f8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8304 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8310 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x831c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8328 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8334 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8340 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x834c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8358 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8364 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8370 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x837c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8388 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8394 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x83a0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x83ac size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x83b8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x83c4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x83d0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x83dc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x83e8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x83f4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8400 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x840c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8418 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8424 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
+0x8100 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x810c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8118 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8124 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8130 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x813c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8148 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8154 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8160 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x816c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8178 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8184 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8190 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x819c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x81a8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x81b4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x81c0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x81cc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x81d8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x81e4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x81f0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x81fc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8208 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8214 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8220 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x822c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8238 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8244 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8250 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x825c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8268 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8274 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8280 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x828c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8298 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x82a4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x82b0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x82bc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x82c8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x82d4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x82e0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x82ec size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x82f8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8304 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8310 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x831c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8328 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8334 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8340 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x834c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8358 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8364 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8370 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x837c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8388 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8394 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x83a0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x83ac size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x83b8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x83c4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x83d0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x83dc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x83e8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x83f4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8400 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x840c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8418 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8424 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
 0x8430 size=2 blocks=1 edges=1 cc=0 cases=0 found=STUB rizin=1/1
 0x8434 size=12 blocks=1 edges=0 cc=1 cases=0 found=STUB rizin=-
-0x8440 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/0
-0x844c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8458 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8464 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8470 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x847c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8488 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/0
-0x8494 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x84a0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x84ac size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x84b8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x84c4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x84d0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x84dc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x84e8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x84f4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8500 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x850c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8518 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8524 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8530 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x853c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8548 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8554 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8560 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
+0x8440 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/0
+0x844c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8458 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8464 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8470 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x847c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8488 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/0
+0x8494 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x84a0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x84ac size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x84b8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x84c4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x84d0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x84dc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x84e8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x84f4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8500 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x850c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8518 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8524 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8530 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x853c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8548 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8554 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8560 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
 0x856c size=12 blocks=1 edges=0 cc=1 cases=0 found=STUB rizin=-
-0x8578 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8584 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8590 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x859c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x85a8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x85b4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x85c0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x85cc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x85d8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x85e4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x85f0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x85fc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8608 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8614 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8620 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x862c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8638 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8644 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8650 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x865c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8668 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8674 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8680 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x868c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8698 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x86a4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x86b0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x86bc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x86c8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x86d4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x86e0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x86ec size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x86f8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8704 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8710 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x871c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8728 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8734 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8740 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x874c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8758 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8764 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8770 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x877c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8788 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8794 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x87a0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x87ac size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x87b8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x87c4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x87d0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x87dc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x87e8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x87f4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8800 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x880c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8818 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8824 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8830 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x883c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8848 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8854 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8860 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x886c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8878 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8884 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8890 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x889c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x88a8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x88b4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x88c0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x88cc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x88d8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x88e4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x88f0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x88fc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8908 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8914 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8920 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x892c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8938 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8944 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8950 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x895c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8968 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8974 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/0
-0x8980 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x898c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8998 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x89a4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x89b0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x89bc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x89c8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x89d4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x89e0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x89ec size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x89f8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8a04 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8a10 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8a1c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8a28 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8a34 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8a40 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8a4c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8a58 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8a64 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/0
+0x8578 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8584 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8590 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x859c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x85a8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x85b4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x85c0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x85cc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x85d8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x85e4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x85f0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x85fc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8608 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8614 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8620 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x862c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8638 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8644 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8650 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x865c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8668 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8674 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8680 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x868c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8698 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x86a4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x86b0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x86bc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x86c8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x86d4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x86e0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x86ec size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x86f8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8704 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8710 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x871c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8728 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8734 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8740 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x874c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8758 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8764 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8770 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x877c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8788 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8794 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x87a0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x87ac size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x87b8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x87c4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x87d0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x87dc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x87e8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x87f4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8800 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x880c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8818 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8824 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8830 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x883c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8848 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8854 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8860 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x886c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8878 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8884 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8890 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x889c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x88a8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x88b4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x88c0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x88cc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x88d8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x88e4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x88f0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x88fc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8908 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8914 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8920 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x892c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8938 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8944 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8950 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x895c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8968 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8974 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/0
+0x8980 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x898c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8998 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x89a4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x89b0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x89bc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x89c8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x89d4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x89e0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x89ec size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x89f8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8a04 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8a10 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8a1c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8a28 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8a34 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8a40 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8a4c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8a58 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8a64 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/0
 0x8a70 size=2 blocks=1 edges=1 cc=0 cases=0 found=STUB rizin=-
 0x8a74 size=12 blocks=1 edges=0 cc=1 cases=0 found=STUB rizin=-
-0x8a80 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8a8c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8a98 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8aa4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
+0x8a80 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8a8c size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8a98 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8aa4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
 0x8ab0 size=2 blocks=1 edges=1 cc=0 cases=0 found=STUB rizin=-
 0x8ab4 size=12 blocks=1 edges=0 cc=1 cases=0 found=STUB rizin=-
-0x8ac0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8acc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8ad8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8ae4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8af0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8afc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
-0x8b08 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
+0x8ac0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8acc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8ad8 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8ae4 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8af0 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8afc size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
+0x8b08 size=12 blocks=1 edges=0 cc=1 cases=0 found=CALL | STUB rizin=1/1
 0x8b18 size=28 blocks=2 edges=2 cc=2 cases=0 found=ENTRY | SYMBOL | CALL rizin=2/1
 0x8b3c size=26 blocks=4 edges=4 cc=4 cases=0 found=SYMBOL | CALL | SWEEP rizin=4/4
 0x8b68 size=34 blocks=4 edges=4 cc=4 cases=0 found=SYMBOL rizin=4/4

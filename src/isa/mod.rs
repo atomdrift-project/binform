@@ -577,6 +577,8 @@ impl Decoder {
             Self::CSky(_) => crate::isa::csky::starts_frame(bytes),
             Self::Xtensa(_) => crate::isa::xtensa::starts_frame(bytes),
             Self::Nios2(_) => crate::isa::nios2::starts_frame(bytes),
+            Self::Sparc { .. } => crate::isa::sparc::starts_frame(bytes),
+            Self::Mips { big, .. } => crate::isa::mips::starts_frame(*big, bytes),
             _ => false,
         }
     }
@@ -590,6 +592,14 @@ impl Decoder {
             Self::Xtensa(_) => crate::isa::xtensa::literal_word(bytes, addr),
             _ => None,
         }
+    }
+
+    /// Whether compilers set the frame up after a function's first blocks
+    /// (GCC shrink-wraps SPARC's `save` and MIPS's `addiu $sp` past an
+    /// early return), so a jump to a frame setup is a branch within the
+    /// function, not a tail call.
+    pub(crate) fn frames_late(&self) -> bool {
+        matches!(self, Self::Sparc { .. } | Self::Mips { .. })
     }
 
     /// Whether every compiled function opens with a frame, so a call

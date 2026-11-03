@@ -613,6 +613,11 @@ fn reserved(word: u32) -> bool {
     }
 }
 
+/// Whether `bytes` begin a frame: `(d)addiu $sp, $sp, -n`.
+pub(crate) fn starts_frame(big: bool, bytes: &[u8]) -> bool {
+    read_word(big, bytes).is_some_and(|w| matches!(w >> 15, 0x4f7b | 0xcf7b) && w & 3 == 0)
+}
+
 fn read_word(big: bool, bytes: &[u8]) -> Option<u32> {
     let bytes: [u8; 4] = bytes.get(..4)?.try_into().ok()?;
     Some(if big {
@@ -871,6 +876,16 @@ mod tests {
             .iter()
             .map(|insn| insn.flow)
             .collect()
+    }
+
+    #[test]
+    fn frames() {
+        let starts = |w: u32| starts_frame(true, &w.to_be_bytes());
+        // addiu $sp, $sp, -32; daddiu $sp, $sp, -64
+        assert!(starts(0x27bd_ffe0));
+        assert!(starts(0x67bd_ffc0));
+        // addiu $sp, $sp, 32 (an epilogue) is not.
+        assert!(!starts(0x27bd_0020));
     }
 
     #[test]

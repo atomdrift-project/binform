@@ -170,7 +170,7 @@ only rizin 0x3118e fcn.0003118e: not code
 0x10858 size=32 blocks=3 edges=3 cc=4 cases=0 found=CALL | SWEEP rizin=1/1
 0x108a8 size=130 blocks=4 edges=5 cc=5 cases=0 found=CALL | SWEEP rizin=-
 0x1092c size=216 blocks=6 edges=7 cc=5 cases=0 found=CALL | SWEEP rizin=-
-0x10940 size=212 blocks=4 edges=4 cc=4 cases=0 found=CALL | SWEEP rizin=2/1
+0x10940 size=212 blocks=4 edges=4 cc=4 cases=0 found=CALL rizin=2/1
 0x10950 size=6122 blocks=240 edges=385 cc=149 cases=14 found=POINTER rizin=-
 0x1213c size=2264 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
 0x12a14 size=224 blocks=16 edges=24 cc=10 cases=0 found=CALL | SWEEP rizin=17/11
@@ -371,7 +371,7 @@ only rizin 0x3118e fcn.0003118e: not code
 0x20320 size=10 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP rizin=1/1
 0x2032c size=114 blocks=3 edges=3 cc=2 cases=0 found=CALL | SWEEP rizin=3/2
 0x203a0 size=106 blocks=14 edges=20 cc=10 cases=0 found=CALL | SWEEP rizin=2/1
-0x203f8 size=90 blocks=14 edges=20 cc=10 cases=0 found=CALL | SWEEP rizin=1/0
+0x203f8 size=90 blocks=14 edges=20 cc=10 cases=0 found=CALL rizin=1/0
 0x2040c size=78 blocks=11 edges=14 cc=7 cases=0 found=CALL | SWEEP rizin=3/3
 0x2045c size=356 blocks=9 edges=13 cc=4 cases=0 found=CALL | SWEEP | TAIL_CALL rizin=9/5
 0x20614 size=8 blocks=1 edges=1 cc=0 cases=0 found=CALL | SWEEP rizin=1/0
