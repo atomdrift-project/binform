@@ -15,7 +15,26 @@ const CLASS_JMP: u8 = 0x05;
 const CLASS_JMP32: u8 = 0x06;
 const PSEUDO_CALL: u8 = 1;
 
-pub(crate) fn decode(bytes: &[u8], addr: u64) -> Insn {
+/// The eBPF decoder, which keeps nothing between instructions.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Decoder;
+
+impl crate::isa::Decode for Decoder {
+    fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
+        decode(bytes, addr)
+    }
+
+    fn reset(&mut self) {}
+
+    fn call(&mut self) {}
+
+    fn starts_frame(&self, _bytes: &[u8]) -> bool {
+        false
+    }
+}
+
+/// The instruction at the start of `bytes`, mapped at `addr`.
+fn decode(bytes: &[u8], addr: u64) -> Insn {
     let Some(&[op, regs, o0, o1, i0, i1, i2, i3]) = bytes.get(..8) else {
         return Insn::new(8, Flow::Invalid);
     };
@@ -65,7 +84,10 @@ mod tests {
         // if r1 == 0 goto +2
         assert_eq!(at(&[0x15, 1, 2, 0, 0, 0, 0, 0], 0x10), Flow::Branch(0x28));
         // goto -1: to itself.
-        assert_eq!(at(&[0x05, 0, 0xff, 0xff, 0, 0, 0, 0], 0x10), Flow::Jump(0x10));
+        assert_eq!(
+            at(&[0x05, 0, 0xff, 0xff, 0, 0, 0, 0], 0x10),
+            Flow::Jump(0x10)
+        );
         // call a subprogram 3 instructions on; call helper 1.
         assert_eq!(at(&[0x85, 0x10, 0, 0, 3, 0, 0, 0], 0x10), Flow::Call(0x30));
         assert_eq!(at(&[0x85, 0, 0, 0, 1, 0, 0, 0], 0), Flow::CallIndirect);
@@ -82,5 +104,30 @@ mod tests {
     fn zeros_and_bad_registers_are_no_code() {
         assert_eq!(at(&[0; 8], 0), Flow::Invalid);
         assert_eq!(at(&[0xb7, 0x0b, 0, 0, 0, 0, 0, 0], 0), Flow::Invalid);
+    }
+
+    #[test]
+    fn gotol_and_jmp32_branches() {
+        // gotol -2: a 32-bit offset in the immediate.
+        assert_eq!(
+            at(&[0x06, 0, 0, 0, 0xfe, 0xff, 0xff, 0xff], 0x100),
+            Flow::Jump(0xf8)
+        );
+        // if w1 > 3 goto +1 (jmp32 jgt)
+        assert_eq!(at(&[0x26, 1, 1, 0, 3, 0, 0, 0], 0), Flow::Branch(0x10));
+        // Jump-class opcodes 0xe and 0xf are unassigned.
+        assert_eq!(at(&[0xe5, 0, 0, 0, 0, 0, 0, 0], 0), Flow::Invalid);
+        assert_eq!(at(&[0xf6, 0, 0, 0, 0, 0, 0, 0], 0), Flow::Invalid);
+    }
+
+    #[test]
+    fn short_or_malformed_slots_are_no_code() {
+        // Fewer than eight bytes, still a whole slot long.
+        assert_eq!(decode(&[0x95, 0, 0, 0], 0), Insn::new(8, Flow::Invalid));
+        // An lddw whose second slot has an opcode.
+        let code = [0x18, 1, 0, 0, 0, 0, 0, 0, 0x95, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(decode(&code, 0), Insn::new(8, Flow::Invalid));
+        // A source register past r10.
+        assert_eq!(at(&[0xbf, 0xb0, 0, 0, 0, 0, 0, 0], 0), Flow::Invalid);
     }
 }

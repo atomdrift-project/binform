@@ -17,23 +17,40 @@
 //! Zba's `sh2add`), add the table's address and load the entry, absolute or
 //! relative to the table (`lw a5, 0(a5); add a5, a5, a4; jr a5`).
 
-use crate::isa::{Extend, Flow, Insn, Mem, Note};
+use crate::isa::{Decode, Extend, Flow, Insn, Mem, Note, Regs, relative, sext, u16_at, u32_at};
 
 /// What earlier instructions left that a later one needs.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct State {
     /// The constant in each register.
-    regs: [Option<u64>; 32],
+    regs: Regs<u64, 32>,
+    /// What only the next few instructions use.
+    pending: Pending,
+}
+
+/// What an instruction leaves for the ones right after it, until one
+/// overwrites a register it names.
+#[derive(Clone, Copy, Debug, Default)]
+struct Pending {
     /// A register holding another shifted left, and by how much.
     scaled: Option<(u32, u8)>,
     /// A register holding a base plus a scaled register, which a load then
-    /// reads through: the sum, base, index and shift.
-    indexed: Option<(u32, u32, u32, u8)>,
+    /// reads through.
+    indexed: Option<Indexed>,
     /// The last register loaded from a fixed address, and that address.
     loaded: Option<(u32, u64)>,
     /// A register holding another shifted left by 32 (`slli a5, s0, 32`),
     /// which a right shift by 29-32 makes a zero-extended, scaled copy of.
     widened: Option<(u32, u32)>,
+}
+
+/// `sum = base + (index << shift)`.
+#[derive(Clone, Copy, Debug)]
+struct Indexed {
+    sum: u32,
+    base: u32,
+    index: u32,
+    shift: u8,
 }
 
 /// `ra`, the return address register, and `t0`, the alternate one.
@@ -59,11 +76,11 @@ pub(crate) struct Config {
 }
 
 fn half_at(bytes: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_le_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
+    u16_at(bytes, at, false)
 }
 
 fn word_at(bytes: &[u8], at: usize) -> Option<u32> {
-    Some(u32::from_le_bytes(bytes.get(at..at + 4)?.try_into().ok()?))
+    u32_at(bytes, at, false)
 }
 
 pub(crate) fn decode(state: &mut State, config: Config, bytes: &[u8], addr: u64) -> Insn {
@@ -88,27 +105,11 @@ pub(crate) fn decode(state: &mut State, config: Config, bytes: &[u8], addr: u64)
         // 48-bit and longer encodings: none in use.
         (2, Flow::Invalid, Note::None, false)
     };
-    let state = cx.state;
-    match flow {
-        Flow::Next | Flow::Branch(_) => {}
-        Flow::Call(_) | Flow::CallIndirect | Flow::CallRegister(_) | Flow::CallSlot(_) => {
-            state.loaded = None;
-            state.scaled = None;
-            state.indexed = None;
-            for (reg, value) in state.regs.iter_mut().enumerate() {
-                if VOLATILE >> reg & 1 != 0 {
-                    *value = None;
-                }
-            }
-        }
-        // Past a transfer that does not fall through, code is reached from
-        // elsewhere.
-        _ => *state = State::default(),
+    Insn {
+        note,
+        pad,
+        ..Insn::new(len, flow)
     }
-    let mut insn = Insn::new(len, flow);
-    insn.note = note;
-    insn.pad = pad;
-    insn
 }
 
 struct Cx<'a> {
@@ -129,7 +130,7 @@ impl Cx<'_> {
     /// The constant in `reg`: zero in `x0`; in `gp`, the global pointer
     /// (which only start-up code sets) unless this block set it.
     fn get(&self, reg: u32) -> Option<u64> {
-        let held = self.state.regs.get(reg as usize).copied().flatten();
+        let held = self.state.regs.get(reg);
         match reg {
             0 => Some(0),
             GP => held.or(self.config.gp),
@@ -138,10 +139,8 @@ impl Cx<'_> {
     }
 
     fn set(&mut self, reg: u32, value: Option<u64>) {
-        if reg != 0
-            && let Some(slot) = self.state.regs.get_mut(reg as usize)
-        {
-            *slot = value;
+        if reg != 0 {
+            self.state.regs.set(reg, value);
         }
     }
 
@@ -167,6 +166,16 @@ impl Cx<'_> {
         }
     }
 
+    /// `rd = value`, an integer that is no pointer by itself: an
+    /// immediate, the high part of an address a later instruction
+    /// completes, or the PC.
+    fn value(&mut self, rd: u32, value: u64) -> Note {
+        match self.constant(rd, value) {
+            Note::Address { reg, addr } => Note::Value { reg, value: addr },
+            note => note,
+        }
+    }
+
     /// `rd = rs1 + imm` (`addi`, `c.addi`, `addiw` when `word`).
     fn add_imm(&mut self, rd: u32, rs1: u32, imm: i64, word: bool) -> Note {
         if rd == 0 {
@@ -177,7 +186,7 @@ impl Cx<'_> {
             let value = self.get(rs1);
             self.set(rd, value);
             if rs1 == 0 {
-                return self.constant(rd, 0);
+                return self.value(rd, 0);
             }
             return Note::Copy { reg: rd, src: rs1 };
         }
@@ -185,12 +194,15 @@ impl Cx<'_> {
             Some(base) => {
                 let sum = base.wrapping_add_signed(imm);
                 let sum = if word {
-                    i64::from(u32::try_from(sum & 0xffff_ffff).unwrap_or(0).cast_signed())
-                        .cast_unsigned()
+                    sext(sum, 32).cast_unsigned()
                 } else {
                     sum
                 };
-                self.constant(rd, sum)
+                if rs1 == 0 {
+                    self.value(rd, sum)
+                } else {
+                    self.constant(rd, sum)
+                }
             }
             None => {
                 self.set(rd, None);
@@ -211,11 +223,11 @@ impl Cx<'_> {
         }
         self.set(rd, None);
         if shift == 32 && self.config.wide {
-            self.state.widened = Some((rd, rs1));
+            self.state.pending.widened = Some((rd, rs1));
             return Note::Clobber(1 << rd);
         }
         if (1..=3).contains(&shift) {
-            self.state.scaled = Some((rd, u8::try_from(shift).unwrap_or(0)));
+            self.state.pending.scaled = Some((rd, u8::try_from(shift).unwrap_or(0)));
             Note::Copy { reg: rd, src: rs1 }
         } else {
             Note::Clobber(1 << rd)
@@ -231,9 +243,9 @@ impl Cx<'_> {
         self.set(rd, None);
         match widened {
             Some((reg, src)) if reg == rs1 && (29..=32).contains(&shift) => {
-                let scale = 32 - shift;
+                let scale = 32_u32.saturating_sub(shift);
                 if scale > 0 {
-                    self.state.scaled = Some((rd, u8::try_from(scale).unwrap_or(0)));
+                    self.state.pending.scaled = Some((rd, u8::try_from(scale).unwrap_or(0)));
                 }
                 Note::Copy { reg: rd, src }
             }
@@ -248,7 +260,12 @@ impl Cx<'_> {
             return Note::None;
         }
         self.set(rd, None);
-        self.state.indexed = Some((rd, base, index, shift));
+        self.state.pending.indexed = Some(Indexed {
+            sum: rd,
+            base,
+            index,
+            shift,
+        });
         Note::None
     }
 
@@ -289,14 +306,19 @@ impl Cx<'_> {
         rs1: u32,
         imm: i64,
         (size, signed): (u8, bool),
-        indexed: Option<(u32, u32, u32, u8)>,
+        indexed: Option<Indexed>,
     ) -> Note {
         if rd == 0 {
             return Note::None;
         }
         let base_value = self.get(rs1);
         self.set(rd, None);
-        if let Some((sum, base, index, shift)) = indexed
+        if let Some(Indexed {
+            sum,
+            base,
+            index,
+            shift,
+        }) = indexed
             && sum == rs1
         {
             return Note::Load {
@@ -315,7 +337,7 @@ impl Cx<'_> {
             return Note::Clobber(1 << rd);
         }
         let slot = base_value.map(|base| self.wrap(base.wrapping_add_signed(imm)));
-        self.state.loaded = slot.map(|slot| (rd, slot));
+        self.state.pending.loaded = slot.map(|slot| (rd, slot));
         let (base, disp) = slot.map_or((Some(rs1), imm.cast_unsigned()), |slot| (None, slot));
         Note::Fetch {
             reg: rd,
@@ -369,7 +391,7 @@ impl Cx<'_> {
             // BLTU, BGEU rs1, n: rs1 below n is in range.
             (6 | 7, None, Some(n)) if n > 0 => Note::Compare {
                 reg: rs1,
-                imm: n - 1,
+                imm: n.wrapping_sub(1),
             },
             // BLTU, BGEU n, rs2 (`bgtu rs2, n`, `bleu rs2, n`): rs2 up to n.
             (6 | 7, Some(n), None) => Note::Compare { reg: rs2, imm: n },
@@ -385,10 +407,13 @@ impl Cx<'_> {
         let funct7 = word >> 25;
         let imm_i = i64::from(word.cast_signed() >> 20);
         let imm_u = i64::from((word & 0xffff_f000).cast_signed());
-        let scaled = self.state.scaled.take();
-        let indexed = self.state.indexed.take();
-        let loaded = self.state.loaded.take();
-        let widened = self.state.widened.take();
+        let pending = std::mem::take(&mut self.state.pending);
+        let Pending {
+            scaled,
+            indexed,
+            loaded,
+            widened,
+        } = pending;
         let addr = self.addr;
         let (flow, note) = match word & 0x7f {
             // JAL
@@ -397,7 +422,7 @@ impl Cx<'_> {
                     | ((word >> 12) & 0xff) << 12
                     | ((word >> 20) & 1) << 11
                     | ((word >> 21) & 0x3ff) << 1;
-                let target = self.wrap(addr.wrapping_add_signed(sign(imm, 21)));
+                let target = self.wrap(relative(addr, imm, 21, 1));
                 let flow = if rd == 0 {
                     Flow::Jump(target)
                 } else {
@@ -413,15 +438,12 @@ impl Cx<'_> {
                     | ((word >> 7) & 1) << 11
                     | ((word >> 25) & 0x3f) << 5
                     | ((word >> 8) & 0xf) << 1;
-                let target = self.wrap(addr.wrapping_add_signed(sign(imm, 13)));
+                let target = self.wrap(relative(addr, imm, 13, 1));
                 (Flow::Branch(target), self.compare(funct3, rs1, rs2))
             }
             // LUI, AUIPC
-            0x37 => (Flow::Next, self.constant(rd, imm_u.cast_unsigned())),
-            0x17 => (
-                Flow::Next,
-                self.constant(rd, addr.wrapping_add_signed(imm_u)),
-            ),
+            0x37 => (Flow::Next, self.value(rd, imm_u.cast_unsigned())),
+            0x17 => (Flow::Next, self.value(rd, addr.wrapping_add_signed(imm_u))),
             // OP-IMM: ADDI, SLLI; the rest write rd some other way.
             0x13 => (
                 Flow::Next,
@@ -500,50 +522,52 @@ impl Cx<'_> {
             0x53 | 0x2f | 0x57 => (Flow::Next, self.clobber(rd)),
             _ => (Flow::Invalid, Note::None),
         };
-        self.keep(note, (scaled, indexed, loaded, widened));
+        self.keep(note, pending);
         (flow, note)
     }
 
     /// Carry what this instruction did not overwrite to the next one.
-    #[allow(clippy::type_complexity)]
-    fn keep(
-        &mut self,
-        note: Note,
-        (scaled, indexed, loaded, widened): (
-            Option<(u32, u8)>,
-            Option<(u32, u32, u32, u8)>,
-            Option<(u32, u64)>,
-            Option<(u32, u32)>,
-        ),
-    ) {
+    fn keep(&mut self, note: Note, before: Pending) {
+        let Pending {
+            scaled,
+            indexed,
+            loaded,
+            widened,
+        } = before;
         let written = if matches!(note, Note::Compare { .. }) {
             0
         } else {
             note.writes()
-        } | self.state.indexed.map_or(0, |(sum, ..)| 1 << sum);
-        if self.state.scaled.is_none()
+        } | self
+            .state
+            .pending
+            .indexed
+            .map_or(0, |indexed| 1 << indexed.sum);
+        if self.state.pending.scaled.is_none()
             && let Some((reg, _)) = scaled
             && written >> reg & 1 == 0
         {
-            self.state.scaled = scaled;
+            self.state.pending.scaled = scaled;
         }
-        if self.state.indexed.is_none()
-            && let Some((sum, base, index, _)) = indexed
+        if self.state.pending.indexed.is_none()
+            && let Some(Indexed {
+                sum, base, index, ..
+            }) = indexed
             && written & (1 << sum | 1 << base | 1 << index) == 0
         {
-            self.state.indexed = indexed;
+            self.state.pending.indexed = indexed;
         }
-        if self.state.loaded.is_none()
+        if self.state.pending.loaded.is_none()
             && let Some((reg, _)) = loaded
             && written >> reg & 1 == 0
         {
-            self.state.loaded = loaded;
+            self.state.pending.loaded = loaded;
         }
-        if self.state.widened.is_none()
+        if self.state.pending.widened.is_none()
             && let Some((reg, src)) = widened
             && written & (1 << reg | 1 << src) == 0
         {
-            self.state.widened = widened;
+            self.state.pending.widened = widened;
         }
     }
 
@@ -553,13 +577,16 @@ impl Cx<'_> {
         // The full and the compact (x8-x15) register fields.
         let rd = (h >> 7) & 0x1f;
         let rs2 = (h >> 2) & 0x1f;
-        let rd_c = ((h >> 2) & 7) + 8;
-        let rs1_c = ((h >> 7) & 7) + 8;
-        let imm6 = sign((h >> 12 & 1) << 5 | (h >> 2) & 0x1f, 6);
-        let scaled = self.state.scaled.take();
-        let indexed = self.state.indexed.take();
-        let loaded = self.state.loaded.take();
-        let widened = self.state.widened.take();
+        let rd_c = (h >> 2) & 7 | 8;
+        let rs1_c = (h >> 7) & 7 | 8;
+        let imm6 = sext((h >> 12 & 1) << 5 | (h >> 2) & 0x1f, 6);
+        let pending = std::mem::take(&mut self.state.pending);
+        let Pending {
+            scaled,
+            indexed,
+            loaded,
+            widened,
+        } = pending;
         let addr = self.addr;
         let wide = self.config.wide;
         let (flow, note) = match (h & 3, funct3) {
@@ -592,10 +619,10 @@ impl Cx<'_> {
             (1, 1) if !wide => (Flow::Call(self.cj(h)), Note::None),
             (1, 1) => (Flow::Next, self.add_imm(rd, rd, imm6, true)),
             // C.LI
-            (1, 2) => (Flow::Next, self.constant(rd, imm6.cast_unsigned())),
+            (1, 2) => (Flow::Next, self.value(rd, imm6.cast_unsigned())),
             // C.ADDI16SP; C.LUI.
             (1, 3) if rd == 2 => (Flow::Next, self.clobber(2)),
-            (1, 3) => (Flow::Next, self.constant(rd, (imm6 << 12).cast_unsigned())),
+            (1, 3) => (Flow::Next, self.value(rd, (imm6 << 12).cast_unsigned())),
             // The ALU group on rd'.
             (1, 4) => (
                 Flow::Next,
@@ -628,7 +655,7 @@ impl Cx<'_> {
                     | ((h >> 5) & 3) << 6
                     | ((h >> 3) & 3) << 1
                     | ((h >> 2) & 1) << 5;
-                let target = self.wrap(addr.wrapping_add_signed(sign(imm, 9)));
+                let target = self.wrap(relative(addr, imm, 9, 1));
                 (Flow::Branch(target), Note::None)
             }
             // C.SLLI
@@ -656,7 +683,7 @@ impl Cx<'_> {
             (2, _) => (Flow::Next, Note::None),
             _ => (Flow::Invalid, Note::None),
         };
-        self.keep(note, (scaled, indexed, loaded, widened));
+        self.keep(note, pending);
         (flow, note)
     }
 
@@ -670,20 +697,81 @@ impl Cx<'_> {
             | ((h >> 6) & 1) << 7
             | ((h >> 3) & 7) << 1
             | ((h >> 2) & 1) << 5;
-        self.wrap(self.addr.wrapping_add_signed(sign(imm, 12)))
+        self.wrap(relative(self.addr, imm, 12, 1))
     }
 }
 
-/// `value`'s low `bits` bits, sign-extended.
-fn sign(value: u32, bits: u32) -> i64 {
-    let shift = 64 - bits;
-    (i64::from(value) << shift) >> shift
+/// The value start-up code sets the global pointer to, from the first
+/// instructions at `bytes`, mapped at `addr`: `auipc gp, hi; addi gp, gp,
+/// lo` (the `.option norelax` sequence `_start` begins with).
+pub(crate) fn gp_setup(bytes: &[u8], addr: u64, wide: bool) -> Option<u64> {
+    let mut state = State::default();
+    let config = Config { wide, gp: None };
+    let mut at = 0_usize;
+    for _ in 0..6 {
+        let insn = decode(
+            &mut state,
+            config,
+            bytes.get(at..)?,
+            addr.wrapping_add(at as u64),
+        );
+        if let Note::Address { reg: GP, addr } = insn.note
+            && matches!(bytes.get(at), Some(b) if b & 0x7f == 0x13)
+        {
+            return Some(addr);
+        }
+        if insn.flow != Flow::Next {
+            return None;
+        }
+        at = at.saturating_add(usize::try_from(insn.len).ok()?);
+    }
+    None
+}
+
+/// The RISC-V decoder.
+#[derive(Clone, Debug)]
+pub(crate) struct Decoder {
+    config: Config,
+    state: State,
+}
+
+impl Decoder {
+    pub(crate) fn new(config: Config) -> Self {
+        Self {
+            config,
+            state: State::default(),
+        }
+    }
+}
+
+impl Decode for Decoder {
+    fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
+        decode(&mut self.state, self.config, bytes, addr)
+    }
+
+    fn reset(&mut self) {
+        self.state = State::default();
+    }
+
+    fn call(&mut self) {
+        let pending = &mut self.state.pending;
+        pending.loaded = None;
+        pending.scaled = None;
+        pending.indexed = None;
+        self.state.regs.forget(u64::from(VOLATILE));
+    }
+
+    /// The stack pointer lowered (`addi sp, sp, -n`, `c.addi16sp sp, -n`,
+    /// `c.addi sp, -n`) among the first three instructions.
+    fn starts_frame(&self, bytes: &[u8]) -> bool {
+        starts_frame(bytes)
+    }
 }
 
 /// Whether `bytes` begin a frame: the stack pointer lowered (`addi sp, sp,
 /// -n`, `c.addi16sp sp, -n`, `c.addi sp, -n`) among the first three
 /// instructions.
-pub(crate) fn starts_frame(bytes: &[u8]) -> bool {
+fn starts_frame(bytes: &[u8]) -> bool {
     let mut at = 0;
     for _ in 0..3 {
         let Some(half) = half_at(bytes, at) else {
@@ -697,7 +785,7 @@ pub(crate) fn starts_frame(bytes: &[u8]) -> bool {
             if half & 0xef83 == 0x0101 && half & 0x1000 != 0 {
                 return true;
             }
-            at += 2;
+            at = at.saturating_add(2);
         } else {
             let Some(word) = word_at(bytes, at) else {
                 return false;
@@ -705,32 +793,10 @@ pub(crate) fn starts_frame(bytes: &[u8]) -> bool {
             if word & 0x000f_ffff == 0x0001_0113 && word >> 31 == 1 {
                 return true;
             }
-            at += 4;
+            at = at.saturating_add(4);
         }
     }
     false
-}
-
-/// The value start-up code sets the global pointer to, from the first
-/// instructions at `bytes`, mapped at `addr`: `auipc gp, hi; addi gp, gp,
-/// lo` (the `.option norelax` sequence `_start` begins with).
-pub(crate) fn gp_setup(bytes: &[u8], addr: u64, wide: bool) -> Option<u64> {
-    let mut state = State::default();
-    let config = Config { wide, gp: None };
-    let mut at = 0_usize;
-    for _ in 0..6 {
-        let insn = decode(&mut state, config, bytes.get(at..)?, addr + at as u64);
-        if let Note::Address { reg: GP, addr } = insn.note
-            && matches!(bytes.get(at), Some(b) if b & 0x7f == 0x13)
-        {
-            return Some(addr);
-        }
-        if insn.flow != Flow::Next {
-            return None;
-        }
-        at += insn.len as usize;
-    }
-    None
 }
 
 #[cfg(test)]

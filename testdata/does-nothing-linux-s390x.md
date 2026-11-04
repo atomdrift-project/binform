@@ -8,4 +8,4 @@ Go on IBM Z: 2-, 4- and 6-byte big-endian instructions. Rizin 0.8.2 finds one fu
 - License: Apache-2.0 (traits-dev, klog, logr); the Go runtime is BSD-3-Clause
 
 `does-nothing-linux-s390x.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`does-nothing-linux-s390x.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`does-nothing-linux-s390x.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

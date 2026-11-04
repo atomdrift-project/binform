@@ -13,7 +13,7 @@
 // A test fails by panicking.
 #![allow(clippy::panic, clippy::indexing_slicing)]
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt::Write as _;
 use std::path::PathBuf;
 
@@ -42,6 +42,7 @@ impl Outcome<'_> {
             .count()
     }
 
+    /// Jump-table cases across all functions.
     fn cases(&self) -> usize {
         self.recovery
             .functions
@@ -78,7 +79,7 @@ impl Outcome<'_> {
             .keys()
             .copied()
             .filter(|&entry| {
-                is_code(&self.image, entry)
+                self.image.is_code(entry)
                     && !ours.contains_key(&entry)
                     && self.inside(entry).is_none()
             })
@@ -89,8 +90,7 @@ impl Outcome<'_> {
     /// walks the way binform does: without landing pads (rizin skips
     /// them), and without a rizin "function" inside (rizin split them).
     fn same_blocks_without_pads(&self) -> (usize, usize) {
-        let mut skip: std::collections::HashSet<u64> =
-            self.image.handlers.iter().map(|h| h.function).collect();
+        let mut skip: HashSet<u64> = self.image.handlers.iter().map(|h| h.function).collect();
         let ours = self.entries();
         skip.extend(
             self.rizin
@@ -111,15 +111,6 @@ impl Outcome<'_> {
     }
 }
 
-fn is_code(image: &Binary<'_>, addr: u64) -> bool {
-    image.segments.iter().any(|segment| {
-        segment.executable
-            && addr
-                .checked_sub(segment.addr)
-                .is_some_and(|offset| offset < segment.bytes.len() as u64)
-    })
-}
-
 fn testdata(file: &str) -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("testdata")
@@ -134,21 +125,29 @@ fn read_zst(file: &str) -> Vec<u8> {
 
 fn rizin(name: &str) -> BTreeMap<u64, Theirs> {
     let text = read_zst(&format!("{name}.rizin.json.zst"));
-    let value: serde_json::Value = serde_json::from_slice(&text).unwrap_or_default();
-    value["functions"]
+    let value: serde_json::Value =
+        serde_json::from_slice(&text).unwrap_or_else(|e| panic!("{name}.rizin.json.zst: {e}"));
+    let rows = value["functions"]
         .as_array()
-        .into_iter()
-        .flatten()
-        .filter_map(|row| {
-            let field = |i: usize| row.get(i).and_then(serde_json::Value::as_u64);
-            Some((
-                field(0)?,
+        .unwrap_or_else(|| panic!("{name}.rizin.json.zst: no function list"));
+    rows.iter()
+        .map(|row| {
+            let field = |i: usize| {
+                row.get(i)
+                    .and_then(serde_json::Value::as_u64)
+                    .unwrap_or_else(|| panic!("{name}.rizin.json.zst: bad row {row}"))
+            };
+            let name = row.get(1).and_then(serde_json::Value::as_str);
+            (
+                field(0),
                 Theirs {
-                    name: row.get(1)?.as_str()?.to_owned(),
-                    blocks: field(3)?,
-                    complexity: field(4)?,
+                    name: name
+                        .unwrap_or_else(|| panic!("{name:?}: bad row {row}"))
+                        .to_owned(),
+                    blocks: field(3),
+                    complexity: field(4),
                 },
-            ))
+            )
         })
         .collect()
 }
@@ -158,18 +157,6 @@ fn rizin(name: &str) -> BTreeMap<u64, Theirs> {
 fn golden(outcome: &Outcome<'_>) -> String {
     let functions = &outcome.recovery.functions;
     let ours = outcome.entries();
-    let mut extents: Vec<(u64, u64)> = functions
-        .iter()
-        .map(|f| (f.entry, f.entry.saturating_add(f.size)))
-        .collect();
-    extents.sort_unstable();
-    let inside = |entry: u64| {
-        let i = extents.partition_point(|&(start, _)| start <= entry);
-        i.checked_sub(1)
-            .and_then(|i| extents.get(i))
-            .filter(|&&(_, end)| entry < end)
-            .map(|&(start, _)| start)
-    };
 
     let mut text = String::new();
     let shared = functions
@@ -203,9 +190,9 @@ fn golden(outcome: &Outcome<'_>) -> String {
         if ours.contains_key(&entry) {
             continue;
         }
-        let why = if !is_code(&outcome.image, entry) {
+        let why = if !outcome.image.is_code(entry) {
             "not code".to_owned()
-        } else if let Some(start) = inside(entry) {
+        } else if let Some(start) = outcome.inside(entry) {
             format!("inside {start:#x}")
         } else {
             "missed".to_owned()
@@ -224,13 +211,13 @@ fn golden(outcome: &Outcome<'_>) -> String {
         );
         let _ = writeln!(
             text,
-            "{:#x} size={} blocks={} edges={} cc={} cases={cases} found={:?} rizin={theirs}",
+            "{:#x} size={} blocks={} edges={} cc={} cases={cases} found={} rizin={theirs}",
             function.entry,
             function.size,
             function.blocks,
             function.edges,
             function.complexity,
-            function.found,
+            function.found.names().collect::<Vec<_>>().join(" | "),
         );
     }
     text
@@ -257,29 +244,43 @@ fn check(name: &str, claims: impl Fn(&Outcome<'_>)) {
     if std::env::var_os("BINFORM_BLESS").is_some() {
         std::fs::write(&path, &actual).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
     } else {
-        let expected = std::fs::read_to_string(&path).unwrap_or_default();
+        let expected = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("{}: {e} (BINFORM_BLESS=1 writes it)", path.display()));
         if expected != actual {
-            let old: std::collections::HashSet<&str> = expected.lines().collect();
-            let new: std::collections::HashSet<&str> = actual.lines().collect();
-            let mut diff = String::new();
-            for line in expected.lines().filter(|l| !new.contains(l)).take(20) {
-                let _ = writeln!(diff, "- {line}");
-            }
-            for line in actual.lines().filter(|l| !old.contains(l)).take(20) {
-                let _ = writeln!(diff, "+ {line}");
-            }
             panic!(
-                "{name}: recovery differs from {} (BINFORM_BLESS=1 accepts it):\n{diff}",
-                path.display()
+                "{name}: recovery differs from {} (BINFORM_BLESS=1 accepts it):\n{}",
+                path.display(),
+                diff(&expected, &actual)
             );
         }
     }
     claims(&outcome);
 }
 
+/// The lines that differ between `old` and `new`: past their common first
+/// and last lines, up to 40 of each.
+fn diff(old: &str, new: &str) -> String {
+    let (old, new): (Vec<&str>, Vec<&str>) = (old.lines().collect(), new.lines().collect());
+    let head = old.iter().zip(&new).take_while(|(a, b)| a == b).count();
+    let tail = old[head..]
+        .iter()
+        .rev()
+        .zip(new[head..].iter().rev())
+        .take_while(|(a, b)| a == b)
+        .count();
+    let mut text = format!("@@ line {} @@\n", head + 1);
+    for line in old[head..old.len() - tail].iter().take(40) {
+        let _ = writeln!(text, "- {line}");
+    }
+    for line in new[head..new.len() - tail].iter().take(40) {
+        let _ = writeln!(text, "+ {line}");
+    }
+    text
+}
+
 /// Every function rizin found in code, binform finds, or holds inside one
 /// of its own, except the listed entries, each with its reason.
-fn finds_rizin_except(outcome: &Outcome<'_>, except: &[(u64, &str)]) {
+fn finds_reference_except(outcome: &Outcome<'_>, except: &[(u64, &str)]) {
     let missed: Vec<u64> = outcome
         .missed()
         .into_iter()
@@ -292,27 +293,30 @@ fn finds_rizin_except(outcome: &Outcome<'_>, except: &[(u64, &str)]) {
     );
 }
 
-fn finds_all_of_rizin(outcome: &Outcome<'_>) {
-    finds_rizin_except(outcome, &[]);
+fn finds_every_reference_function(outcome: &Outcome<'_>) {
+    finds_reference_except(outcome, &[]);
 }
 
 /// A relocatable object: sections placed as rizin places them, symbols at
 /// offset zero kept, calls linked through their relocations.
 #[test]
 fn aarch64_object() {
-    check("go-relocation-test-gcc482-aarch64.obj", finds_all_of_rizin);
+    check(
+        "go-relocation-test-gcc482-aarch64.obj",
+        finds_every_reference_function,
+    );
 }
 
 #[test]
 fn x86_64_object() {
-    check("cycle.elf", finds_all_of_rizin);
+    check("cycle.elf", finds_every_reference_function);
 }
 
 /// A large A64 object: every function a symbol, every call a relocation.
 #[test]
 fn aarch64_race_object() {
     check("race_linux_arm64.syso", |outcome| {
-        finds_all_of_rizin(outcome);
+        finds_every_reference_function(outcome);
         let calls = outcome
             .recovery
             .functions
@@ -331,7 +335,7 @@ fn elf_x86_64_static() {
     check("apply-seccomp", |outcome| {
         assert!(!outcome.image.handlers.is_empty(), "no landing pads");
         assert_eq!(outcome.found(Found::MAIN), 1, "no main");
-        finds_all_of_rizin(outcome);
+        finds_every_reference_function(outcome);
     });
 }
 
@@ -343,7 +347,7 @@ fn elf_x86_64_cxx() {
         assert!(outcome.found(Found::STUB) > 0, "no PLT stubs");
         assert!(outcome.cases() > 0, "no jump tables");
         names_functions_and_targets(outcome);
-        finds_rizin_except(
+        finds_reference_except(
             outcome,
             &[(
                 0x1_6f26,
@@ -367,7 +371,10 @@ fn names_functions_and_targets(outcome: &Outcome<'_>) {
         let slot = stub.thunk.unwrap_or_default();
         assert_eq!(
             stub.name.as_deref(),
-            outcome.image.import(slot),
+            outcome
+                .image
+                .import(slot)
+                .map(|(_, import)| import.name.as_str()),
             "{:#x}",
             stub.entry
         );
@@ -383,7 +390,11 @@ fn names_functions_and_targets(outcome: &Outcome<'_>) {
         .iter()
         .flat_map(|f| &f.refs)
         .filter(|r| r.kind == crate::RefKind::Call)
-        .filter(|r| recovery.function(r.to).is_some_and(|f| f.thunk.is_some()))
+        .filter(|r| {
+            recovery
+                .function(r.addr())
+                .is_some_and(|f| f.thunk.is_some())
+        })
         .collect::<Vec<_>>();
     assert!(!calls.is_empty(), "no calls through a stub");
     for call in calls {
@@ -475,7 +486,7 @@ fn pe_arm64_go() {
     check("does-nothing-windows-arm64.exe", |outcome| {
         let named = outcome.found(Found::SYMBOL);
         assert!(named > 2000, "only {named} functions from the Go table");
-        finds_rizin_except(outcome, &[(0x1_4007_b2a8, DEBUG_CALL)]);
+        finds_reference_except(outcome, &[(0x1_4007_b2a8, DEBUG_CALL)]);
     });
 }
 
@@ -486,7 +497,7 @@ fn macho_arm64_go_garbled() {
     check("does-nothing-darwin-arm64-garbled", |outcome| {
         let named = outcome.found(Found::SYMBOL);
         assert!(named > 2000, "only {named} functions from the Go table");
-        finds_rizin_except(outcome, &[(0x1_0007_ac08, DEBUG_CALL)]);
+        finds_reference_except(outcome, &[(0x1_0007_ac08, DEBUG_CALL)]);
     });
 }
 
@@ -504,7 +515,7 @@ fn elf_arm_go() {
         assert_eq!(outcome.image.arch, Some(crate::Arch::Arm));
         let named = outcome.found(Found::SYMBOL);
         assert!(named > 2000, "only {named} functions from the Go table");
-        finds_all_of_rizin(outcome);
+        finds_every_reference_function(outcome);
         let (same, shared) = outcome.same_blocks_without_pads();
         assert!(
             same * 100 >= shared * 95,
@@ -576,7 +587,7 @@ fn elf_thumb_c() {
             .collect();
         assert!(stubs.len() > 200, "only {} PLT stubs", stubs.len());
         for stub in &stubs {
-            let slot = stub.refs[0].to;
+            let slot = stub.refs[0].addr();
             assert_eq!(stub.refs[0].kind, RefKind::Jump, "{:#x}", stub.entry);
             if imports.contains(&slot) {
                 assert_eq!(stub.thunk, Some(slot), "stub {:#x}", stub.entry);
@@ -623,9 +634,9 @@ fn links_calls(outcome: &Outcome<'_>) {
         for call in function.refs.iter().filter(|r| r.kind == RefKind::Call) {
             calls += 1;
             // Thumb targets carry bit 0; the entries here do not.
-            let to = call.to & !1;
+            let to = call.addr() & !1;
             assert_ne!(to, function.entry, "unlinked call at {:#x}", call.from);
-            match slots.get(&call.to) {
+            match slots.get(&call.addr()) {
                 Some(name) => imported.push(*name),
                 None => assert!(entries.contains(&to), "call {:#x} -> {to:#x}", call.from),
             }
@@ -890,7 +901,7 @@ fn loongarch64_pie() {
         assert!(outcome.recovery.unresolved <= 2);
         assert_eq!(outcome.recovery.invalid, 0);
         assert!(outcome.found(Found::POINTER) >= 4);
-        finds_rizin_before(outcome, 0, &[]);
+        finds_reference_before(outcome, 0, &[]);
     });
 }
 
@@ -932,17 +943,6 @@ fn sparc_objects() {
     check("calls-sparc64.o", links_calls);
 }
 
-/// Jump-table cases across all functions.
-fn cases(outcome: &Outcome<'_>) -> usize {
-    outcome
-        .recovery
-        .functions
-        .iter()
-        .flat_map(|f| &f.refs)
-        .filter(|r| r.kind == RefKind::Case)
-        .count()
-}
-
 /// The functions binform and rizin share, and on how many of them, as a
 /// percentage, they agree on blocks (landing pads aside).
 fn agreement(outcome: &Outcome<'_>) -> (usize, usize) {
@@ -955,7 +955,7 @@ fn agreement(outcome: &Outcome<'_>) -> (usize, usize) {
 #[test]
 fn freebsd() {
     check("libsqlite3-freebsd-amd64.so", |outcome| {
-        finds_all_of_rizin(outcome);
+        finds_every_reference_function(outcome);
         let (shared, same) = agreement(outcome);
         assert!(shared > 2150 && same >= 85, "{same}% of {shared}");
     });
@@ -968,7 +968,7 @@ fn freebsd() {
 #[test]
 fn openbsd() {
     check("libsqlite3-openbsd-arm64.so", |outcome| {
-        finds_all_of_rizin(outcome);
+        finds_every_reference_function(outcome);
         let entries: std::collections::HashSet<u64> =
             outcome.recovery.functions.iter().map(|f| f.entry).collect();
         let split = outcome
@@ -979,7 +979,7 @@ fn openbsd() {
         assert!(split > 2000, "only {split} of rizin's split after `bti c`");
     });
     check("sqlite3-openbsd-amd64", |outcome| {
-        finds_all_of_rizin(outcome);
+        finds_every_reference_function(outcome);
         let (shared, same) = agreement(outcome);
         assert!(shared >= 868 && same >= 99, "{same}% of {shared}");
     });
@@ -988,7 +988,7 @@ fn openbsd() {
 #[test]
 fn netbsd() {
     check("libsqlite3-netbsd-arm64.so", |outcome| {
-        finds_all_of_rizin(outcome);
+        finds_every_reference_function(outcome);
         let (shared, same) = agreement(outcome);
         assert!(shared > 2550 && same >= 99, "{same}% of {shared}");
     });
@@ -1021,7 +1021,7 @@ fn solaris_sparc() {
         assert!(shared > 3350 && same >= 70, "{same}% of {shared}");
         // Sun Studio's tables: `rd %pc` plus a constant is the table, which
         // holds offsets from itself (`ld [%i5+%l6], %l7; jmp %l7+%l6`).
-        assert!(cases(outcome) > 1400, "only {} cases", cases(outcome));
+        assert!(outcome.cases() > 1400, "only {} cases", outcome.cases());
         // Constant pools (`___const_seg_*` objects in `.text`) are data:
         // `___const_seg_900004301` at 0xaa70 held a call target before.
         let entries: Vec<u64> = outcome.recovery.functions.iter().map(|f| f.entry).collect();
@@ -1045,7 +1045,7 @@ fn linux_sparc64() {
         assert!(shared > 3400 && same >= 95, "{same}% of {shared}");
         // GCC's tables: the GOT pointer (`sethi; call` the PC thunk; `add`)
         // less a constant is the table, of offsets from itself.
-        assert!(cases(outcome) > 1200, "only {} cases", cases(outcome));
+        assert!(outcome.cases() > 1200, "only {} cases", outcome.cases());
     });
 }
 
@@ -1055,12 +1055,12 @@ fn linux_sparc64() {
 #[test]
 fn c_mips64_and_s390x() {
     check("libe_sqlite3-linux-mips64.so", |outcome| {
-        finds_all_of_rizin(outcome);
+        finds_every_reference_function(outcome);
         assert!(agreement(outcome).0 > 2450);
         // GCC's PIC tables: `sltiu` bounds the case, a GOT page entry plus
         // `daddiu` is the table, `dsll; daddu; ld` reads an offset from
         // `_gp`, which `$gp` or a register holding it adds back.
-        assert!(cases(outcome) > 2600, "only {} cases", cases(outcome));
+        assert!(outcome.cases() > 2600, "only {} cases", outcome.cases());
         // Calls to local functions go through a GOT page entry plus the low
         // bits (`ld $t9, %got_page(f)($gp); daddiu $t9, $t9, %got_ofst(f);
         // jalr $t9`): resolved, they find most functions as call targets.
@@ -1071,11 +1071,11 @@ fn c_mips64_and_s390x() {
         );
     });
     check("libe_sqlite3-linux-s390x.so", |outcome| {
-        finds_all_of_rizin(outcome);
+        finds_every_reference_function(outcome);
         assert_eq!(agreement(outcome).0, outcome.rizin.len());
         // GCC's tables: `clijh` bounds the case, `lg` reads an 8-byte
         // offset from the table, `b 0(%rE,%rT)` adds the two.
-        assert!(cases(outcome) > 2400, "only {} cases", cases(outcome));
+        assert!(outcome.cases() > 2400, "only {} cases", outcome.cases());
     });
 }
 
@@ -1094,7 +1094,7 @@ fn mips_uclibc_static() {
         );
         // Rizin starts these two in a `jr` delay slot; the functions around
         // them nothing binform sees reaches.
-        finds_rizin_except(
+        finds_reference_except(
             outcome,
             &[
                 (0x40_7274, "delay slot of 0x407270"),
@@ -1118,7 +1118,7 @@ fn superh_uclibc_static() {
             pointers > 20,
             "only {pointers} functions from literal pools"
         );
-        finds_rizin_except(
+        finds_reference_except(
             outcome,
             &[(0x40_b288, "inside the string \"/dev/watchdog\"")],
         );
@@ -1148,7 +1148,7 @@ fn s390x_encrypted_payload() {
         assert!(outcome.recovery.functions.len() > 200);
         let tails = outcome.found(Found::TAIL_CALL);
         assert!(tails >= 10, "only {tails} tail calls to frames");
-        finds_rizin_except(outcome, &[]);
+        finds_reference_except(outcome, &[]);
         // Coverage is low, as it should be for a packed file.
         assert!(coverage(outcome) < 25, "covers {}%", coverage(outcome));
         assert!(outcome.recovery.invalid <= 60);
@@ -1165,7 +1165,7 @@ fn mips_r6() {
         assert_eq!(outcome.image.arch, Some(crate::Arch::MipsR6El));
         assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
         assert!(outcome.cases() >= 10, "{} cases", outcome.cases());
-        finds_rizin_except(outcome, &[]);
+        finds_reference_except(outcome, &[]);
         assert_eq!(outcome.recovery.invalid, 0);
         assert_eq!(outcome.recovery.unresolved, 0);
     });
@@ -1174,7 +1174,7 @@ fn mips_r6() {
 /// Every function rizin finds, but those in `except`, binform finds too,
 /// or `offset` bytes before: rizin starts PowerPC functions after their
 /// first instructions (at `mflr`, past `stwu`; at ELFv2's local entry).
-fn finds_rizin_before(outcome: &Outcome<'_>, offset: u64, except: &[u64]) {
+fn finds_reference_before(outcome: &Outcome<'_>, offset: u64, except: &[u64]) {
     let entries = outcome.entries();
     let missed: Vec<u64> = outcome
         .missed()
@@ -1200,7 +1200,7 @@ fn powerpc_static() {
         assert!(pointers >= 15, "only {pointers} from built addresses");
         assert!(outcome.cases() >= 11, "{} cases", outcome.cases());
         // Rizin also starts three in the ELF header.
-        finds_rizin_before(outcome, 4, &[0x1000_0000, 0x1000_0014, 0x1000_0018]);
+        finds_reference_before(outcome, 4, &[0x1000_0000, 0x1000_0014, 0x1000_0018]);
         assert_eq!(outcome.recovery.invalid, 0);
         assert!(outcome.recovery.unresolved <= 1);
     });
@@ -1230,7 +1230,7 @@ fn powerpc_pie() {
                 .is_some_and(|f| f.found.contains(Found::CALL)),
             "__dls2 missed"
         );
-        finds_rizin_before(outcome, 4, &[]);
+        finds_reference_before(outcome, 4, &[]);
     });
 }
 
@@ -1246,7 +1246,7 @@ fn powerpc64le_power10() {
         assert_eq!(outcome.recovery.unresolved, 0);
         // The data word after the call to `_start_c`, which never returns.
         assert!(outcome.recovery.invalid <= 1);
-        finds_rizin_before(outcome, 8, &[]);
+        finds_reference_before(outcome, 8, &[]);
     });
 }
 
@@ -1261,7 +1261,7 @@ fn riscv64_pie() {
         // musl's `f->write` tail calls, through a pointer.
         assert!(outcome.recovery.unresolved <= 2);
         assert_eq!(outcome.recovery.invalid, 0);
-        finds_rizin_before(outcome, 0, &[]);
+        finds_reference_before(outcome, 0, &[]);
     });
 }
 
@@ -1283,7 +1283,7 @@ fn powerpc64_elfv1() {
                 .any(|s| { s.executable && f.entry.wrapping_sub(s.addr) < s.bytes.len() as u64 })),
             "the entry point is not code"
         );
-        finds_rizin_before(outcome, 8, &[]);
+        finds_reference_before(outcome, 8, &[]);
         assert_eq!(outcome.recovery.invalid, 0);
         // Import stubs load their slot from the TOC (`ld r12, n(r2);
         // mtctr r12; bctr`).
@@ -1302,7 +1302,7 @@ fn powerpc64le_static() {
     check("ppc64le-static", |outcome| {
         assert_eq!(outcome.image.arch, Some(crate::Arch::PowerPc64El));
         assert!(coverage(outcome) >= 90, "covers {}%", coverage(outcome));
-        finds_rizin_before(outcome, 8, &[]);
+        finds_reference_before(outcome, 8, &[]);
         // No function starts at a local entry.
         let entries = outcome.entries();
         let local: Vec<u64> = entries
@@ -1341,7 +1341,7 @@ fn wince_arm() {
             "only {} import stubs",
             thunks(outcome)
         );
-        finds_rizin_except(
+        finds_reference_except(
             outcome,
             &[
                 (0x1_b7d4, "in .rsrc"),
@@ -1366,7 +1366,7 @@ fn wince_thumb() {
             "only {} import stubs",
             thunks(outcome)
         );
-        finds_rizin_except(outcome, &[]);
+        finds_reference_except(outcome, &[]);
         assert_eq!(outcome.recovery.invalid, 0);
         assert_eq!(outcome.recovery.unresolved, 0);
     });
@@ -1379,7 +1379,7 @@ fn pe_armnt() {
     check("e_sqlite3-win-arm.dll", |outcome| {
         assert_eq!(outcome.image.arch, Some(crate::Arch::Arm));
         // A case target rizin takes for a function.
-        finds_rizin_except(outcome, &[(0x100c_745e, "a case of 0x100a813a")]);
+        finds_reference_except(outcome, &[(0x100c_745e, "a case of 0x100a813a")]);
         let (same, shared) = outcome.same_blocks_without_pads();
         assert!(
             shared > 2300 && same * 100 >= shared * 95,
@@ -1392,7 +1392,7 @@ fn pe_armnt() {
             .functions
             .iter()
             .flat_map(|f| &f.refs)
-            .filter(|r| r.kind == RefKind::Call && slots.contains(&r.to))
+            .filter(|r| r.kind == RefKind::Call && slots.contains(&r.addr()))
             .count();
         assert!(imported > 140, "only {imported} calls to imports");
     });

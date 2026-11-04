@@ -15,13 +15,13 @@
 //! bcs default; move.l 12(a3), d0`): the decoder remembers the operand
 //! compared, so the reload carries the bound.
 
-use crate::isa::{Flow, Insn, Mem, Note};
+use crate::isa::{Flow, Insn, Mem, Note, Regs, sext, u16_at};
 
-/// What earlier instructions left that a later one needs.
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct State {
-    /// The constant in each register: `d0`-`d7` are 0-7, `a0`-`a7` 8-15.
-    regs: [Option<u64>; 16],
+/// The 68k decoder: what earlier instructions left that a later one needs.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Decoder {
+    /// The constant in each register: `dN` is `N`, `aN` is `N | 8`.
+    regs: Regs<u64, 16>,
     /// A data register holding another shifted left, and by how much.
     scaled: Option<(u32, u8)>,
     /// The last register loaded from a fixed address, and that address.
@@ -79,8 +79,8 @@ struct Words<'a> {
 
 impl Words<'_> {
     fn next(&mut self) -> Option<u16> {
-        let word = u16::from_be_bytes(self.bytes.get(self.at..self.at + 2)?.try_into().ok()?);
-        self.at += 2;
+        let word = u16_at(self.bytes, self.at, true)?;
+        self.at = self.at.checked_add(2)?;
         Some(word)
     }
 
@@ -116,10 +116,10 @@ impl Words<'_> {
         let r = u32::from(reg);
         Some(match mode {
             0 => Ea::Data(r),
-            1 => Ea::Addr(r + 8),
-            2..=4 => Ea::Ind(r + 8),
-            5 => Ea::Disp(r + 8, i64::from(self.next()?.cast_signed())),
-            6 => self.indexed(Some(r + 8))?,
+            1 => Ea::Addr(r | 8),
+            2..=4 => Ea::Ind(r | 8),
+            5 => Ea::Disp(r | 8, i64::from(self.next()?.cast_signed())),
+            6 => self.indexed(Some(r | 8))?,
             7 => match reg {
                 0 => Ea::Abs(i64::from(self.next()?.cast_signed()).cast_unsigned() & 0xffff_ffff),
                 1 => Ea::Abs(u64::from(self.long()?)),
@@ -149,7 +149,7 @@ impl Words<'_> {
             None => pc.wrapping_add_signed(disp) & 0xffff_ffff,
         };
         if ext & 0x100 == 0 {
-            let disp = sign8(ext);
+            let disp = sext(ext & 0xff, 8);
             return Some(Ea::Index {
                 base,
                 index,
@@ -196,20 +196,6 @@ impl Words<'_> {
     }
 }
 
-/// The low 16 bits of `value`, sign-extended.
-fn signed16(value: u64) -> u64 {
-    i64::from(u16::try_from(value & 0xffff).unwrap_or(0).cast_signed()).cast_unsigned()
-}
-
-/// The low 8 bits of `value`, sign-extended.
-fn sign8(value: u16) -> i64 {
-    i64::from(u8::try_from(value & 0xff).unwrap_or(0).cast_signed())
-}
-
-fn half(bytes: &[u8], at: usize) -> Option<u16> {
-    Some(u16::from_be_bytes(bytes.get(at..at + 2)?.try_into().ok()?))
-}
-
 /// The instruction's operand size from a two-bit field: 0 byte, 1 word, 2
 /// long.
 fn size2(bits: u16) -> Option<u8> {
@@ -221,61 +207,15 @@ fn size2(bits: u16) -> Option<u8> {
     }
 }
 
-pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
-    let mut words = Words { bytes, at: 0, addr };
-    let mut cx = Cx {
-        state,
-        addr,
-        scaled: None,
-    };
-    let decoded = words
-        .next()
-        .and_then(|op| cx.decode(op, &mut words).map(|d| (op, d)));
-    let Some((op, (flow, note))) = decoded else {
-        *cx.state = State::default();
-        return Insn::new(2, Flow::Invalid);
-    };
-    let len = u32::try_from(words.at).unwrap_or(2);
-    let state = cx.state;
-    match flow {
-        Flow::Next | Flow::Branch(_) => {}
-        Flow::Call(_) | Flow::CallIndirect | Flow::CallRegister(_) | Flow::CallSlot(_) => {
-            state.loaded = None;
-            state.scaled = None;
-            state.compared = None;
-            for (reg, value) in state.regs.iter_mut().enumerate() {
-                if VOLATILE >> reg & 1 != 0 {
-                    *value = None;
-                }
-            }
-        }
-        _ => *state = State::default(),
-    }
-    let mut insn = Insn::new(len, flow);
-    insn.note = note;
-    insn.pad = op == NOP;
-    insn
-}
-
-struct Cx<'a> {
-    state: &'a mut State,
-    #[allow(dead_code)]
-    addr: u64,
-    /// The scaled register earlier instructions left.
-    scaled: Option<(u32, u8)>,
-}
-
-impl Cx<'_> {
+impl Decoder {
     fn get(&self, reg: u32) -> Option<u64> {
-        self.state.regs.get(reg as usize).copied().flatten()
+        self.regs.get(reg)
     }
 
     fn set(&mut self, reg: u32, value: Option<u64>) {
-        if let Some(slot) = self.state.regs.get_mut(reg as usize) {
-            *slot = value.map(|value| value & 0xffff_ffff);
-        }
-        if self.state.compared.is_some_and(|(base, _)| base == reg) {
-            self.state.compared = None;
+        self.regs.set(reg, value.map(|value| value & 0xffff_ffff));
+        if self.compared.is_some_and(|(base, _)| base == reg) {
+            self.compared = None;
         }
     }
 
@@ -297,10 +237,18 @@ impl Cx<'_> {
         }
     }
 
-    fn constant(&mut self, reg: u32, value: u64) -> Note {
+    /// `reg = addr`, an address the instruction forms.
+    fn address_in(&mut self, reg: u32, addr: u64) -> Note {
+        let addr = addr & 0xffff_ffff;
+        self.set(reg, Some(addr));
+        Note::Address { reg, addr }
+    }
+
+    /// `reg = value`, an integer: an immediate.
+    fn integer(&mut self, reg: u32, value: u64) -> Note {
         let value = value & 0xffff_ffff;
         self.set(reg, Some(value));
-        Note::Address { reg, addr: value }
+        Note::Value { reg, value }
     }
 
     /// The address `ea` computes, as `lea` and `jsr` read it.
@@ -313,8 +261,9 @@ impl Cx<'_> {
         }
     }
 
-    /// `move src, dst` of `size` bytes (and `movea`).
-    fn moved(&mut self, src: Ea, dst: Ea, size: u8) -> Note {
+    /// `move src, dst` of `size` bytes (and `movea`), with `scaled` the
+    /// scaled register earlier instructions left.
+    fn moved(&mut self, src: Ea, dst: Ea, size: u8, scaled: Option<(u32, u8)>) -> Note {
         let reg = match dst {
             Ea::Data(reg) | Ea::Addr(reg) => reg,
             _ => {
@@ -332,10 +281,11 @@ impl Cx<'_> {
         };
         let whole = size == 4 || reg >= 8;
         match src {
-            Ea::Imm(value) if whole => {
-                let value = if size == 2 { signed16(value) } else { value };
-                self.constant(reg, value)
-            }
+            // With no high/low pairs, a long immediate is how code writes
+            // an absolute address (`movea.l #f, a0`); a word one is an
+            // integer.
+            Ea::Imm(addr) if size == 4 => self.address_in(reg, addr),
+            Ea::Imm(value) if whole => self.integer(reg, sext(value, 16).cast_unsigned()),
             Ea::Data(src) | Ea::Addr(src) if size == 4 => {
                 let value = self.get(src);
                 self.set(reg, value);
@@ -343,7 +293,7 @@ impl Cx<'_> {
             }
             Ea::Abs(slot) if size == 4 => {
                 self.set(reg, None);
-                self.state.loaded = Some((reg, slot));
+                self.loaded = Some((reg, slot));
                 Note::Fetch {
                     reg,
                     mem: Mem {
@@ -356,7 +306,7 @@ impl Cx<'_> {
                     signed: false,
                 }
             }
-            Ea::Disp(base, disp) if size == 4 && self.state.compared == Some((base, disp)) => {
+            Ea::Disp(base, disp) if size == 4 && self.compared == Some((base, disp)) => {
                 self.set(reg, None);
                 Note::Copy { reg, src: SLOT }
             }
@@ -368,7 +318,7 @@ impl Cx<'_> {
                 ..
             } => {
                 self.set(reg, None);
-                let scale = match self.scaled {
+                let scale = match scaled {
                     Some((held, shift)) if held == index && scale == 1 => 1 << shift,
                     _ => scale,
                 };
@@ -404,7 +354,7 @@ impl Cx<'_> {
         let bounded = |cx: &mut Self, ea: Ea, imm: u64| match ea {
             Ea::Data(reg) => Note::Compare { reg, imm },
             Ea::Disp(base, disp) => {
-                cx.state.compared = Some((base, disp));
+                cx.compared = Some((base, disp));
                 Note::Compare { reg: SLOT, imm }
             }
             _ => Note::None,
@@ -455,13 +405,12 @@ impl Cx<'_> {
     }
 
     #[allow(clippy::too_many_lines)]
-    fn decode(&mut self, op: u16, words: &mut Words<'_>) -> Option<(Flow, Note)> {
+    fn step(&mut self, op: u16, words: &mut Words<'_>) -> Option<(Flow, Note)> {
         let mode = op >> 3 & 7;
         let reg = op & 7;
         let dreg = u32::from(op >> 9 & 7);
-        let scaled = self.state.scaled.take();
-        let loaded = self.state.loaded.take();
-        self.scaled = scaled;
+        let scaled = self.scaled.take();
+        let loaded = self.loaded.take();
         let result = match op >> 12 {
             0 => self.group0(op, words)?,
             // MOVE.B, MOVE.L, MOVE.W
@@ -477,7 +426,7 @@ impl Cx<'_> {
                 }
                 let src = words.ea(mode, reg, size)?;
                 let dst = words.ea(dst_mode, dst_reg, size)?;
-                (Flow::Next, self.moved(src, dst, size))
+                (Flow::Next, self.moved(src, dst, size, scaled))
             }
             4 => return self.group4(op, words, loaded),
             5 => {
@@ -488,12 +437,16 @@ impl Cx<'_> {
                         0 => 8,
                         n => i64::from(n),
                     };
-                    let data = if op & 0x100 != 0 { -data } else { data };
+                    let data = if op & 0x100 != 0 {
+                        data.wrapping_neg()
+                    } else {
+                        data
+                    };
                     let ea = words.ea(mode, reg, 1)?;
                     let note = match ea {
                         Ea::Data(r) | Ea::Addr(r) => match self.get(r) {
                             Some(value) if size == 2 || r >= 8 => {
-                                self.constant(r, value.wrapping_add_signed(data))
+                                self.address_in(r, value.wrapping_add_signed(data))
                             }
                             None if r >= 8 && r != SP => {
                                 self.set(r, None);
@@ -537,7 +490,7 @@ impl Cx<'_> {
                 let disp = match op & 0xff {
                     0 => i64::from(words.next()?.cast_signed()),
                     0xff => i64::from(words.long()?.cast_signed()),
-                    d => sign8(d),
+                    d => sext(d, 8),
                 };
                 let target = pc.wrapping_add_signed(disp) & 0xffff_ffff;
                 let flow = match op >> 8 & 0xf {
@@ -549,8 +502,8 @@ impl Cx<'_> {
             }
             // MOVEQ
             7 if op & 0x100 == 0 => {
-                let value = sign8(op).cast_unsigned();
-                (Flow::Next, self.constant(dreg, value))
+                let value = sext(op & 0xff, 8).cast_unsigned();
+                (Flow::Next, self.integer(dreg, value))
             }
             7 => return None,
             // OR, DIV, SBCD, PACK, UNPK; SUB, SUBX, SUBA; AND, MUL, ABCD,
@@ -567,11 +520,15 @@ impl Cx<'_> {
                     // SUBA, ADDA
                     (3 | 7, _) => {
                         let src = words.ea(mode, reg, if opmode == 3 { 2 } else { 4 })?;
-                        let an = dreg + 8;
+                        let an = dreg | 8;
                         let note = match (src, self.get(an)) {
                             (Ea::Imm(imm), Some(value)) if group == 0xd => {
-                                let imm = if opmode == 3 { signed16(imm) } else { imm };
-                                self.constant(an, value.wrapping_add(imm))
+                                let imm = if opmode == 3 {
+                                    sext(imm, 16).cast_unsigned()
+                                } else {
+                                    imm
+                                };
+                                self.address_in(an, value.wrapping_add(imm))
                             }
                             _ if an == SP => {
                                 self.set(an, None);
@@ -584,11 +541,11 @@ impl Cx<'_> {
                     // SBCD, ABCD; SUBX, ADDX; EXG
                     (4, 0 | 1) => (Flow::Next, self.clobber(dreg)),
                     (5 | 6, 0 | 1) if group == 0xc => {
-                        let note = Note::Clobber(1 << dreg | 1 << (dreg + 8) | 0x101 << reg);
+                        let note = Note::Clobber(0x101 << dreg | 0x101 << reg);
                         self.set(dreg, None);
-                        self.set(dreg + 8, None);
+                        self.set(dreg | 8, None);
                         self.set(u32::from(reg), None);
-                        self.set(u32::from(reg) + 8, None);
+                        self.set(u32::from(reg) | 8, None);
                         (Flow::Next, note)
                     }
                     // PACK, UNPK
@@ -606,7 +563,7 @@ impl Cx<'_> {
                         } else if group == 0xd && size == 4 && ea == Ea::Data(dreg) {
                             // `add.l d0, d0`: twice the case value.
                             self.set(dreg, None);
-                            self.state.scaled = Some((dreg, 1));
+                            self.scaled = Some((dreg, 1));
                             Note::Copy {
                                 reg: dreg,
                                 src: dreg,
@@ -636,8 +593,8 @@ impl Cx<'_> {
                         (Flow::Next, self.compare(src, Ea::Data(dreg)))
                     }
                     _ if mode == 1 => {
-                        self.set(u32::from(reg) + 8, None);
-                        self.set(dreg + 8, None);
+                        self.set(u32::from(reg) | 8, None);
+                        self.set(dreg | 8, None);
                         (Flow::Next, Note::None)
                     }
                     _ => {
@@ -660,7 +617,7 @@ impl Cx<'_> {
                         // `lsl.l #n, d0`, `asl.l #n, d0`
                         let r = u32::from(reg);
                         self.set(r, None);
-                        self.state.scaled = Some((r, u8::try_from(count).unwrap_or(0)));
+                        self.scaled = Some((r, u8::try_from(count).unwrap_or(0)));
                         Note::Copy { reg: r, src: r }
                     } else {
                         self.clobber(u32::from(reg))
@@ -685,17 +642,17 @@ impl Cx<'_> {
             _ => return self.line_f(op, words),
         };
         // What this instruction did not overwrite lasts.
-        if self.state.scaled.is_none()
+        if self.scaled.is_none()
             && let Some((reg, _)) = scaled
             && result.1.writes() >> reg & 1 == 0
         {
-            self.state.scaled = scaled;
+            self.scaled = scaled;
         }
         if let Some((reg, _)) = loaded
             && result.1.writes() >> reg & 1 == 0
-            && self.state.loaded.is_none()
+            && self.loaded.is_none()
         {
-            self.state.loaded = loaded;
+            self.loaded = loaded;
         }
         Some(result)
     }
@@ -820,15 +777,15 @@ impl Cx<'_> {
             0x4e50..=0x4e57 => {
                 words.next()?;
                 self.set(SP, None);
-                return next(self.clobber(r + 8));
+                return next(self.clobber(r | 8));
             }
             0x4e58..=0x4e5f => {
                 self.set(SP, None);
-                return next(self.clobber(r + 8));
+                return next(self.clobber(r | 8));
             }
             // MOVE USP
             0x4e60..=0x4e67 => return next(Note::None),
-            0x4e68..=0x4e6f => return next(self.clobber(r + 8)),
+            0x4e68..=0x4e6f => return next(self.clobber(r | 8)),
             // MOVEC
             0x4e7a | 0x4e7b => {
                 let ext = words.next()?;
@@ -843,7 +800,7 @@ impl Cx<'_> {
             0x4808..=0x480f => {
                 words.long()?;
                 self.set(SP, None);
-                return next(self.clobber(r + 8));
+                return next(self.clobber(r | 8));
             }
             // BKPT
             0x4848..=0x484f => return Some((Flow::Stop, Note::None)),
@@ -859,9 +816,9 @@ impl Cx<'_> {
                 // LEA
                 7 => {
                     let ea = words.ea(mode, reg, 4)?;
-                    let an = dreg + 8;
+                    let an = dreg | 8;
                     let note = match (self.address(ea), ea) {
-                        (Some(addr), _) => self.constant(an, addr),
+                        (Some(addr), _) => self.address_in(an, addr),
                         (None, Ea::Disp(base, disp)) if base != SP && an != SP => {
                             self.set(an, None);
                             Note::Offset {
@@ -954,7 +911,7 @@ impl Cx<'_> {
                     }
                 }
                 if mode == 3 {
-                    self.set(r + 8, None);
+                    self.set(r | 8, None);
                 }
                 next(Note::Clobber(u32::from(mask)))
             }
@@ -968,9 +925,9 @@ impl Cx<'_> {
                 let note = match ea {
                     Ea::Index {
                         base: None, disp, ..
-                    } if op >> 6 == 0x13b => Note::Pc {
+                    } if op >> 6 == 0x13b => Note::Value {
                         reg: TABLE,
-                        addr: disp,
+                        value: disp,
                     },
                     _ => Note::None,
                 };
@@ -1026,7 +983,11 @@ impl Cx<'_> {
                     // FMOVE, FMOVEM of control registers; FMOVEM.
                     4 | 5 => {
                         let count = (ext >> 10 & 7).count_ones();
-                        let ea = words.ea(mode, reg, u8::try_from(4 * count).unwrap_or(4))?;
+                        let ea = words.ea(
+                            mode,
+                            reg,
+                            u8::try_from(count.saturating_mul(4)).unwrap_or(4),
+                        )?;
                         if ext >> 13 == 5 {
                             self.write(ea)
                         } else {
@@ -1093,47 +1054,76 @@ impl Cx<'_> {
     }
 }
 
-/// Whether `bytes` begin a frame: `link a6, #-n`, registers saved
-/// (`movem.l ..., -(sp)`), or the stack pointer lowered (`lea -n(sp), sp`,
-/// `subq.l #n, sp`, `suba.l #n, sp`), among the first three instructions.
-pub(crate) fn starts_frame(bytes: &[u8]) -> bool {
-    let mut state = State::default();
-    let mut at = 0_usize;
-    for _ in 0..3 {
-        let Some(rest) = bytes.get(at..) else {
-            return false;
+impl crate::isa::Decode for Decoder {
+    fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
+        let mut words = Words { bytes, at: 0, addr };
+        let decoded = words
+            .next()
+            .and_then(|op| self.step(op, &mut words).map(|d| (op, d)));
+        let Some((op, (flow, note))) = decoded else {
+            return Insn::new(2, Flow::Invalid);
         };
-        let Some(op) = half(rest, 0) else {
-            return false;
-        };
-        let second = half(rest, 2);
-        match op {
-            0x4e50..=0x4e57 if second.is_some_and(|d| d.cast_signed() <= 0) => return true,
-            0x4808..=0x480f | 0x48e7 => return true,
-            0x4fef if second.is_some_and(|d| d.cast_signed() < 0) => return true,
-            _ if op & 0xf1ff == 0x518f || op == 0x9ffc => return true,
-            _ => {}
+        Insn {
+            note,
+            pad: op == NOP,
+            ..Insn::new(u32::try_from(words.at).unwrap_or(2), flow)
         }
-        let insn = decode(&mut state, rest, 0);
-        if insn.flow != Flow::Next {
-            return false;
-        }
-        at += insn.len as usize;
     }
-    false
+
+    fn reset(&mut self) {
+        *self = Self::default();
+    }
+
+    fn call(&mut self) {
+        self.loaded = None;
+        self.scaled = None;
+        self.compared = None;
+        self.regs.forget(VOLATILE);
+    }
+
+    /// `link a6, #-n`, registers saved (`movem.l ..., -(sp)`), or the stack
+    /// pointer lowered (`lea -n(sp), sp`, `subq.l #n, sp`, `suba.l #n,
+    /// sp`), among the first three instructions.
+    fn starts_frame(&self, bytes: &[u8]) -> bool {
+        let mut decoder = Self::default();
+        let mut at = 0_usize;
+        for _ in 0..3 {
+            let Some(op) = u16_at(bytes, at, true) else {
+                return false;
+            };
+            let second = u16_at(bytes, at.saturating_add(2), true);
+            match op {
+                0x4e50..=0x4e57 if second.is_some_and(|d| d.cast_signed() <= 0) => return true,
+                0x4808..=0x480f | 0x48e7 => return true,
+                0x4fef if second.is_some_and(|d| d.cast_signed() < 0) => return true,
+                _ if op & 0xf1ff == 0x518f || op == 0x9ffc => return true,
+                _ => {}
+            }
+            let Some(rest) = bytes.get(at..) else {
+                return false;
+            };
+            let insn = decoder.decode(rest, 0);
+            if insn.flow != Flow::Next {
+                return false;
+            }
+            at = at.saturating_add(usize::try_from(insn.len).unwrap_or(usize::MAX));
+        }
+        false
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::isa::Decode;
 
     fn run(words: &[u16], addr: u64) -> Vec<Insn> {
         let code: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
-        let mut state = State::default();
+        let mut decoder = Decoder::default();
         let mut at = 0;
         let mut insns = Vec::new();
         while at < code.len() {
-            let insn = decode(&mut state, &code[at..], addr + at as u64);
+            let insn = decoder.decode(&code[at..], addr + at as u64);
             at += insn.len as usize;
             insns.push(insn);
         }
@@ -1238,9 +1228,9 @@ mod tests {
         );
         assert_eq!(
             insns[5].note,
-            Note::Pc {
+            Note::Value {
                 reg: TABLE,
-                addr: 0x8001_2f6a
+                value: 0x8001_2f6a
             }
         );
         assert_eq!(
@@ -1263,8 +1253,53 @@ mod tests {
     fn frames() {
         let code =
             |words: &[u16]| -> Vec<u8> { words.iter().flat_map(|w| w.to_be_bytes()).collect() };
-        assert!(starts_frame(&code(&[0x4e56, 0x0000])));
-        assert!(starts_frame(&code(&[0x2f02, 0x48e7, 0x3820])));
-        assert!(!starts_frame(&code(&[0x4e75])));
+        assert!(Decoder::default().starts_frame(&code(&[0x4e56, 0x0000])));
+        assert!(Decoder::default().starts_frame(&code(&[0x2f02, 0x48e7, 0x3820])));
+        assert!(!Decoder::default().starts_frame(&code(&[0x4e75])));
+    }
+
+    /// `moveq #5, d0` and `movea.w #-1, a0` leave integers; `move.l #`
+    /// and `lea` addresses.
+    #[test]
+    fn integers_and_addresses() {
+        let insns = run(
+            &[
+                0x7005, 0x307c, 0xffff, 0x223c, 0, 0x1234, 0x41f9, 0x8000, 0x0100,
+            ],
+            0,
+        );
+        assert_eq!(insns[0].note, Note::Value { reg: 0, value: 5 });
+        assert_eq!(
+            insns[1].note,
+            Note::Value {
+                reg: 8,
+                value: 0xffff_ffff
+            }
+        );
+        assert_eq!(
+            insns[2].note,
+            Note::Address {
+                reg: 1,
+                addr: 0x1234
+            }
+        );
+        assert_eq!(
+            insns[3].note,
+            Note::Address {
+                reg: 8,
+                addr: 0x8000_0100
+            }
+        );
+    }
+
+    /// A call forgets `d0`, `d1`, `a0`, `a1`, and keeps the rest.
+    #[test]
+    fn calls_forget_volatile_registers() {
+        let mut decoder = Decoder::default();
+        // moveq #1, d0; moveq #2, d2
+        decoder.decode(&[0x70, 0x01], 0);
+        decoder.decode(&[0x74, 0x02], 2);
+        decoder.call();
+        assert_eq!((decoder.get(0), decoder.get(2)), (None, Some(2)));
     }
 }

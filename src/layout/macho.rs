@@ -3,10 +3,10 @@
 //! truncated or points outside the file is cut short or left out rather
 //! than failing the whole file. Universal (fat) headers are read here too.
 
-use super::read::Reader;
+use std::collections::HashSet;
 
-/// The most entries read from any one table.
-const MOST: u64 = 1 << 20;
+use super::read::{self, Reader};
+use super::{Error, file_range, limits};
 
 const MH_MAGIC: u32 = 0xfeed_face;
 const MH_MAGIC_64: u32 = 0xfeed_facf;
@@ -16,28 +16,38 @@ const LC_SEGMENT: u32 = 0x1;
 const LC_SYMTAB: u32 = 0x2;
 const LC_UNIXTHREAD: u32 = 0x5;
 const LC_DYSYMTAB: u32 = 0xb;
-const LC_SEGMENT_64: u32 = 0x19;
-const LC_FUNCTION_STARTS: u32 = 0x26;
-const LC_MAIN: u32 = 0x8000_0028;
 const LC_LOAD_DYLIB: u32 = 0xc;
+const LC_SEGMENT_64: u32 = 0x19;
+const LC_LAZY_LOAD_DYLIB: u32 = 0x20;
 const LC_DYLD_INFO: u32 = 0x22;
+const LC_FUNCTION_STARTS: u32 = 0x26;
+const LC_LOAD_WEAK_DYLIB: u32 = 0x8000_0018;
+const LC_REEXPORT_DYLIB: u32 = 0x8000_001f;
 const LC_DYLD_INFO_ONLY: u32 = 0x8000_0022;
+const LC_LOAD_UPWARD_DYLIB: u32 = 0x8000_0023;
+const LC_MAIN: u32 = 0x8000_0028;
 const LC_DYLD_EXPORTS_TRIE: u32 = 0x8000_0033;
 const LC_DYLD_CHAINED_FIXUPS: u32 = 0x8000_0034;
 const EXPORT_SYMBOL_FLAGS_REEXPORT: u64 = 0x8;
-const LC_LOAD_WEAK_DYLIB: u32 = 0x8000_0018;
-const LC_REEXPORT_DYLIB: u32 = 0x8000_001f;
-const LC_LAZY_LOAD_DYLIB: u32 = 0x20;
-const LC_LOAD_UPWARD_DYLIB: u32 = 0x8000_0023;
 
 pub(super) const CPU_TYPE_X86: u32 = 7;
 pub(super) const CPU_TYPE_X86_64: u32 = 0x0100_0007;
 pub(super) const CPU_TYPE_ARM64: u32 = 0x0100_000c;
 
-pub(super) const SECTION_TYPE: u32 = 0xff;
+const SECTION_TYPE: u32 = 0xff;
+const S_ZEROFILL: u32 = 0x1;
+pub(super) const S_NON_LAZY_SYMBOL_POINTERS: u32 = 0x6;
+pub(super) const S_LAZY_SYMBOL_POINTERS: u32 = 0x7;
+pub(super) const S_SYMBOL_STUBS: u32 = 0x8;
+const S_GB_ZEROFILL: u32 = 0xc;
+const S_THREAD_LOCAL_ZEROFILL: u32 = 0x12;
 const S_ATTR_PURE_INSTRUCTIONS: u32 = 0x8000_0000;
 const S_ATTR_SOME_INSTRUCTIONS: u32 = 0x0000_0400;
 const VM_PROT_EXECUTE: u32 = 0x4;
+
+/// The indirect symbol table's entries for local and absolute symbols,
+/// which name no import.
+pub(super) const INDIRECT_SYMBOL_LOCAL_OR_ABS: u32 = 0xc000_0000;
 
 /// `n_type` bits: a debugging entry when any of these is set.
 const N_STAB: u8 = 0xe0;
@@ -46,6 +56,11 @@ pub(super) const N_PEXT: u8 = 0x10;
 pub(super) const N_TYPE: u8 = 0x0e;
 pub(super) const N_UNDF: u8 = 0x0;
 pub(super) const N_SECT: u8 = 0xe;
+
+/// A Java class file shares the universal header's magic number, and its
+/// "slice count" is its major version, 45 or more: no universal binary has
+/// that many slices.
+const JAVA_MAJOR_VERSIONS: u32 = 45;
 
 pub(super) struct MachO {
     pub(super) is_64: bool,
@@ -116,46 +131,77 @@ impl Symbol {
     }
 }
 
-fn named(name: &[u8; 16], wanted: &str) -> bool {
-    let len = name.iter().position(|&b| b == 0).unwrap_or(16);
-    name.get(..len) == Some(wanted.as_bytes())
+/// A fixed-size name field's text: up to its first NUL.
+fn text(name: &[u8; 16]) -> &[u8] {
+    name.split(|&b| b == 0).next().unwrap_or_default()
 }
 
 impl Segment {
     pub(super) fn named(&self, name: &str) -> bool {
-        named(&self.name, name)
+        text(&self.name) == name.as_bytes()
     }
 }
 
 impl Section {
     pub(super) fn named(&self, name: &str) -> bool {
-        named(&self.name, name)
+        text(&self.name) == name.as_bytes()
     }
 
     /// `__SEGMENT.__section`.
     pub(super) fn full_name(&self) -> String {
-        let text = |name: &[u8; 16]| {
-            let len = name.iter().position(|&b| b == 0).unwrap_or(16);
-            String::from_utf8_lossy(name.get(..len).unwrap_or_default()).into_owned()
-        };
-        format!("{}.{}", text(&self.segment), text(&self.name))
+        let lossy = |name| String::from_utf8_lossy(text(name)).into_owned();
+        format!("{}.{}", lossy(&self.segment), lossy(&self.name))
+    }
+
+    /// `S_*`: what the section holds.
+    pub(super) fn kind(&self) -> u32 {
+        self.flags & SECTION_TYPE
+    }
+
+    /// The loader fills the section with zeros: the file holds none of it.
+    pub(super) fn zerofill(&self) -> bool {
+        matches!(
+            self.kind(),
+            S_ZEROFILL | S_GB_ZEROFILL | S_THREAD_LOCAL_ZEROFILL
+        )
+    }
+}
+
+impl MachO {
+    /// The `__TEXT` segment, which the image's offsets count from.
+    pub(super) fn text(&self) -> Option<&Segment> {
+        self.segments.iter().find(|segment| segment.named("__TEXT"))
+    }
+
+    /// The address of the `__TEXT` segment.
+    pub(super) fn text_base(&self) -> Option<u64> {
+        self.text().map(|segment| segment.vmaddr)
+    }
+
+    /// The section called `name`.
+    pub(super) fn section(&self, name: &str) -> Option<&Section> {
+        self.sections.iter().find(|section| section.named(name))
     }
 }
 
 /// The Mach-O file in `bytes`, or why it is none: only a header too short
-/// or of no known magic number fails.
-pub(super) fn parse(bytes: &[u8]) -> Result<MachO, String> {
-    let magic = Reader::new(bytes, false).u32(0).ok_or("too short")?;
+/// or of no known magic number fails. The load commands are walked as far
+/// as the header's count and size of them say, each within its own size.
+pub(super) fn parse(bytes: &[u8]) -> Result<MachO, Error> {
+    let magic = Reader::new(bytes, false)
+        .u32(0)
+        .ok_or(Error::Truncated("Mach-O header"))?;
     let (is_64, big) = match magic {
         MH_MAGIC => (false, false),
         MH_MAGIC_64 => (true, false),
         _ if magic.swap_bytes() == MH_MAGIC => (false, true),
         _ if magic.swap_bytes() == MH_MAGIC_64 => (true, true),
-        _ => return Err(format!("unknown magic number {magic:#010x}")),
+        _ => return Err(Error::BadMagic),
     };
     let r = Reader::new(bytes, big);
-    let (cputype, filetype, ncmds) =
-        (|| Some((r.u32(4)?, r.u32(12)?, r.u32(16)?)))().ok_or("Mach-O header truncated")?;
+    let (cputype, filetype, ncmds, sizeofcmds) =
+        (|| Some((r.u32(4)?, r.u32(12)?, r.u32(16)?, r.u32(20)?)))()
+            .ok_or(Error::Truncated("Mach-O header"))?;
     let mut macho = MachO {
         is_64,
         big,
@@ -174,130 +220,120 @@ pub(super) fn parse(bytes: &[u8]) -> Result<MachO, String> {
     };
     let (mut main, mut thread) = (None, None);
     let mut at: u64 = if is_64 { 32 } else { 28 };
-    for _ in 0..ncmds.min(1 << 16) {
-        let (Some(cmd), Some(size)) = (r.u32(at), r.u32(at + 4)) else {
+    let end = at.saturating_add(u64::from(sizeofcmds));
+    // A (file offset, size) pair at `field` in the command.
+    let range = |c: &Reader<'_>, field: u64| {
+        let offset = c.u32(field)?;
+        let size = c.at(field).u32(4)?;
+        Some((u64::from(offset), u64::from(size)))
+    };
+    for _ in 0..u64::from(ncmds).min(limits::LOAD_COMMANDS) {
+        if at >= end {
+            break;
+        }
+        let c = r.at(at);
+        let (Some(cmd), Some(size)) = (c.u32(0), c.u32(4)) else {
             break;
         };
         match cmd {
-            LC_SEGMENT | LC_SEGMENT_64 => macho.read_segment(&r, at, cmd == LC_SEGMENT_64),
-            LC_SYMTAB => macho.read_symbols(&r, at),
-            LC_DYSYMTAB => macho.read_indirect(&r, at),
+            LC_SEGMENT | LC_SEGMENT_64 => macho.read_segment(&c, size, cmd == LC_SEGMENT_64),
+            LC_SYMTAB => macho.read_symbols(&r, &c),
+            LC_DYSYMTAB => macho.read_indirect(&r, &c),
             LC_DYLD_INFO | LC_DYLD_INFO_ONLY => {
                 // Bind at 16, weak bind at 24 (by name alone, no library),
-                // lazy bind at 32.
+                // lazy bind at 32; the export trie at 40.
                 macho.binds = [16, 32]
                     .into_iter()
-                    .filter_map(|field| {
-                        Some((
-                            u64::from(r.u32(at + field)?),
-                            u64::from(r.u32(at + field + 4)?),
-                        ))
-                    })
+                    .filter_map(|field| range(&c, field))
                     .filter(|&(_, size)| size != 0)
                     .collect();
-                macho.exports_trie =
-                    (|| Some((u64::from(r.u32(at + 40)?), u64::from(r.u32(at + 44)?))))()
-                        .filter(|&(_, size)| size != 0)
-                        .or(macho.exports_trie);
+                macho.exports_trie = range(&c, 40)
+                    .filter(|&(_, size)| size != 0)
+                    .or(macho.exports_trie);
             }
             LC_DYLD_CHAINED_FIXUPS => {
-                macho.chained_fixups =
-                    (|| Some((u64::from(r.u32(at + 8)?), u64::from(r.u32(at + 12)?))))()
-                        .filter(|&(_, size)| size != 0);
+                macho.chained_fixups = range(&c, 8).filter(|&(_, size)| size != 0);
             }
             LC_DYLD_EXPORTS_TRIE => {
-                macho.exports_trie =
-                    (|| Some((u64::from(r.u32(at + 8)?), u64::from(r.u32(at + 12)?))))()
-                        .filter(|&(_, size)| size != 0);
+                macho.exports_trie = range(&c, 8).filter(|&(_, size)| size != 0);
             }
             LC_LOAD_DYLIB | LC_LOAD_WEAK_DYLIB | LC_REEXPORT_DYLIB | LC_LAZY_LOAD_DYLIB
             | LC_LOAD_UPWARD_DYLIB => {
-                let name = r.u32(at + 8).map(|offset| r.name(at + u64::from(offset)));
+                let name = c.u32(8).map(|offset| c.name(u64::from(offset)));
                 macho.dylibs.push(name.unwrap_or_default().into_owned());
             }
-            LC_FUNCTION_STARTS => {
-                macho.function_starts =
-                    (|| Some((u64::from(r.u32(at + 8)?), u64::from(r.u32(at + 12)?))))();
-            }
+            LC_FUNCTION_STARTS => macho.function_starts = range(&c, 8),
             // dyld honours the first of each.
-            LC_MAIN if main.is_none() => main = r.u64(at + 8),
-            LC_UNIXTHREAD if thread.is_none() => thread = thread_pc(&r, at, cputype),
+            LC_MAIN if main.is_none() => main = c.u64(8),
+            LC_UNIXTHREAD if thread.is_none() => thread = thread_pc(&c, cputype),
             _ => {}
         }
         if size < 8 {
             break;
         }
-        at += u64::from(size);
+        at = at.saturating_add(u64::from(size));
     }
     // dyld prefers LC_MAIN, an offset from the start of `__TEXT`.
     macho.entry = match (main, thread) {
-        (Some(offset), _) => macho
-            .segments
-            .iter()
-            .find(|segment| segment.named("__TEXT"))
-            .map_or(0, |text| {
-                text.vmaddr.wrapping_sub(text.fileoff).wrapping_add(offset)
-            }),
+        (Some(offset), _) => macho.text().map_or(0, |text| {
+            text.vmaddr.wrapping_sub(text.fileoff).wrapping_add(offset)
+        }),
         (None, Some(pc)) => pc,
         (None, None) => 0,
     };
     Ok(macho)
 }
 
-/// The program counter an `LC_UNIXTHREAD` command at `at` starts at, read
-/// from the thread state as the CPU type lays it out (dyld ignores the
-/// flavour).
-fn thread_pc(r: &Reader<'_>, at: u64, cputype: u32) -> Option<u64> {
-    let count = u64::from(r.u32(at + 12)?);
-    let state = at + 16;
-    let (offset, wide) = match cputype {
-        CPU_TYPE_X86 => (40, false),
+/// The program counter the `LC_UNIXTHREAD` command `c` starts at, read from
+/// the thread state as the CPU type lays it out (dyld ignores the flavour).
+fn thread_pc(c: &Reader<'_>, cputype: u32) -> Option<u64> {
+    let words = u64::from(c.u32(12)?);
+    let state = c.at(16);
+    let (pc, wide) = match cputype {
+        CPU_TYPE_X86 => (40_u64, false),
         CPU_TYPE_X86_64 => (128, true),
         CPU_TYPE_ARM64 => (256, true),
         _ => return None,
     };
     let width = if wide { 8 } else { 4 };
-    if offset + width > 4 * count {
+    if words.saturating_mul(4) < pc.saturating_add(width) {
         return None;
     }
-    if wide {
-        // Two words, low first, in the file's byte order.
-        let low = u64::from(r.u32(state + offset)?);
-        let high = u64::from(r.u32(state + offset + 4)?);
-        Some(low | high << 32)
-    } else {
-        r.u32(state + offset).map(u64::from)
+    let low = u64::from(state.u32(pc)?);
+    if !wide {
+        return Some(low);
     }
+    // Two words, low first, in the file's byte order.
+    let high = u64::from(state.at(pc).u32(4)?);
+    Some(low | high << 32)
 }
 
 impl MachO {
-    fn read_segment(&mut self, r: &Reader<'_>, at: u64, wide: bool) {
-        let name = |at: u64| -> Option<[u8; 16]> {
-            let at = usize::try_from(at).ok()?;
-            r.bytes.get(at..at.checked_add(16)?)?.try_into().ok()
-        };
+    /// The segment command `c` of `size` bytes, and as many of the sections
+    /// it claims as fit in it, up to [`limits::SECTIONS`] in all.
+    fn read_segment(&mut self, c: &Reader<'_>, size: u32, wide: bool) {
         let segment = if wide {
             (|| {
                 Some((
                     Segment {
-                        name: name(at + 8)?,
-                        vmaddr: r.u64(at + 24)?,
-                        fileoff: r.u64(at + 40)?,
+                        name: c.array(8)?,
+                        vmaddr: c.u64(24)?,
+                        fileoff: c.u64(40)?,
                     },
-                    r.u32(at + 60)?,
-                    r.u32(at + 64)?,
+                    c.u32(60)?,
+                    c.u32(64)?,
                 ))
             })()
         } else {
             (|| {
                 Some((
                     Segment {
-                        name: name(at + 8)?,
-                        vmaddr: u64::from(r.u32(at + 24)?),
-                        fileoff: u64::from(r.u32(at + 32)?),
+                        name: c.array(8)?,
+                        vmaddr: u64::from(c.u32(24)?),
+                        fileoff: u64::from(c.u32(32)?),
                     },
-                    r.u32(at + 44)?,
-                    r.u32(at + 48)?,
+                    c.u32(44)?,
+                    c.u32(48)?,
                 ))
             })()
         };
@@ -306,40 +342,46 @@ impl MachO {
         };
         self.segments.push(segment);
         let executable = initprot & VM_PROT_EXECUTE != 0;
-        let (first, size) = if wide { (72, 80) } else { (56, 68) };
-        for i in 0..u64::from(nsects).min(1 << 12) {
-            let at = at + first + i * size;
+        let (header, entry) = if wide { (72, 80) } else { (56, 68) };
+        let fit = u64::from(size)
+            .saturating_sub(header)
+            .checked_div(entry)
+            .unwrap_or(0)
+            .min(u64::from(nsects))
+            .min(limits::SECTIONS.saturating_sub(self.sections.len()) as u64);
+        for at in read::table(header, entry, fit) {
+            let s = c.at(at);
             let section = if wide {
                 (|| {
                     Some(Section {
-                        name: name(at)?,
-                        segment: name(at + 16)?,
+                        name: s.array(0)?,
+                        segment: s.array(16)?,
                         protection: initprot,
-                        addr: r.u64(at + 32)?,
-                        size: r.u64(at + 40)?,
-                        offset: u64::from(r.u32(at + 48)?),
-                        reloff: r.u32(at + 56)?,
-                        nreloc: r.u32(at + 60)?,
-                        flags: r.u32(at + 64)?,
-                        reserved1: r.u32(at + 68)?,
-                        reserved2: r.u32(at + 72)?,
+                        addr: s.u64(32)?,
+                        size: s.u64(40)?,
+                        offset: u64::from(s.u32(48)?),
+                        reloff: s.u32(56)?,
+                        nreloc: s.u32(60)?,
+                        flags: s.u32(64)?,
+                        reserved1: s.u32(68)?,
+                        reserved2: s.u32(72)?,
                         code: false,
                     })
                 })()
             } else {
                 (|| {
                     Some(Section {
-                        name: name(at)?,
-                        segment: name(at + 16)?,
+                        name: s.array(0)?,
+                        segment: s.array(16)?,
                         protection: initprot,
-                        addr: u64::from(r.u32(at + 32)?),
-                        size: u64::from(r.u32(at + 36)?),
-                        offset: u64::from(r.u32(at + 40)?),
-                        reloff: r.u32(at + 48)?,
-                        nreloc: r.u32(at + 52)?,
-                        flags: r.u32(at + 56)?,
-                        reserved1: r.u32(at + 60)?,
-                        reserved2: r.u32(at + 64)?,
+                        addr: u64::from(s.u32(32)?),
+                        size: u64::from(s.u32(36)?),
+                        offset: u64::from(s.u32(40)?),
+                        reloff: s.u32(48)?,
+                        nreloc: s.u32(52)?,
+                        flags: s.u32(56)?,
+                        reserved1: s.u32(60)?,
+                        reserved2: s.u32(64)?,
                         code: false,
                     })
                 })()
@@ -351,39 +393,39 @@ impl MachO {
         }
     }
 
-    fn read_symbols(&mut self, r: &Reader<'_>, at: u64) {
-        let Some((symoff, nsyms, stroff)) =
-            (|| Some((r.u32(at + 8)?, r.u32(at + 12)?, r.u32(at + 16)?)))()
-        else {
+    /// The symbol table `LC_SYMTAB` command `c` names in the file `r`.
+    fn read_symbols(&mut self, r: &Reader<'_>, c: &Reader<'_>) {
+        let Some((symoff, nsyms, stroff)) = (|| Some((c.u32(8)?, c.u32(12)?, c.u32(16)?)))() else {
             return;
         };
-        let (symoff, stroff) = (u64::from(symoff), u64::from(stroff));
+        let stroff = u64::from(stroff);
         let size = if self.is_64 { 16 } else { 12 };
-        self.symbols = (0..u64::from(nsyms).min(MOST))
-            .map_while(|i| {
-                let at = symoff + i * size;
+        self.symbols = read::table(u64::from(symoff), size, u64::from(nsyms))
+            .map_while(|at| {
+                let entry = r.at(at);
                 let n_value = if self.is_64 {
-                    r.u64(at + 8)?
+                    entry.u64(8)?
                 } else {
-                    u64::from(r.u32(at + 8)?)
+                    u64::from(entry.u32(8)?)
                 };
+                let name = stroff.saturating_add(u64::from(entry.u32(0)?));
                 Some(Symbol {
-                    name: r.name(stroff + u64::from(r.u32(at)?)).into_owned(),
-                    n_type: r.u8(at + 4)?,
-                    n_desc: r.u16(at + 6)?,
+                    name: r.name(name).into_owned(),
+                    n_type: entry.u8(4)?,
+                    n_desc: entry.u16(6)?,
                     n_value,
                 })
             })
             .collect();
     }
 
-    fn read_indirect(&mut self, r: &Reader<'_>, at: u64) {
-        let (Some(offset), Some(count)) = (r.u32(at + 56), r.u32(at + 60)) else {
+    /// The indirect symbol table `LC_DYSYMTAB` command `c` names in `r`.
+    fn read_indirect(&mut self, r: &Reader<'_>, c: &Reader<'_>) {
+        let (Some(offset), Some(count)) = (c.u32(56), c.u32(60)) else {
             return;
         };
-        let offset = u64::from(offset);
-        self.indirect = (0..u64::from(count).min(MOST))
-            .map_while(|i| r.u32(offset + 4 * i))
+        self.indirect = read::table(u64::from(offset), 4, u64::from(count))
+            .map_while(|at| r.u32(at))
             .collect();
     }
 }
@@ -393,43 +435,43 @@ impl MachO {
 /// once, so a trie whose edges loop ends.
 pub(super) fn exports_trie(trie: &[u8]) -> Vec<(String, Exported)> {
     let mut out = Vec::new();
-    let mut visited = std::collections::HashSet::new();
+    let mut visited = HashSet::new();
     let mut stack = vec![(0_usize, Vec::new())];
     // Name bytes built: each child copies its parent's prefix, so a chain of
     // terminal nodes costs the square of its length. Real names are short,
     // and a real trie's total well under a megabyte.
-    let mut budget: usize = 32 << 20;
+    let mut budget = limits::NAME_BYTES;
+    let cstr = |at: usize| Reader::new(trie, false).cstr(at as u64);
     while let Some((node, prefix)) = stack.pop() {
-        if !visited.insert(node) || visited.len() > 1 << 20 {
+        if !visited.insert(node) || visited.len() > limits::TRIE_NODES {
             continue;
         }
         let mut at = node;
-        let Some(terminal) = uleb(trie, &mut at) else {
+        let Some(terminal) = read::uleb128(trie, &mut at) else {
             continue;
         };
         let children = at.saturating_add(usize::try_from(terminal).unwrap_or(usize::MAX));
         if terminal != 0
-            && let Some(flags) = uleb(trie, &mut at)
+            && let Some(flags) = read::uleb128(trie, &mut at)
         {
             let exported = if flags & EXPORT_SYMBOL_FLAGS_REEXPORT == 0 {
-                uleb(trie, &mut at).map(Exported::At)
+                read::uleb128(trie, &mut at).map(Exported::At)
             } else {
                 // The library's ordinal, then the name it exports there
                 // (empty for the same name).
-                uleb(trie, &mut at).map(|ordinal| Exported::Reexport {
+                read::uleb128(trie, &mut at).map(|ordinal| Exported::Reexport {
                     ordinal,
-                    name: String::from_utf8_lossy(cstr(trie, at)).into_owned(),
+                    name: String::from_utf8_lossy(cstr(at)).into_owned(),
                 })
             };
             if let Some(exported) = exported {
                 out.push((String::from_utf8_lossy(&prefix).into_owned(), exported));
             }
         }
-        let mut at = children;
-        let Some(&count) = trie.get(at) else {
+        let Some(&count) = trie.get(children) else {
             continue;
         };
-        at += 1;
+        let mut at = children.saturating_add(1);
         for _ in 0..count {
             let Some(len) = trie
                 .get(at..)
@@ -437,16 +479,16 @@ pub(super) fn exports_trie(trie: &[u8]) -> Vec<(String, Exported)> {
             else {
                 break;
             };
-            let edge = trie.get(at..at + len).unwrap_or_default();
-            at += len + 1;
-            let Some(child) = uleb(trie, &mut at) else {
+            let edge = trie.get(at..at.saturating_add(len)).unwrap_or_default();
+            at = at.saturating_add(len).saturating_add(1);
+            let Some(child) = read::uleb128(trie, &mut at) else {
                 break;
             };
-            let size = prefix.len() + edge.len();
-            if size > 1 << 12 || size > budget {
+            let size = prefix.len().saturating_add(edge.len());
+            if size > limits::NAME_LEN || size > budget {
                 continue;
             }
-            budget -= size;
+            budget = budget.saturating_sub(size);
             let mut name = prefix.clone();
             name.extend_from_slice(edge);
             if let Ok(child) = usize::try_from(child) {
@@ -466,62 +508,48 @@ pub(super) enum Exported {
     Reexport { ordinal: u64, name: String },
 }
 
-/// The NUL-terminated bytes at `at`; empty past the end.
-fn cstr(data: &[u8], at: usize) -> &[u8] {
-    data.get(at..)
-        .map(|rest| rest.get(..1 << 12).unwrap_or(rest))
-        .and_then(|rest| rest.split(|&b| b == 0).next())
-        .unwrap_or_default()
-}
-
 /// The library ordinal dyld binds each symbol to, by name, as the bind
 /// opcode streams and the chained-fixup import table record it: what a
 /// binary whose symbol table carries no two-level ordinal (Go's linker
 /// writes none) says of its imports. Ordinals count the dylibs from 1;
 /// zero and below are this image, the executable, and flat lookup. The
 /// first binding of a name wins.
-pub(super) fn bound_ordinals(bytes: &[u8], macho: &MachO) -> Vec<(String, i64)> {
+pub(super) fn bound_ordinals<'a>(bytes: &'a [u8], macho: &MachO) -> Vec<(String, i64)> {
     let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::<Vec<u8>>::new();
+    let mut seen = HashSet::new();
     // Name bytes looked at: every bind and import entry may name the same
     // long string, which costs a hash each time.
-    let mut budget: usize = 32 << 20;
-    let mut record = |name: &[u8], ordinal: i64| {
+    let mut budget = limits::NAME_BYTES;
+    let mut record = |name: &'a [u8], ordinal: i64| {
         budget = budget.saturating_sub(name.len());
-        if budget > 0 && !name.is_empty() && (seen.len() as u64) < MOST && !seen.contains(name) {
-            seen.insert(name.to_vec());
+        if budget > 0
+            && !name.is_empty()
+            && (seen.len() as u64) < limits::TABLE
+            && seen.insert(name)
+        {
             out.push((String::from_utf8_lossy(name).into_owned(), ordinal));
         }
     };
     for &(offset, size) in &macho.binds {
-        bind_opcodes(slice(bytes, offset, size), &mut record);
+        bind_opcodes(file_range(bytes, offset, size), &mut record);
     }
     if let Some((offset, size)) = macho.chained_fixups {
-        chained_imports(slice(bytes, offset, size), macho.big, &mut record);
+        chained_imports(file_range(bytes, offset, size), macho.big, &mut record);
     }
     out
-}
-
-/// The file's bytes from `offset`, `size` of them or as many as there are.
-fn slice(bytes: &[u8], offset: u64, size: u64) -> &[u8] {
-    let start = usize::try_from(offset).unwrap_or(usize::MAX);
-    let end = start
-        .saturating_add(usize::try_from(size).unwrap_or(usize::MAX))
-        .min(bytes.len());
-    bytes.get(start..end).unwrap_or_default()
 }
 
 /// The (symbol, library ordinal) of each bind in a dyld bind opcode
 /// stream. Addresses are not tracked: only which library each name binds
 /// to. An unknown or truncated opcode ends the stream.
-fn bind_opcodes(stream: &[u8], record: &mut impl FnMut(&[u8], i64)) {
+fn bind_opcodes<'a>(stream: &'a [u8], record: &mut impl FnMut(&'a [u8], i64)) {
     let mut at = 0;
     let mut ordinal = 0_i64;
     let mut symbol: &[u8] = &[];
     while let Some(&byte) = stream.get(at) {
-        at += 1;
+        at = at.saturating_add(1);
         let immediate = byte & 0x0f;
-        let skip = |at: &mut usize, n: usize| (0..n).all(|_| uleb(stream, at).is_some());
+        let skip = |at: &mut usize, n: usize| (0..n).all(|_| read::uleb128(stream, at).is_some());
         let ok = match byte & 0xf0 {
             // DONE ends a lazy-bind entry, not the stream; SET_TYPE_IMM.
             0x00 | 0x50 => true,
@@ -531,7 +559,7 @@ fn bind_opcodes(stream: &[u8], record: &mut impl FnMut(&[u8], i64)) {
                 true
             }
             // SET_DYLIB_ORDINAL_ULEB
-            0x20 => uleb(stream, &mut at)
+            0x20 => read::uleb128(stream, &mut at)
                 .map(|n| ordinal = i64::try_from(n).unwrap_or(0))
                 .is_some(),
             // SET_DYLIB_SPECIAL_IMM: zero, or negative, sign-extended.
@@ -545,8 +573,8 @@ fn bind_opcodes(stream: &[u8], record: &mut impl FnMut(&[u8], i64)) {
             }
             // SET_SYMBOL_TRAILING_FLAGS_IMM: the name follows.
             0x40 => {
-                symbol = cstr(stream, at);
-                at = at.saturating_add(symbol.len() + 1);
+                symbol = Reader::new(stream, false).cstr(at as u64);
+                at = at.saturating_add(symbol.len()).saturating_add(1);
                 at <= stream.len()
             }
             // DO_BIND, DO_BIND_ADD_ADDR_IMM_SCALED
@@ -580,7 +608,7 @@ fn bind_opcodes(stream: &[u8], record: &mut impl FnMut(&[u8], i64)) {
 /// The (symbol, library ordinal) of each entry of a chained-fixup import
 /// table (`dyld_chained_fixups_header`), in any of its three formats. A
 /// compressed symbol table is not read.
-fn chained_imports(data: &[u8], big: bool, record: &mut impl FnMut(&[u8], i64)) {
+fn chained_imports<'a>(data: &'a [u8], big: bool, record: &mut impl FnMut(&'a [u8], i64)) {
     let r = Reader::new(data, big);
     // imports_offset, symbols_offset, imports_count, imports_format,
     // symbols_format.
@@ -588,47 +616,34 @@ fn chained_imports(data: &[u8], big: bool, record: &mut impl FnMut(&[u8], i64)) 
     let Some((imports, symbols, count, format, 0)) = header else {
         return;
     };
-    let (imports, symbols) = (u64::from(imports), u64::from(symbols));
+    let size = match format {
+        // DYLD_CHAINED_IMPORT, DYLD_CHAINED_IMPORT_ADDEND,
+        // DYLD_CHAINED_IMPORT_ADDEND64.
+        1 => 4,
+        2 => 8,
+        3 => 16,
+        _ => return,
+    };
     // The low byte (or, in the 64-bit format, half-word) is a signed ordinal.
     let small = |v: u32| i64::from(i8::from_ne_bytes([v.to_le_bytes()[0]]));
-    for i in 0..u64::from(count).min(MOST) {
-        let entry = match format {
-            // DYLD_CHAINED_IMPORT: ordinal 8 bits, weak 1, name offset 23.
-            1 => r
-                .u32(imports + 4 * i)
-                .map(|v| (small(v), u64::from(v >> 9))),
-            // DYLD_CHAINED_IMPORT_ADDEND: the same, and a 32-bit addend.
-            2 => r
-                .u32(imports + 8 * i)
-                .map(|v| (small(v), u64::from(v >> 9))),
-            // DYLD_CHAINED_IMPORT_ADDEND64: ordinal 16 bits, weak 1,
-            // reserved 15, name offset 32; then a 64-bit addend.
-            3 => r.u64(imports + 16 * i).map(|v| {
+    for at in read::table(u64::from(imports), size, u64::from(count)) {
+        let entry = if format == 3 {
+            // Ordinal 16 bits, weak 1, reserved 15, name offset 32; then a
+            // 64-bit addend.
+            r.u64(at).map(|v| {
                 let [low, high, ..] = v.to_le_bytes();
                 (i64::from(i16::from_le_bytes([low, high])), v >> 32)
-            }),
-            _ => None,
+            })
+        } else {
+            // Ordinal 8 bits, weak 1, name offset 23; then, in the second
+            // format, a 32-bit addend.
+            r.u32(at).map(|v| (small(v), u64::from(v >> 9)))
         };
         let Some((ordinal, name)) = entry else {
             break;
         };
-        let at = usize::try_from(symbols.saturating_add(name)).unwrap_or(usize::MAX);
-        record(cstr(data, at), ordinal);
+        record(r.cstr(u64::from(symbols).saturating_add(name)), ordinal);
     }
-}
-
-/// The unsigned LEB128 number at `*at`, advancing past it.
-fn uleb(data: &[u8], at: &mut usize) -> Option<u64> {
-    let mut value = 0_u64;
-    for shift in (0..64).step_by(7) {
-        let byte = *data.get(*at)?;
-        *at += 1;
-        value |= u64::from(byte & 0x7f) << shift;
-        if byte & 0x80 == 0 {
-            return Some(value);
-        }
-    }
-    None
 }
 
 /// One slice of a universal binary: its CPU type and file range.
@@ -639,28 +654,26 @@ pub(super) struct Slice {
 }
 
 /// The slices a universal header (`0xcafebabe`, or `0xcafebabf` with
-/// 64-bit offsets) lists. A Java class file shares the magic number, and
-/// its "slice count" is its major version, 45 or more: no universal binary
-/// has that many slices.
-pub(super) fn fat(bytes: &[u8]) -> Result<Vec<Slice>, String> {
+/// 64-bit offsets) lists.
+pub(super) fn fat(bytes: &[u8]) -> Result<Vec<Slice>, Error> {
     let r = Reader::new(bytes, true);
     let wide = match r.u32(0) {
         Some(0xcafe_babe) => false,
         Some(0xcafe_babf) => true,
-        _ => return Err("no universal header".into()),
+        _ => return Err(Error::BadMagic),
     };
-    let count = r.u32(4).ok_or("universal header truncated")?;
-    if count >= 45 {
-        return Err("a Java class file".into());
+    let count = r.u32(4).ok_or(Error::Truncated("universal header"))?;
+    if count >= JAVA_MAJOR_VERSIONS {
+        return Err(Error::NotExecutable("a Java class file"));
     }
-    let size = if wide { 32 } else { 20 };
-    Ok((0..u64::from(count))
-        .map_while(|i| {
-            let at = 8 + i * size;
+    let (entry, size_at) = if wide { (32, 16) } else { (20, 12) };
+    Ok(read::table(8, entry, u64::from(count))
+        .map_while(|at| {
+            let slice = r.at(at);
             Some(Slice {
-                cputype: r.u32(at)?,
-                offset: r.word(at + 8, wide)?,
-                size: r.word(at + if wide { 16 } else { 12 }, wide)?,
+                cputype: slice.u32(0)?,
+                offset: slice.word(8, wide)?,
+                size: slice.word(size_at, wide)?,
             })
         })
         .collect())
@@ -738,6 +751,39 @@ mod tests {
         assert_eq!(macho.sections.len(), 1);
     }
 
+    /// Commands past the size the header gives them are not read, and a
+    /// segment's sections are those that fit in its command.
+    #[test]
+    fn commands_and_sections_stay_inside_their_sizes() {
+        let mut commands = text(1);
+        // Claims four sections in a command with room for one.
+        commands[64..68].copy_from_slice(&4_u32.to_le_bytes());
+        commands.extend(text(1));
+        commands.extend(text(1));
+        let mut bytes = header(3, &commands);
+        bytes[20..24].copy_from_slice(&(2 * (72_u32 + 80)).to_le_bytes());
+        let macho = parse(&bytes).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!((macho.segments.len(), macho.sections.len()), (2, 2));
+    }
+
+    /// 65,536 segment commands of 8 bytes, one after another, each reading
+    /// the next ones as its sections: none of them has room for any.
+    #[test]
+    fn overlapping_segment_commands_claim_no_sections() {
+        let commands: Vec<u8> = [LC_SEGMENT_64, 8]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .cycle()
+            .take(8 << 16 | 4096)
+            .collect();
+        let bytes = header(u32::MAX, &commands);
+        let start = std::time::Instant::now();
+        let macho = parse(&bytes).unwrap_or_else(|e| panic!("{e}"));
+        assert!(macho.sections.is_empty());
+        assert_eq!(macho.segments.len() as u64, limits::LOAD_COMMANDS);
+        assert!(start.elapsed().as_secs() < 5);
+    }
+
     /// Tables past the end of the file, and absurd counts, cost those
     /// tables only.
     #[test]
@@ -793,7 +839,7 @@ mod tests {
             && s.size == 0x2000));
         // A class file: magic, minor version 0, major version 52.
         let class = [0xca, 0xfe, 0xba, 0xbe, 0, 0, 0, 52];
-        assert_eq!(fat(&class).err().as_deref(), Some("a Java class file"));
+        assert!(matches!(fat(&class), Err(Error::NotExecutable(_))));
         // Slices past the end are left out.
         assert!(fat(&bytes[..16]).is_ok_and(|s| s.is_empty()));
     }
@@ -898,6 +944,6 @@ mod tests {
         }
         let found = exports_trie(&trie);
         assert!(found.len() > 1000);
-        assert!(found.iter().all(|(name, _)| name.len() <= 1 << 12));
+        assert!(found.iter().all(|(name, _)| name.len() <= limits::NAME_LEN));
     }
 }

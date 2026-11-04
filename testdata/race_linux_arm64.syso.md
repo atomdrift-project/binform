@@ -9,4 +9,4 @@ The Go race detector's runtime (LLVM TSan, C++) as an A64 ELF object: 751 functi
 - License: BSD-3-Clause (the Go license)
 
 `race_linux_arm64.syso.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`race_linux_arm64.syso.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`race_linux_arm64.syso.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

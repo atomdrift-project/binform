@@ -6,7 +6,7 @@ mod fixtures;
 mod synthetic;
 
 use crate::functions::Detail;
-use crate::{Binary, Found, Limits, Ref};
+use crate::{Binary, Dest, Found, Limits, Ref};
 
 /// A function with its diagnostics.
 #[derive(Clone, Debug)]
@@ -36,10 +36,11 @@ impl Recovery {
         self.functions.iter().find(|f| f.entry == addr)
     }
 
-    pub(crate) fn target_name<'a>(&'a self, bin: &'a Binary<'_>, to: u64) -> Option<&'a str> {
-        self.function(to)
-            .and_then(|f| f.name.as_deref())
-            .or_else(|| bin.import(to))
+    pub(crate) fn target_name<'a>(&'a self, bin: &'a Binary<'_>, to: Dest) -> Option<&'a str> {
+        match to {
+            Dest::Code(addr) => self.function(addr)?.name.as_deref(),
+            Dest::Slot { addr, .. } => Some(bin.import(addr)?.1.name.as_str()),
+        }
     }
 }
 

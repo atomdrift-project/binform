@@ -682,10 +682,10 @@ only rizin 0x111ec fcn.000111ec: inside 0x110c8
 only rizin 0x11275 fcn.00011275: inside 0x110c8
 only rizin 0x11277 fcn.00011277: inside 0x110c8
 only rizin 0x1128c fcn.0001128c: inside 0x110c8
-only rizin 0x11308 fcn.00011308: missed
-only rizin 0x11333 fcn.00011333: missed
-only rizin 0x11336 fcn.00011336: missed
-only rizin 0x11337 fcn.00011337: missed
+only rizin 0x11308 fcn.00011308: inside 0x11080
+only rizin 0x11333 fcn.00011333: inside 0x11080
+only rizin 0x11336 fcn.00011336: inside 0x11080
+only rizin 0x11337 fcn.00011337: inside 0x11080
 only rizin 0x11425 fcn.00011425: inside 0x1134c
 only rizin 0x1142d fcn.0001142d: inside 0x1134c
 only rizin 0x11435 fcn.00011435: inside 0x1134c

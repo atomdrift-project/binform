@@ -9,4 +9,4 @@ Solaris 10 on 32-bit SPARC (V8+): SQLite 3.32.3 built by OpenCSW with Sun Studio
 - License: SQLite is public domain
 
 `libsqlite3-solaris-sparc.so.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`libsqlite3-solaris-sparc.so.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`libsqlite3-solaris-sparc.so.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

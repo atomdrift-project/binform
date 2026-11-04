@@ -10,4 +10,4 @@ Functions open with `stwu r1, -n(r1)` before `mflr r0` (rizin starts them at the
 - **Malware:** this file is hostile. It is kept compressed and only ever parsed; never run it.
 
 `bot-ppc-static.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`bot-ppc-static.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`bot-ppc-static.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

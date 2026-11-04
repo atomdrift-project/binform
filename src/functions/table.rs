@@ -89,15 +89,15 @@ impl Tracker {
 
     fn mask(&self) -> u64 {
         match self.width {
-            1..=7 => (1 << (8 * u32::from(self.width))) - 1,
+            1..=7 => (1_u64 << (8 * u32::from(self.width))).wrapping_sub(1),
             _ => u64::MAX,
         }
     }
 
-    /// Forget what a call may have changed. A fixed address stays: a
-    /// compiler keeps one across a call only in a register the callee saves,
-    /// and rewrites any other before reading it.
-    /// The registers in `kept`, a mask, the callee leaves as they were.
+    /// Forget what a call may have changed, but for the registers in
+    /// `kept`, a mask of those the callee leaves as they were. A fixed
+    /// address stays: a compiler keeps one across a call only in a register
+    /// the callee saves, and rewrites any other before reading it.
     pub(crate) fn call(&mut self, kept: u32) {
         self.pushed = None;
         self.values.retain(|&(reg, value)| {
@@ -151,7 +151,7 @@ impl Tracker {
                 }
                 (reg, Some(case))
             }
-            Note::Address { reg, addr } | Note::Pc { reg, addr } => {
+            Note::Address { reg, addr } | Note::Value { reg, value: addr } => {
                 (reg, Some(Value::Address(addr)))
             }
             // Unresolved: the walk replaces those it can read.
@@ -367,7 +367,7 @@ impl Table {
 
     /// The case targets in case-value order, up to `most` and up to the
     /// first that is not code: past it the table has ended, or was never
-    /// one. Like rizin, a target counts once per case value that selects it.
+    /// one. A target counts once per case value that selects it.
     pub(crate) fn targets(&self, memory: &Memory<'_>, most: usize) -> Vec<u64> {
         let most = u64::try_from(most).unwrap_or(u64::MAX);
         let (n, map) = match self.cases {
@@ -404,8 +404,8 @@ impl Table {
 }
 
 /// `value`, read as a signed `size`-byte integer, widened to 64 bits.
-fn sign_extend(value: u64, size: u8) -> u64 {
-    let shift = 64 - 8 * u32::from(size.clamp(1, 8));
+pub(super) fn sign_extend(value: u64, size: u8) -> u64 {
+    let shift = 64_u32.wrapping_sub(8 * u32::from(size.clamp(1, 8)));
     ((value << shift).cast_signed() >> shift).cast_unsigned()
 }
 

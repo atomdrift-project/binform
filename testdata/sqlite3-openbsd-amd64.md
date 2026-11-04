@@ -9,4 +9,4 @@ OpenBSD 7.8 on x86-64: the `sqlite3` shell, a PIE whose PLT is split for indirec
 - License: SQLite is public domain
 
 `sqlite3-openbsd-amd64.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`sqlite3-openbsd-amd64.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`sqlite3-openbsd-amd64.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

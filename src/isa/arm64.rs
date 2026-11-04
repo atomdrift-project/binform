@@ -3,43 +3,42 @@
 //! addresses, loads and adds that build a target. Every other instruction
 //! falls through, forgetting the registers it may write.
 
-use crate::isa::{Extend, Flow, Insn, Mem, Note};
+use crate::isa::{Extend, Flow, Insn, Mem, Note, Regs, relative, sext, u32_at};
 
 /// What the instructions since the last reset left in each general register.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct State {
     /// A known address held in the register.
-    value: [Option<u64>; 32],
+    value: Regs<u64, 32>,
     /// The register was loaded from this fixed address.
-    loaded: [Option<u64>; 32],
+    loaded: Regs<u64, 32>,
 }
 
+/// The registers a call may change: `x0`-`x18` and the link register.
+const VOLATILE: u64 = 0x4007_ffff;
+
 pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
-    let word = bytes
-        .get(..4)
-        .and_then(|word| word.try_into().ok())
-        .map(u32::from_le_bytes);
-    let Some(word) = word else {
-        return Insn {
-            len: 4,
-            flow: Flow::Invalid,
-            note: Note::None,
-            pad: false,
-            falls: false,
-        };
+    let Some(word) = u32_at(bytes, 0, false) else {
+        return Insn::new(4, Flow::Invalid);
     };
     let flow = flow(state, word, addr);
+    let note = if flow == Flow::Next {
+        let tracked = track(state, word, addr);
+        let note = note(state, word);
+        // What any other instruction writes is no longer known.
+        if !tracked {
+            state.value.forget(note.writes());
+            state.loaded.forget(note.writes());
+        }
+        note
+    } else {
+        Note::None
+    };
     Insn {
-        len: 4,
-        flow,
-        note: if flow == Flow::Next {
-            note(state, word)
-        } else {
-            Note::None
-        },
+        note,
         // NOP, BTI, PACIASP and the rest of the hint space.
         pad: word & 0xffff_f01f == 0xd503_201f,
-        falls: false,
+        ..Insn::new(4, flow)
     }
 }
 
@@ -66,12 +65,11 @@ pub(crate) fn starts_frame(bytes: &[u8]) -> bool {
     false
 }
 
-fn flow(state: &mut State, word: u32, addr: u64) -> Flow {
-    let rd = (word & 0x1f) as usize;
-    let rn = ((word >> 5) & 0x1f) as usize;
+fn flow(state: &State, word: u32, addr: u64) -> Flow {
+    let rn = (word >> 5) & 0x1f;
     if word & 0x7c00_0000 == 0x1400_0000 {
         // B, BL
-        let target = relative(addr, word & 0x03ff_ffff, 26);
+        let target = relative(addr, word & 0x03ff_ffff, 26, 4);
         return if word & 0x8000_0000 == 0 {
             Flow::Jump(target)
         } else {
@@ -80,16 +78,16 @@ fn flow(state: &mut State, word: u32, addr: u64) -> Flow {
     }
     if word & 0xff00_0010 == 0x5400_0000 || word & 0x7e00_0000 == 0x3400_0000 {
         // B.cond, CBZ, CBNZ
-        return Flow::Branch(relative(addr, (word >> 5) & 0x7_ffff, 19));
+        return Flow::Branch(relative(addr, (word >> 5) & 0x7_ffff, 19, 4));
     }
     if word & 0x7e00_0000 == 0x3600_0000 {
         // TBZ, TBNZ
-        return Flow::Branch(relative(addr, (word >> 5) & 0x3fff, 14));
+        return Flow::Branch(relative(addr, (word >> 5) & 0x3fff, 14, 4));
     }
     if word & 0xfe00_0000 == 0xd600_0000 {
         // Branch to register: BR, BLR, RET, ERET, DRPS, and their
         // pointer-authenticating forms.
-        let slot = state.loaded.get(rn).copied().flatten();
+        let slot = state.loaded.get(rn);
         return match (word >> 21) & 0xf {
             0 | 8 => slot.map_or(Flow::JumpRegister((word >> 5) & 0x1f), Flow::JumpSlot),
             1 | 9 => slot.map_or(Flow::CallIndirect, Flow::CallSlot),
@@ -105,28 +103,39 @@ fn flow(state: &mut State, word: u32, addr: u64) -> Flow {
         // UDF: permanently undefined, what zeros decode as.
         return Flow::Invalid;
     }
+    Flow::Next
+}
+
+/// Record the address or slot `word` at `addr` leaves in its register:
+/// ADR, ADRP, and the ADD and LDR stubs build a slot's address with.
+/// Whether it was one of those.
+fn track(state: &mut State, word: u32, addr: u64) -> bool {
+    let rd = word & 0x1f;
+    let rn = (word >> 5) & 0x1f;
     if word & 0x1f00_0000 == 0x1000_0000 {
         // ADR, ADRP
         let imm = (((word >> 5) & 0x7_ffff) << 2) | ((word >> 29) & 0x3);
         let value = if word & 0x8000_0000 == 0 {
-            addr.wrapping_add(sign_extend(imm, 21) as u64)
+            addr.wrapping_add_signed(sext(imm, 21))
         } else {
-            (addr & !0xfff).wrapping_add((sign_extend(imm, 21) << 12) as u64)
+            (addr & !0xfff).wrapping_add_signed(sext(imm, 21) << 12)
         };
         set(state, rd, Some(value), None);
     } else if word & 0xff80_0000 == 0x9100_0000 {
         // ADD (immediate, 64-bit)
         let shift = if word & 0x0040_0000 == 0 { 0 } else { 12 };
         let imm = u64::from((word >> 10) & 0xfff) << shift;
-        let value = state.value.get(rn).copied().flatten();
+        let value = state.value.get(rn);
         set(state, rd, value.map(|value| value.wrapping_add(imm)), None);
     } else if word & 0xffc0_0000 == 0xf940_0000 {
         // LDR (immediate, unsigned offset, 64-bit)
-        let offset = u64::from((word >> 10) & 0xfff) * 8;
-        let base = state.value.get(rn).copied().flatten();
+        let offset = u64::from((word >> 10) & 0xfff) << 3;
+        let base = state.value.get(rn);
         set(state, rd, None, base.map(|base| base.wrapping_add(offset)));
+    } else {
+        return false;
     }
-    Flow::Next
+    true
 }
 
 /// What the instruction tells a jump-table read, once [`flow`] has updated
@@ -136,7 +145,7 @@ fn note(state: &State, word: u32) -> Note {
     let (rd, rn, rm) = (reg(0), reg(5), reg(16));
     if word & 0x1f00_0000 == 0x1000_0000 {
         // ADR, ADRP
-        return match state.value.get(rd as usize).copied().flatten() {
+        return match state.value.get(rd) {
             Some(addr) => Note::Address { reg: rd, addr },
             None => Note::Write(rd),
         };
@@ -293,23 +302,38 @@ fn load_store_writes(word: u32) -> u32 {
     }
 }
 
-fn set(state: &mut State, register: usize, value: Option<u64>, loaded: Option<u64>) {
-    if let Some(slot) = state.value.get_mut(register) {
-        *slot = value;
-    }
-    if let Some(slot) = state.loaded.get_mut(register) {
-        *slot = loaded;
-    }
+fn set(state: &mut State, reg: u32, value: Option<u64>, loaded: Option<u64>) {
+    state.value.set(reg, value);
+    state.loaded.set(reg, loaded);
 }
 
-/// `addr` plus a signed, `bits`-wide offset counted in instructions.
-fn relative(addr: u64, imm: u32, bits: u32) -> u64 {
-    addr.wrapping_add((sign_extend(imm, bits) << 2) as u64)
+/// The A64 decoder.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Decoder {
+    state: State,
 }
 
-fn sign_extend(value: u32, bits: u32) -> i64 {
-    let shift = 64 - bits;
-    (i64::from(value) << shift) >> shift
+impl crate::isa::Decode for Decoder {
+    fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
+        decode(&mut self.state, bytes, addr)
+    }
+
+    fn reset(&mut self) {
+        self.state = State::default();
+    }
+
+    fn call(&mut self) {
+        self.state.value.forget(VOLATILE);
+        self.state.loaded.forget(VOLATILE);
+    }
+
+    fn starts_frame(&self, bytes: &[u8]) -> bool {
+        starts_frame(bytes)
+    }
+
+    fn argument(&self, n: usize) -> Option<u32> {
+        u32::try_from(n).ok().filter(|&n| n < 8)
+    }
 }
 
 #[cfg(test)]
@@ -367,6 +391,29 @@ mod tests {
             .collect();
         // adrp x16, #0x1000 at 0x10000 is page 0x11000; the slot is 8 bytes in.
         assert_eq!(flows, [Flow::Next, Flow::Next, Flow::JumpSlot(0x1_1008)]);
+    }
+
+    /// A call forgets the slot a caller-saved register was loaded from,
+    /// and keeps a callee-saved one's: `adrp x16, page; ldr x16, [x16,
+    /// #8]`, the same into x19, `bl`, then `br` each.
+    #[test]
+    fn calls_forget_caller_saved_registers() {
+        use crate::isa::Decode as _;
+        let mut decoder = Decoder::default();
+        let words = [
+            0xb000_0010_u32,
+            0xf940_0610,
+            0xb000_0013,
+            0xf940_0673,
+            0x9400_0010,
+        ];
+        for (i, word) in (0_u64..).zip(words) {
+            decoder.decode(&word.to_le_bytes(), 0x1_0000 + 4 * i);
+        }
+        decoder.call();
+        let after = |word: u32| decoder.clone().decode(&word.to_le_bytes(), 0x1_0014).flow;
+        assert_eq!(after(0xd61f_0200), Flow::JumpRegister(16)); // br x16
+        assert_eq!(after(0xd61f_0260), Flow::JumpSlot(0x1_1008)); // br x19
     }
 
     fn notes(words: &[u32], addr: u64) -> Vec<Note> {

@@ -9,4 +9,4 @@ C++ (LevelDB in a Node addon), x86-64 glibc: landing pads from `.gcc_except_tabl
 - License: MIT (classic-level); it links LevelDB and Snappy, both BSD-3-Clause
 
 `classic-level-linux-x64.node.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`classic-level-linux-x64.node.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`classic-level-linux-x64.node.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

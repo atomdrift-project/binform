@@ -4,7 +4,7 @@ only rizin 0x3742 fcn.00003742: not code
 only rizin 0x34b1c fcn.00034b1c: missed
 only rizin 0xe9bb0 fcn.000e9bb0: missed
 only rizin 0x11443c fcn.0011443c: missed
-only rizin 0x117ff0 fcn.00117ff0: missed
+only rizin 0x117ff0 fcn.00117ff0: inside 0x116a98
 only rizin 0x11edf0 fcn.0011edf0: missed
 only rizin 0x1454b8 fcn.001454b8: not code
 only rizin 0x14aca8 fcn.0014aca8: not code

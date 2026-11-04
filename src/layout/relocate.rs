@@ -3,22 +3,146 @@
 //!
 //! An object's branches and pointers hold placeholders until the linker
 //! applies relocations, and an ELF object's sections all claim address
-//! zero. Each ELF section is placed at a fixed base plus its file offset
-//! (rizin's layout, so addresses agree); a Mach-O object's sections already
-//! have addresses. Relocations are applied to copies of the sections, and
-//! each undefined symbol gets an import slot past the last section, so a
-//! call to it reads as a call through an import.
+//! zero. An ELF object's sections are placed at [`BASE`] plus their file
+//! offsets, those with no file bytes after the rest; a Mach-O object's
+//! sections already have addresses. Relocations are applied to copies of
+//! the sections they patch, and each undefined symbol gets an import slot
+//! past the last section, so a call to it reads as a call through an
+//! import.
 
 use std::borrow::Cow;
 use std::collections::HashMap;
 
 use super::elf::{self, Elf};
-use super::macho;
+use super::read::{self, Reader};
+use super::{file_range, limits, macho};
 
 use crate::{Arch, Segment, Slot};
 
-/// Where the sections are placed.
+/// Where an ELF object's sections are placed.
 const BASE: u64 = 0x800_0000;
+
+// x86-64.
+const R_X86_64_64: u32 = 1;
+const R_X86_64_PC32: u32 = 2;
+const R_X86_64_PLT32: u32 = 4;
+const R_X86_64_GOTPCREL: u32 = 9;
+const R_X86_64_32: u32 = 10;
+const R_X86_64_32S: u32 = 11;
+const R_X86_64_PC64: u32 = 24;
+const R_X86_64_GOTPCRELX: u32 = 41;
+const R_X86_64_REX_GOTPCRELX: u32 = 42;
+
+// 32-bit x86.
+const R_386_32: u32 = 1;
+const R_386_PC32: u32 = 2;
+const R_386_PLT32: u32 = 4;
+
+// A64.
+const R_AARCH64_ABS64: u32 = 257;
+const R_AARCH64_ABS32: u32 = 258;
+const R_AARCH64_PREL64: u32 = 260;
+const R_AARCH64_PREL32: u32 = 261;
+const R_AARCH64_ADR_PREL_PG_HI21: u32 = 275;
+const R_AARCH64_ADD_ABS_LO12_NC: u32 = 277;
+const R_AARCH64_LDST8_ABS_LO12_NC: u32 = 278;
+const R_AARCH64_JUMP26: u32 = 282;
+const R_AARCH64_CALL26: u32 = 283;
+const R_AARCH64_LDST16_ABS_LO12_NC: u32 = 284;
+const R_AARCH64_LDST32_ABS_LO12_NC: u32 = 285;
+const R_AARCH64_LDST64_ABS_LO12_NC: u32 = 286;
+const R_AARCH64_LDST128_ABS_LO12_NC: u32 = 299;
+const R_AARCH64_ADR_GOT_PAGE: u32 = 311;
+const R_AARCH64_LD64_GOT_LO12_NC: u32 = 312;
+
+// 32-bit Arm.
+const R_ARM_PC24: u32 = 1;
+const R_ARM_ABS32: u32 = 2;
+const R_ARM_REL32: u32 = 3;
+const R_ARM_THM_CALL: u32 = 10;
+const R_ARM_CALL: u32 = 28;
+const R_ARM_JUMP24: u32 = 29;
+const R_ARM_THM_JUMP24: u32 = 30;
+
+// MIPS.
+const R_MIPS_32: u32 = 2;
+const R_MIPS_26: u32 = 4;
+const R_MIPS_64: u32 = 18;
+const R_MIPS_JALR: u32 = 37;
+
+// s390x.
+const R_390_32: u32 = 4;
+const R_390_PC32: u32 = 5;
+const R_390_PC16DBL: u32 = 16;
+const R_390_PLT16DBL: u32 = 17;
+const R_390_PC32DBL: u32 = 19;
+const R_390_PLT32DBL: u32 = 20;
+const R_390_64: u32 = 22;
+
+// SPARC.
+const R_SPARC_32: u32 = 3;
+const R_SPARC_DISP32: u32 = 6;
+const R_SPARC_WDISP30: u32 = 7;
+const R_SPARC_WDISP22: u32 = 8;
+const R_SPARC_WPLT30: u32 = 18;
+const R_SPARC_UA32: u32 = 23;
+const R_SPARC_64: u32 = 32;
+const R_SPARC_UA64: u32 = 54;
+
+// RISC-V.
+const R_RISCV_32: u32 = 1;
+const R_RISCV_64: u32 = 2;
+const R_RISCV_BRANCH: u32 = 16;
+const R_RISCV_JAL: u32 = 17;
+const R_RISCV_CALL: u32 = 18;
+const R_RISCV_CALL_PLT: u32 = 19;
+const R_RISCV_GOT_HI20: u32 = 20;
+const R_RISCV_PCREL_HI20: u32 = 23;
+const R_RISCV_PCREL_LO12_I: u32 = 24;
+const R_RISCV_PCREL_LO12_S: u32 = 25;
+const R_RISCV_HI20: u32 = 26;
+const R_RISCV_LO12_I: u32 = 27;
+const R_RISCV_LO12_S: u32 = 28;
+const R_RISCV_ADD32: u32 = 35;
+const R_RISCV_ADD64: u32 = 36;
+const R_RISCV_SUB32: u32 = 39;
+const R_RISCV_SUB64: u32 = 40;
+const R_RISCV_RVC_BRANCH: u32 = 44;
+const R_RISCV_RVC_JUMP: u32 = 45;
+const R_RISCV_32_PCREL: u32 = 57;
+
+// LoongArch.
+const R_LARCH_32: u32 = 1;
+const R_LARCH_64: u32 = 2;
+const R_LARCH_ADD32: u32 = 50;
+const R_LARCH_ADD64: u32 = 51;
+const R_LARCH_SUB32: u32 = 55;
+const R_LARCH_SUB64: u32 = 56;
+const R_LARCH_B16: u32 = 64;
+const R_LARCH_B21: u32 = 65;
+const R_LARCH_B26: u32 = 66;
+const R_LARCH_ABS_HI20: u32 = 67;
+const R_LARCH_ABS_LO12: u32 = 68;
+const R_LARCH_ABS64_LO20: u32 = 69;
+const R_LARCH_ABS64_HI12: u32 = 70;
+const R_LARCH_PCALA_HI20: u32 = 71;
+const R_LARCH_PCALA_LO12: u32 = 72;
+const R_LARCH_GOT_PC_HI20: u32 = 75;
+const R_LARCH_GOT_PC_LO12: u32 = 76;
+const R_LARCH_32_PCREL: u32 = 99;
+const R_LARCH_PCREL20_S2: u32 = 103;
+const R_LARCH_64_PCREL: u32 = 109;
+const R_LARCH_CALL36: u32 = 110;
+
+// Mach-O.
+/// `ARM64_RELOC_ADDEND`: the addend of the relocation after it.
+const ARM64_RELOC_ADDEND: u32 = 10;
+/// `ARM64_RELOC_BRANCH26` and `X86_64_RELOC_BRANCH`.
+const RELOC_BRANCH: u32 = 2;
+/// A Mach-O relocation entry's `r_address` high bit: scattered, which is
+/// 32-bit only.
+const R_SCATTERED: u32 = 0x8000_0000;
+const R_EXTERN: u32 = 0x0800_0000;
 
 /// An object's sections at their placed addresses, linked.
 pub(super) struct Layout<'a> {
@@ -27,6 +151,48 @@ pub(super) struct Layout<'a> {
     pub(super) addrs: Vec<u64>,
     pub(super) segments: Vec<Segment<'a>>,
     pub(super) imports: Vec<Slot>,
+}
+
+/// Import slots for an object's undefined symbols: one per symbol, 8 bytes
+/// apart, from the first 16-byte boundary past the sections.
+struct ImportSlots {
+    first: u64,
+    by_symbol: HashMap<usize, u64>,
+    imports: Vec<Slot>,
+}
+
+impl ImportSlots {
+    fn new(end: u64) -> Self {
+        Self {
+            first: end.div_ceil(16).saturating_mul(16),
+            by_symbol: HashMap::new(),
+            imports: Vec::new(),
+        }
+    }
+
+    /// The slot of symbol `index`, called `name`.
+    fn slot(&mut self, index: usize, name: &str) -> u64 {
+        let next = (self.by_symbol.len() as u64)
+            .saturating_mul(8)
+            .saturating_add(self.first);
+        *self.by_symbol.entry(index).or_insert_with(|| {
+            self.imports.push(Slot {
+                slot: next,
+                name: name.to_owned(),
+                import: None,
+            });
+            next
+        })
+    }
+}
+
+/// A section's bytes, copied the first time a relocation patches them,
+/// while the copies stay within [`limits::LINKED_BYTES`].
+fn writable<'s>(bytes: &'s mut Cow<'_, [u8]>, budget: &mut usize) -> Option<&'s mut [u8]> {
+    if let Cow::Borrowed(borrowed) = bytes {
+        *budget = budget.checked_sub(borrowed.len())?;
+    }
+    Some(bytes.to_mut())
 }
 
 pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf, arch: Arch) -> Layout<'a> {
@@ -47,36 +213,20 @@ pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf, arch: Arch) -> Layout<'a> {
             *addr = BASE.saturating_add(sh.offset);
         }
     }
-    let mut data: Vec<Option<Vec<u8>>> = headers
+    let mut data: Vec<Option<Cow<'a, [u8]>>> = headers
         .iter()
         .map(|sh| {
             (alloc(sh) && sh.kind != elf::SHT_NOBITS)
-                .then(|| super::file_range(bytes, sh.offset, sh.size).to_vec())
+                .then(|| Cow::Borrowed(file_range(bytes, sh.offset, sh.size)))
         })
         .collect();
 
-    // Undefined symbols resolve to import slots after the last section.
-    let mut slots: HashMap<usize, u64> = HashMap::new();
-    let mut imports = Vec::new();
-    let first_slot = end.div_ceil(16).saturating_mul(16);
+    let mut slots = ImportSlots::new(end);
     let mut symbol = |index: usize| -> Option<(u64, bool)> {
         let symbol = elf.symbols.get(index)?;
         match symbol.shndx {
-            elf::SHN_UNDEF => {
-                let name = &symbol.name;
-                if name.is_empty() {
-                    return None;
-                }
-                let next = first_slot.saturating_add(8 * slots.len() as u64);
-                let slot = *slots.entry(index).or_insert_with(|| {
-                    imports.push(Slot {
-                        slot: next,
-                        name: name.clone(),
-                    });
-                    next
-                });
-                Some((slot, true))
-            }
+            elf::SHN_UNDEF if symbol.name.is_empty() => None,
+            elf::SHN_UNDEF => Some((slots.slot(index, &symbol.name), true)),
             elf::SHN_ABS => Some((symbol.value, false)),
             section => {
                 let base = *addrs.get(usize::from(section)).filter(|&&addr| addr != 0)?;
@@ -88,6 +238,7 @@ pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf, arch: Arch) -> Layout<'a> {
     // RISC-V's PC-relative low parts name the `auipc` their high part
     // fixed: its place, and the `S + A - P` it used.
     let mut high = HashMap::new();
+    let mut budget = limits::LINKED_BYTES;
     for &(target, ref relocs) in &elf.relocations {
         let Some(place_base) = addrs.get(target).copied() else {
             continue;
@@ -95,22 +246,24 @@ pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf, arch: Arch) -> Layout<'a> {
         let Some(Some(section)) = data.get_mut(target) else {
             continue;
         };
-        for reloc in relocs.iter() {
+        if relocs.is_empty() {
+            continue;
+        }
+        let Some(section) = writable(section, &mut budget) else {
+            continue;
+        };
+        for reloc in relocs {
             let Some((value, undefined)) = (match reloc.symbol {
                 0 => Some((0, false)),
                 index => symbol(index),
             }) else {
                 continue;
             };
-            let Ok(offset) = usize::try_from(reloc.offset) else {
-                continue;
-            };
-            let place = place_base.wrapping_add(reloc.offset);
-            let addend = reloc.addend;
+            let offset = reloc.offset;
             let fix = Fix {
                 value,
-                addend,
-                place,
+                addend: reloc.addend,
+                place: place_base.wrapping_add(offset),
                 undefined,
             };
             match arch {
@@ -133,11 +286,11 @@ pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf, arch: Arch) -> Layout<'a> {
     let segments = headers
         .iter()
         .zip(&addrs)
-        .zip(data.iter_mut())
+        .zip(data)
         .filter_map(|((sh, &addr), data)| {
             Some(Segment {
                 addr,
-                bytes: Cow::Owned(data.take()?),
+                bytes: data?,
                 executable: sh.flags & elf::SHF_EXECINSTR != 0,
             })
         })
@@ -145,7 +298,7 @@ pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf, arch: Arch) -> Layout<'a> {
     Layout {
         addrs,
         segments,
-        imports,
+        imports: slots.imports,
     }
 }
 
@@ -160,89 +313,66 @@ pub(super) fn macho(
     arch: Arch,
 ) -> (Vec<Option<Vec<u8>>>, Vec<Slot>) {
     use macho::{N_SECT, N_TYPE, N_UNDF};
-    /// `ARM64_RELOC_ADDEND`: the addend of the relocation after it.
-    const ADDEND: u32 = 10;
-    /// `ARM64_RELOC_BRANCH26`, `X86_64_RELOC_BRANCH`.
-    const BRANCH: u32 = 2;
     let end = sections
         .iter()
         .map(|section| section.addr.saturating_add(section.size))
         .max()
         .unwrap_or(0);
-    let first_slot = end.div_ceil(16).saturating_mul(16);
-    let mut slots: HashMap<usize, u64> = HashMap::new();
-    let mut imports = Vec::new();
+    let mut slots = ImportSlots::new(end);
+    let mut budget = limits::LINKED_BYTES;
     let mut linked = Vec::with_capacity(sections.len());
     for section in sections {
-        let count = u64::from(section.nreloc).min(1 << 20);
-        let table = super::file_range(bytes, u64::from(section.reloff), count * 8);
-        if table.is_empty() || !section.code {
-            linked.push(None);
-            continue;
-        }
-        let mut data = super::file_range(bytes, section.offset, section.size).to_vec();
-        let mut addend = 0_i64;
-        for entry in table.chunks_exact(8) {
-            let word = |i: usize| {
-                entry
-                    .get(i..i + 4)
-                    .and_then(|b| b.try_into().ok())
-                    .map_or(0, u32::from_le_bytes)
-            };
-            let (address, info) = (word(0), word(4));
-            let symbol = info & 0x00ff_ffff;
-            let external = info & 0x0800_0000 != 0;
-            let kind = info >> 28;
-            // Scattered relocations (the high bit) are 32-bit only.
-            if address & 0x8000_0000 != 0 {
+        let count = u64::from(section.nreloc).min(limits::TABLE);
+        let table = file_range(bytes, u64::from(section.reloff), count.saturating_mul(8));
+        let mut data = Cow::Borrowed(file_range(bytes, section.offset, section.size));
+        let writable = (section.code && !table.is_empty())
+            .then(|| writable(&mut data, &mut budget))
+            .flatten();
+        let patched = match writable {
+            Some(data) => data,
+            None => {
+                linked.push(None);
                 continue;
             }
-            if arch == Arch::Arm64 && kind == ADDEND {
-                addend = i64::from(((symbol << 8).cast_signed()) >> 8);
+        };
+        let r = Reader::new(table, false);
+        let mut addend = 0_i64;
+        for at in read::table(0, 8, count) {
+            let (Some(address), Some(info)) = (r.u32(at), r.at(at).u32(4)) else {
+                break;
+            };
+            let symbol = info & 0x00ff_ffff;
+            let kind = info >> 28;
+            if address & R_SCATTERED != 0 {
+                continue;
+            }
+            if arch == Arch::Arm64 && kind == ARM64_RELOC_ADDEND {
+                addend = i64::from((symbol << 8).cast_signed() >> 8);
                 continue;
             }
             let addend = std::mem::take(&mut addend);
-            if !external || kind != BRANCH {
+            if info & R_EXTERN == 0 || kind != RELOC_BRANCH {
                 continue;
             }
-            let index = symbol as usize;
+            let Ok(index) = usize::try_from(symbol) else {
+                continue;
+            };
             let Some(nlist) = symbols.get(index) else {
                 continue;
             };
             let (value, undefined) = match nlist.n_type & N_TYPE {
                 N_SECT => (nlist.n_value, false),
-                N_UNDF if !nlist.name.is_empty() => {
-                    let next = first_slot.saturating_add(8 * slots.len() as u64);
-                    let slot = *slots.entry(index).or_insert_with(|| {
-                        imports.push(Slot {
-                            slot: next,
-                            name: nlist.name.clone(),
-                        });
-                        next
-                    });
-                    (slot, true)
-                }
+                N_UNDF if !nlist.name.is_empty() => (slots.slot(index, &nlist.name), true),
                 _ => continue,
             };
-            let offset = address as usize;
-            let place = section.addr.wrapping_add(u64::from(address));
+            let offset = u64::from(address);
+            let place = section.addr.wrapping_add(offset);
             match arch {
-                Arch::Arm64 => aarch64(
-                    &mut data,
-                    offset,
-                    283,
-                    Fix {
-                        value,
-                        addend: Some(addend),
-                        place,
-                        undefined,
-                    },
-                ),
+                Arch::Arm64 => branch26(patched, offset, value.wrapping_add_signed(addend), place),
                 // The in-place addend counts from the end of the field.
-                Arch::X86_64 => x86_64(
-                    &mut data,
+                Arch::X86_64 => rel32(
+                    patched,
                     offset,
-                    2,
                     Fix {
                         value,
                         addend: None,
@@ -253,9 +383,9 @@ pub(super) fn macho(
                 _ => None,
             };
         }
-        linked.push(Some(data));
+        linked.push(Some(data.into_owned()));
     }
-    (linked, imports)
+    (linked, slots.imports)
 }
 
 /// One relocation's inputs: the symbol's value `S`, the addend `A` (`None`
@@ -271,38 +401,26 @@ struct Fix {
 
 impl Fix {
     /// `S + A`, with a REL addend read from `bytes` at `offset`.
-    fn target(self, bytes: &[u8], offset: usize) -> Option<u64> {
+    fn target(self, bytes: &[u8], offset: u64) -> Option<u64> {
         let addend = match self.addend {
             Some(addend) => addend,
-            None => i64::from(i32::from_le_bytes(
-                bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?,
-            )),
+            None => i64::from(Reader::new(bytes, false).u32(offset)?.cast_signed()),
         };
         Some(self.value.wrapping_add_signed(addend))
     }
 
     /// `S + A - P`.
-    fn relative(self, bytes: &[u8], offset: usize) -> Option<u64> {
+    fn relative(self, bytes: &[u8], offset: u64) -> Option<u64> {
         Some(self.target(bytes, offset)?.wrapping_sub(self.place))
     }
 }
 
-/// The `N`-byte field at `offset`.
-fn field<const N: usize>(bytes: &[u8], offset: usize) -> Option<[u8; N]> {
-    bytes.get(offset..offset.checked_add(N)?)?.try_into().ok()
-}
-
 /// The 32-bit word at `offset`, big-endian when `big`.
-fn word_at(bytes: &[u8], offset: usize, big: bool) -> Option<u32> {
-    let raw = field::<4>(bytes, offset)?;
-    Some(if big {
-        u32::from_be_bytes(raw)
-    } else {
-        u32::from_le_bytes(raw)
-    })
+fn word(bytes: &[u8], offset: u64, big: bool) -> Option<u32> {
+    Reader::new(bytes, big).u32(offset)
 }
 
-fn put_word(bytes: &mut [u8], offset: usize, word: u32, big: bool) -> Option<()> {
+fn put_word(bytes: &mut [u8], offset: u64, word: u32, big: bool) -> Option<()> {
     let raw = if big {
         word.to_be_bytes()
     } else {
@@ -313,14 +431,14 @@ fn put_word(bytes: &mut [u8], offset: usize, word: u32, big: bool) -> Option<()>
 
 /// `value`'s low `bits` bits, if it fits in them as a signed number.
 fn fits(value: i64, bits: u32) -> Option<u32> {
-    let half = 1_i64 << (bits - 1);
-    if !(-half..half).contains(&value) {
-        return None;
-    }
-    u32::try_from(value & ((half << 1) - 1)).ok()
+    let unused = 64_u32.checked_sub(bits)?;
+    let extended = value.checked_shl(unused)?.checked_shr(unused)?;
+    let low = value.cast_unsigned() & u64::MAX.checked_shr(unused)?;
+    (extended == value).then(|| u32::try_from(low).ok())?
 }
 
-fn put(bytes: &mut [u8], offset: usize, value: &[u8]) -> Option<()> {
+fn put(bytes: &mut [u8], offset: u64, value: &[u8]) -> Option<()> {
+    let offset = usize::try_from(offset).ok()?;
     bytes
         .get_mut(offset..offset.checked_add(value.len())?)?
         .copy_from_slice(value);
@@ -333,56 +451,62 @@ fn low32(value: u64) -> [u8; 4] {
     [a, b, c, d]
 }
 
-fn x86_64(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix) -> Option<()> {
-    let value = match kind {
-        1 => return put(bytes, offset, &fix.target(bytes, offset)?.to_le_bytes()),
-        24 => return put(bytes, offset, &fix.relative(bytes, offset)?.to_le_bytes()),
-        // PC32, PLT32; the GOT forms only for imports, whose slot stands in
-        // for the GOT entry.
-        2 | 4 => fix.relative(bytes, offset)?,
-        9 | 41 | 42 if fix.undefined => fix.relative(bytes, offset)?,
-        10 | 11 => fix.target(bytes, offset)?,
-        _ => return None,
-    };
-    put(bytes, offset, &low32(value))
+/// A little-endian 32-bit PC-relative field: `S + A - P`, truncated.
+fn rel32(bytes: &mut [u8], offset: u64, fix: Fix) -> Option<()> {
+    put(bytes, offset, &low32(fix.relative(bytes, offset)?))
 }
 
-fn i386(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix) -> Option<()> {
-    let value = match kind {
-        1 => fix.target(bytes, offset)?,
-        2 | 4 => fix.relative(bytes, offset)?,
-        _ => return None,
-    };
-    put(bytes, offset, &low32(value))
+/// An A64 `b` or `bl` at `offset`, at `place`: a word offset to `target`
+/// in 26 bits.
+fn branch26(bytes: &mut [u8], offset: u64, target: u64, place: u64) -> Option<()> {
+    let delta = target.wrapping_sub(place).cast_signed() >> 2;
+    let imm = fits(delta, 26)?;
+    let insn = word(bytes, offset, false)? & !0x03ff_ffff | imm;
+    put(bytes, offset, &insn.to_le_bytes())
 }
 
-fn aarch64(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix) -> Option<()> {
-    let word = |bytes: &[u8]| {
-        Some(u32::from_le_bytes(
-            bytes.get(offset..offset.checked_add(4)?)?.try_into().ok()?,
-        ))
-    };
+fn x86_64(bytes: &mut [u8], offset: u64, kind: u32, fix: Fix) -> Option<()> {
+    match kind {
+        R_X86_64_64 => put(bytes, offset, &fix.target(bytes, offset)?.to_le_bytes()),
+        R_X86_64_PC64 => put(bytes, offset, &fix.relative(bytes, offset)?.to_le_bytes()),
+        R_X86_64_PC32 | R_X86_64_PLT32 => rel32(bytes, offset, fix),
+        // The GOT forms only for imports, whose slot stands in for the GOT
+        // entry.
+        R_X86_64_GOTPCREL | R_X86_64_GOTPCRELX | R_X86_64_REX_GOTPCRELX if fix.undefined => {
+            rel32(bytes, offset, fix)
+        }
+        R_X86_64_32 | R_X86_64_32S => put(bytes, offset, &low32(fix.target(bytes, offset)?)),
+        _ => None,
+    }
+}
+
+fn i386(bytes: &mut [u8], offset: u64, kind: u32, fix: Fix) -> Option<()> {
+    match kind {
+        R_386_32 => put(bytes, offset, &low32(fix.target(bytes, offset)?)),
+        R_386_PC32 | R_386_PLT32 => rel32(bytes, offset, fix),
+        _ => None,
+    }
+}
+
+fn aarch64(bytes: &mut [u8], offset: u64, kind: u32, fix: Fix) -> Option<()> {
     let patch = |bytes: &mut [u8], mask: u32, field: u32| -> Option<()> {
-        let insn = word(bytes)? & !mask | field & mask;
+        let insn = word(bytes, offset, false)? & !mask | field & mask;
         put(bytes, offset, &insn.to_le_bytes())
     };
     let s_a = fix.target(bytes, offset)?;
     let low12 = (s_a & 0xfff) as u32;
+    // A load or store's scaled 12-bit offset.
+    let scaled = |bytes: &mut [u8], scale: u32| patch(bytes, 0xfff << 10, (low12 >> scale) << 10);
     match kind {
-        257 => put(bytes, offset, &s_a.to_le_bytes()),
-        258 => put(bytes, offset, &low32(s_a)),
-        260 => put(bytes, offset, &s_a.wrapping_sub(fix.place).to_le_bytes()),
-        261 => put(bytes, offset, &low32(s_a.wrapping_sub(fix.place))),
-        // JUMP26, CALL26: a word offset in 26 bits.
-        282 | 283 => {
-            let delta = s_a.wrapping_sub(fix.place).cast_signed() >> 2;
-            if !(-(1 << 25)..1 << 25).contains(&delta) {
-                return None;
-            }
-            patch(bytes, 0x03ff_ffff, u32::try_from(delta & 0x03ff_ffff).ok()?)
-        }
-        // ADR_PREL_PG_HI21; ADR_GOT_PAGE for imports.
-        275 | 311 if kind == 275 || fix.undefined => {
+        R_AARCH64_ABS64 => put(bytes, offset, &s_a.to_le_bytes()),
+        R_AARCH64_ABS32 => put(bytes, offset, &low32(s_a)),
+        R_AARCH64_PREL64 => put(bytes, offset, &s_a.wrapping_sub(fix.place).to_le_bytes()),
+        R_AARCH64_PREL32 => put(bytes, offset, &low32(s_a.wrapping_sub(fix.place))),
+        R_AARCH64_JUMP26 | R_AARCH64_CALL26 => branch26(bytes, offset, s_a, fix.place),
+        // The GOT form only for imports.
+        R_AARCH64_ADR_PREL_PG_HI21 | R_AARCH64_ADR_GOT_PAGE
+            if kind == R_AARCH64_ADR_PREL_PG_HI21 || fix.undefined =>
+        {
             let pages = ((s_a & !0xfff).wrapping_sub(fix.place & !0xfff)).cast_signed() >> 12;
             // The low 21 bits, as the field holds them.
             let pages = u32::try_from(pages & 0x1f_ffff).ok()?;
@@ -392,13 +516,12 @@ fn aarch64(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix) -> Option<()> {
                 (pages & 3) << 29 | (pages >> 2 & 0x7_ffff) << 5,
             )
         }
-        // ADD_ABS_LO12_NC, LDST8_ABS_LO12_NC
-        277 | 278 => patch(bytes, 0xfff << 10, low12 << 10),
-        284 => patch(bytes, 0xfff << 10, (low12 >> 1) << 10),
-        285 => patch(bytes, 0xfff << 10, (low12 >> 2) << 10),
-        286 => patch(bytes, 0xfff << 10, (low12 >> 3) << 10),
-        312 if fix.undefined => patch(bytes, 0xfff << 10, (low12 >> 3) << 10),
-        299 => patch(bytes, 0xfff << 10, (low12 >> 4) << 10),
+        R_AARCH64_ADD_ABS_LO12_NC | R_AARCH64_LDST8_ABS_LO12_NC => scaled(bytes, 0),
+        R_AARCH64_LDST16_ABS_LO12_NC => scaled(bytes, 1),
+        R_AARCH64_LDST32_ABS_LO12_NC => scaled(bytes, 2),
+        R_AARCH64_LDST64_ABS_LO12_NC => scaled(bytes, 3),
+        R_AARCH64_LD64_GOT_LO12_NC if fix.undefined => scaled(bytes, 3),
+        R_AARCH64_LDST128_ABS_LO12_NC => scaled(bytes, 4),
         _ => None,
     }
 }
@@ -406,23 +529,22 @@ fn aarch64(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix) -> Option<()> {
 /// 32-bit Arm, whose relocations are REL: each addend is in the field it
 /// fixes. A call between A32 and Thumb becomes a `blx`; an import's slot
 /// counts as A32 code.
-fn arm(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix) -> Option<()> {
-    let insn = word_at(bytes, offset, false)?;
+fn arm(bytes: &mut [u8], offset: u64, kind: u32, fix: Fix) -> Option<()> {
+    let insn = word(bytes, offset, false)?;
     let thumb = |value: u64| value & 1 != 0;
     match kind {
-        // ABS32, REL32
-        2 => put(bytes, offset, &low32(fix.target(bytes, offset)?)),
-        3 => put(bytes, offset, &low32(fix.relative(bytes, offset)?)),
-        // PC24, CALL, JUMP24: a word offset in 24 bits; a call to Thumb is
-        // a `blx`, whose H bit holds the offset's halfword.
-        1 | 28 | 29 => {
+        R_ARM_ABS32 => put(bytes, offset, &low32(fix.target(bytes, offset)?)),
+        R_ARM_REL32 => put(bytes, offset, &low32(fix.relative(bytes, offset)?)),
+        // A word offset in 24 bits; a call to Thumb is a `blx`, whose H bit
+        // holds the offset's halfword.
+        R_ARM_PC24 | R_ARM_CALL | R_ARM_JUMP24 => {
             let addend = fix
                 .addend
                 .unwrap_or(i64::from(((insn & 0x00ff_ffff) << 8).cast_signed() >> 6));
             let s_a = fix.value.wrapping_add_signed(addend);
             let delta = (s_a & !1).wrapping_sub(fix.place).cast_signed();
             let imm = fits(delta >> 2, 24)?;
-            let insn = if kind == 28 && thumb(s_a) {
+            let insn = if kind == R_ARM_CALL && thumb(s_a) {
                 0xfa00_0000 | u32::from(delta & 2 != 0) << 24 | imm
             } else if thumb(s_a) {
                 return None;
@@ -431,14 +553,14 @@ fn arm(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix) -> Option<()> {
             };
             put_word(bytes, offset, insn, false)
         }
-        // THM_CALL, THM_JUMP24: a halfword offset split over two
-        // halfwords; a call to A32 is a `blx`, from the word-aligned PC.
-        10 | 30 => {
+        // A halfword offset split over two halfwords; a call to A32 is a
+        // `blx`, from the word-aligned PC.
+        R_ARM_THM_CALL | R_ARM_THM_JUMP24 => {
             let (first, second) = (insn & 0xffff, insn >> 16);
             let addend = fix.addend.unwrap_or_else(|| thumb_offset(first, second));
             let s_a = fix.value.wrapping_add_signed(addend);
             let to_a32 = !thumb(s_a);
-            if to_a32 && kind == 30 {
+            if to_a32 && kind == R_ARM_THM_JUMP24 {
                 return None;
             }
             let from = if to_a32 { fix.place & !3 } else { fix.place };
@@ -472,10 +594,12 @@ fn thumb_offset(first: u32, second: u32) -> i64 {
 /// `R_MIPS_JALR` names the callee of, so the jump becomes a direct one as a
 /// linker relaxes it. Both reach only the 256 MB region the delay slot is
 /// in.
-fn mips(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix, big: bool) -> Option<()> {
+fn mips(bytes: &mut [u8], offset: u64, kind: u32, fix: Fix, big: bool) -> Option<()> {
     const JALR_T9: u32 = 0x0320_f809;
     const JR_T9: u32 = 0x0320_0008;
-    let insn = word_at(bytes, offset, big)?;
+    const JAL: u32 = 0x0c00_0000;
+    const J: u32 = 0x0800_0000;
+    let insn = word(bytes, offset, big)?;
     let region = |target: u64| {
         if (target ^ fix.place.wrapping_add(4)) & !0x0fff_ffff != 0 {
             return None;
@@ -483,24 +607,13 @@ fn mips(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix, big: bool) -> Opti
         u32::try_from(target >> 2 & 0x03ff_ffff).ok()
     };
     match kind {
-        // R_MIPS_32, R_MIPS_64
-        2 => {
+        R_MIPS_32 => {
             let addend = fix.addend.unwrap_or(i64::from(insn.cast_signed()));
             let target = fix.value.wrapping_add_signed(addend);
-            put_word(
-                bytes,
-                offset,
-                u32::try_from(target & 0xffff_ffff).ok()?,
-                big,
-            )
+            put_word(bytes, offset, u32::from_le_bytes(low32(target)), big)
         }
-        18 => {
-            let raw = field::<8>(bytes, offset)?;
-            let in_place = if big {
-                i64::from_be_bytes(raw)
-            } else {
-                i64::from_le_bytes(raw)
-            };
+        R_MIPS_64 => {
+            let in_place = Reader::new(bytes, big).u64(offset)?.cast_signed();
             let target = fix
                 .value
                 .wrapping_add_signed(fix.addend.unwrap_or(in_place));
@@ -511,20 +624,15 @@ fn mips(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix, big: bool) -> Opti
             };
             put(bytes, offset, &raw)
         }
-        // R_MIPS_26: the in-place addend is the 26-bit field, in words.
-        4 => {
+        // The in-place addend is the 26-bit field, in words.
+        R_MIPS_26 => {
             let addend = fix.addend.unwrap_or(i64::from(insn & 0x03ff_ffff) << 2);
             let target = fix.value.wrapping_add_signed(addend);
             put_word(bytes, offset, insn & 0xfc00_0000 | region(target)?, big)
         }
-        // R_MIPS_JALR
-        37 if insn == JALR_T9 || insn == JR_T9 => {
+        R_MIPS_JALR if insn == JALR_T9 || insn == JR_T9 => {
             let target = fix.value.wrapping_add_signed(fix.addend.unwrap_or(0));
-            let opcode = if insn == JALR_T9 {
-                0x0c00_0000
-            } else {
-                0x0800_0000
-            };
+            let opcode = if insn == JALR_T9 { JAL } else { J };
             put_word(bytes, offset, opcode | region(target)?, big)
         }
         _ => None,
@@ -532,49 +640,42 @@ fn mips(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix, big: bool) -> Opti
 }
 
 /// s390x: RELA, big-endian; relative fields count halfwords.
-fn s390x(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix) -> Option<()> {
+fn s390x(bytes: &mut [u8], offset: u64, kind: u32, fix: Fix) -> Option<()> {
     let target = fix.value.wrapping_add_signed(fix.addend?);
     let relative = target.wrapping_sub(fix.place).cast_signed();
     match kind {
-        // R_390_32, R_390_PC32, R_390_64
-        4 => put(
-            bytes,
-            offset,
-            &u32::try_from(target & 0xffff_ffff).ok()?.to_be_bytes(),
-        ),
-        5 => put(bytes, offset, &fits(relative, 32)?.to_be_bytes()),
-        22 => put(bytes, offset, &target.to_be_bytes()),
-        // PC16DBL, PLT16DBL, PC32DBL, PLT32DBL
-        16 | 17 => {
+        R_390_32 => put_word(bytes, offset, u32::from_le_bytes(low32(target)), true),
+        R_390_PC32 => put(bytes, offset, &fits(relative, 32)?.to_be_bytes()),
+        R_390_64 => put(bytes, offset, &target.to_be_bytes()),
+        R_390_PC16DBL | R_390_PLT16DBL => {
             let half = u16::try_from(fits(relative >> 1, 16)?).ok()?;
             put(bytes, offset, &half.to_be_bytes())
         }
-        19 | 20 => put(bytes, offset, &fits(relative >> 1, 32)?.to_be_bytes()),
+        R_390_PC32DBL | R_390_PLT32DBL => {
+            put(bytes, offset, &fits(relative >> 1, 32)?.to_be_bytes())
+        }
         _ => None,
     }
 }
 
 /// SPARC: RELA, big-endian; `call` holds a 30-bit word displacement.
-fn sparc(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix) -> Option<()> {
+fn sparc(bytes: &mut [u8], offset: u64, kind: u32, fix: Fix) -> Option<()> {
     let target = fix.value.wrapping_add_signed(fix.addend?);
     let relative = target.wrapping_sub(fix.place).cast_signed();
-    let insn = word_at(bytes, offset, true)?;
+    let insn = word(bytes, offset, true)?;
     match kind {
-        // R_SPARC_32, UA32, R_SPARC_64, UA64, DISP32
-        3 | 23 => put(
-            bytes,
-            offset,
-            &u32::try_from(target & 0xffff_ffff).ok()?.to_be_bytes(),
-        ),
-        32 | 54 => put(bytes, offset, &target.to_be_bytes()),
-        6 => put(bytes, offset, &fits(relative, 32)?.to_be_bytes()),
-        // WDISP30, WPLT30: `call`, whose displacement wraps; WDISP22:
-        // `b<cc>`.
-        7 | 18 => {
+        R_SPARC_32 | R_SPARC_UA32 => {
+            put_word(bytes, offset, u32::from_le_bytes(low32(target)), true)
+        }
+        R_SPARC_64 | R_SPARC_UA64 => put(bytes, offset, &target.to_be_bytes()),
+        R_SPARC_DISP32 => put(bytes, offset, &fits(relative, 32)?.to_be_bytes()),
+        // `call`, whose displacement wraps.
+        R_SPARC_WDISP30 | R_SPARC_WPLT30 => {
             let disp = u32::try_from((relative >> 2) & 0x3fff_ffff).ok()?;
             put_word(bytes, offset, insn & 0xc000_0000 | disp, true)
         }
-        8 => put_word(
+        // `b<cc>`.
+        R_SPARC_WDISP22 => put_word(
             bytes,
             offset,
             insn & !0x3f_ffff | fits(relative >> 2, 22)?,
@@ -597,30 +698,32 @@ fn split(value: i64) -> Option<(u32, u32)> {
 /// relax what lies between.
 fn riscv(
     bytes: &mut [u8],
-    offset: usize,
+    offset: u64,
     kind: u32,
     fix: Fix,
     high: &mut HashMap<u64, i64>,
 ) -> Option<()> {
     let target = fix.value.wrapping_add_signed(fix.addend?);
     let relative = target.wrapping_sub(fix.place).cast_signed();
-    let insn = word_at(bytes, offset, false).unwrap_or(0);
-    let half = u16::from_le_bytes(field::<2>(bytes, offset)?);
+    let insn = word(bytes, offset, false).unwrap_or(0);
+    let half = Reader::new(bytes, false).u16(offset)?;
     let u_type = |insn: u32, value: u32| insn & 0xfff | value << 12;
     let i_type = |insn: u32, value: u32| insn & 0x000f_ffff | value << 20;
     let s_type =
         |insn: u32, value: u32| insn & 0x01ff_f07f | (value >> 5) << 25 | (value & 0x1f) << 7;
     match kind {
-        // R_RISCV_32, R_RISCV_64, R_RISCV_32_PCREL
-        1 => put(bytes, offset, &low32(target)),
-        2 => put(bytes, offset, &target.to_le_bytes()),
-        57 => put(bytes, offset, &fits(relative, 32)?.to_le_bytes()),
-        // ADD32, SUB32, ADD64, SUB64: `.eh_frame`'s and the debug
-        // sections' differences.
-        35 | 39 => add_sub(bytes, offset, target, false, kind == 39),
-        36 | 40 => add_sub(bytes, offset, target, true, kind == 40),
-        // BRANCH: B-type, 13 bits.
-        16 => {
+        R_RISCV_32 => put(bytes, offset, &low32(target)),
+        R_RISCV_64 => put(bytes, offset, &target.to_le_bytes()),
+        R_RISCV_32_PCREL => put(bytes, offset, &fits(relative, 32)?.to_le_bytes()),
+        // `.eh_frame`'s and the debug sections' differences.
+        R_RISCV_ADD32 | R_RISCV_SUB32 => {
+            add_sub(bytes, offset, target, false, kind == R_RISCV_SUB32)
+        }
+        R_RISCV_ADD64 | R_RISCV_SUB64 => {
+            add_sub(bytes, offset, target, true, kind == R_RISCV_SUB64)
+        }
+        // B-type, 13 bits.
+        R_RISCV_BRANCH => {
             let imm = fits(relative, 13)?;
             let field = (imm >> 12 & 1) << 31
                 | (imm >> 5 & 0x3f) << 25
@@ -628,8 +731,8 @@ fn riscv(
                 | (imm >> 11 & 1) << 7;
             put_word(bytes, offset, insn & 0x01ff_f07f | field, false)
         }
-        // JAL: J-type, 21 bits.
-        17 => {
+        // J-type, 21 bits.
+        R_RISCV_JAL => {
             let imm = fits(relative, 21)?;
             let field = (imm >> 20 & 1) << 31
                 | (imm >> 1 & 0x3ff) << 21
@@ -637,51 +740,50 @@ fn riscv(
                 | (imm >> 12 & 0xff) << 12;
             put_word(bytes, offset, insn & 0xfff | field, false)
         }
-        // CALL, CALL_PLT: `auipc` and the `jalr` after it.
-        18 | 19 => {
+        // `auipc` and the `jalr` after it.
+        R_RISCV_CALL | R_RISCV_CALL_PLT => {
             let (hi, lo) = split(relative)?;
             let next = offset.checked_add(4)?;
-            let jalr = word_at(bytes, next, false)?;
+            let jalr = word(bytes, next, false)?;
             put_word(bytes, offset, u_type(insn, hi), false)?;
             put_word(bytes, next, i_type(jalr, lo), false)
         }
-        // PCREL_HI20; GOT_HI20 for imports, whose slot stands in for the
-        // GOT entry.
-        20 | 23 if kind == 23 || fix.undefined => {
+        // The GOT form for imports, whose slot stands in for the GOT entry.
+        R_RISCV_PCREL_HI20 | R_RISCV_GOT_HI20 if kind == R_RISCV_PCREL_HI20 || fix.undefined => {
             high.insert(fix.place, relative);
             put_word(bytes, offset, u_type(insn, split(relative)?.0), false)
         }
-        // PCREL_LO12_I, PCREL_LO12_S: the symbol is the `auipc`.
-        24 | 25 => {
+        // The symbol is the `auipc`.
+        R_RISCV_PCREL_LO12_I | R_RISCV_PCREL_LO12_S => {
             let (_, lo) = split(*high.get(&target)?)?;
-            let insn = if kind == 24 {
+            let insn = if kind == R_RISCV_PCREL_LO12_I {
                 i_type(insn, lo)
             } else {
                 s_type(insn, lo)
             };
             put_word(bytes, offset, insn, false)
         }
-        // HI20, LO12_I, LO12_S: absolute `lui; addi`.
-        26 => put_word(
+        // Absolute `lui; addi`.
+        R_RISCV_HI20 => put_word(
             bytes,
             offset,
             u_type(insn, split(target.cast_signed())?.0),
             false,
         ),
-        27 => put_word(
+        R_RISCV_LO12_I => put_word(
             bytes,
             offset,
             i_type(insn, split(target.cast_signed())?.1),
             false,
         ),
-        28 => put_word(
+        R_RISCV_LO12_S => put_word(
             bytes,
             offset,
             s_type(insn, split(target.cast_signed())?.1),
             false,
         ),
-        // RVC_BRANCH: CB, 9 bits.
-        44 => {
+        // CB, 9 bits.
+        R_RISCV_RVC_BRANCH => {
             let imm = fits(relative, 9)?;
             let field = (imm >> 8 & 1) << 12
                 | (imm >> 3 & 3) << 10
@@ -691,8 +793,8 @@ fn riscv(
             let field = u16::try_from(field).ok()?;
             put(bytes, offset, &(half & 0xe383 | field).to_le_bytes())
         }
-        // RVC_JUMP: CJ, 12 bits.
-        45 => {
+        // CJ, 12 bits.
+        R_RISCV_RVC_JUMP => {
             let imm = fits(relative, 12)?;
             let field = (imm >> 11 & 1) << 12
                 | (imm >> 4 & 1) << 11
@@ -711,24 +813,25 @@ fn riscv(
 
 /// `bytes`' 32-bit (`wide`: 64-bit) field at `offset`, plus or minus
 /// `value`: the `ADD`/`SUB` pairs that write a difference of two labels.
-fn add_sub(bytes: &mut [u8], offset: usize, value: u64, wide: bool, sub: bool) -> Option<()> {
+fn add_sub(bytes: &mut [u8], offset: u64, value: u64, wide: bool, sub: bool) -> Option<()> {
+    let r = Reader::new(bytes, false);
+    let (old, value) = if wide {
+        (r.u64(offset)?, value)
+    } else {
+        (
+            u64::from(r.u32(offset)?),
+            u64::from(u32::from_le_bytes(low32(value))),
+        )
+    };
+    let new = if sub {
+        old.wrapping_sub(value)
+    } else {
+        old.wrapping_add(value)
+    };
     if wide {
-        let old = u64::from_le_bytes(field::<8>(bytes, offset)?);
-        let new = if sub {
-            old.wrapping_sub(value)
-        } else {
-            old.wrapping_add(value)
-        };
         put(bytes, offset, &new.to_le_bytes())
     } else {
-        let old = u32::from_le_bytes(field::<4>(bytes, offset)?);
-        let value = u32::from_le_bytes(low32(value));
-        let new = if sub {
-            old.wrapping_sub(value)
-        } else {
-            old.wrapping_add(value)
-        };
-        put(bytes, offset, &new.to_le_bytes())
+        put(bytes, offset, &low32(new))
     }
 }
 
@@ -737,10 +840,10 @@ fn add_sub(bytes: &mut [u8], offset: usize, value: u64, wide: bool, sub: bool) -
 /// `pcalau12i; addi.d` (`PCALA_HI20`, `PCALA_LO12`), whose low part is the
 /// target's own low 12 bits. Branches within a section are relocated too,
 /// as the linker may relax what lies between.
-fn loongarch(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix) -> Option<()> {
+fn loongarch(bytes: &mut [u8], offset: u64, kind: u32, fix: Fix) -> Option<()> {
     let target = fix.value.wrapping_add_signed(fix.addend?);
     let relative = target.wrapping_sub(fix.place).cast_signed();
-    let insn = word_at(bytes, offset, false).unwrap_or(0);
+    let insn = word(bytes, offset, false).unwrap_or(0);
     // The 20-bit field at bits 5-24, and the 12- and 16-bit ones from bit
     // 10.
     let si20 = |insn: u32, value: u32| insn & !(0xf_ffff << 5) | (value & 0xf_ffff) << 5;
@@ -749,48 +852,49 @@ fn loongarch(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix) -> Option<()>
     let page = |value: u64| value.wrapping_add(0x800) & !0xfff;
     let low12 = u32::try_from(target & 0xfff).ok()?;
     match kind {
-        // R_LARCH_32, R_LARCH_64, R_LARCH_32_PCREL, R_LARCH_64_PCREL
-        1 => put(bytes, offset, &low32(target)),
-        2 => put(bytes, offset, &target.to_le_bytes()),
-        99 => put(bytes, offset, &fits(relative, 32)?.to_le_bytes()),
-        109 => put(bytes, offset, &relative.to_le_bytes()),
-        // ADD32, ADD64, SUB32, SUB64
-        50 | 55 => add_sub(bytes, offset, target, false, kind == 55),
-        51 | 56 => add_sub(bytes, offset, target, true, kind == 56),
-        // B16: `beq` and kin; B21: `beqz`, `bnez`; B26: `b`, `bl`.
-        64 => put_word(bytes, offset, i16(insn, fits(relative >> 2, 16)?), false),
-        65 => {
+        R_LARCH_32 => put(bytes, offset, &low32(target)),
+        R_LARCH_64 => put(bytes, offset, &target.to_le_bytes()),
+        R_LARCH_32_PCREL => put(bytes, offset, &fits(relative, 32)?.to_le_bytes()),
+        R_LARCH_64_PCREL => put(bytes, offset, &relative.to_le_bytes()),
+        R_LARCH_ADD32 | R_LARCH_SUB32 => {
+            add_sub(bytes, offset, target, false, kind == R_LARCH_SUB32)
+        }
+        R_LARCH_ADD64 | R_LARCH_SUB64 => {
+            add_sub(bytes, offset, target, true, kind == R_LARCH_SUB64)
+        }
+        // `beq` and kin; `beqz`, `bnez`; `b`, `bl`.
+        R_LARCH_B16 => put_word(bytes, offset, i16(insn, fits(relative >> 2, 16)?), false),
+        R_LARCH_B21 => {
             let offs = fits(relative >> 2, 21)?;
             put_word(bytes, offset, i16(insn, offs) & !0x1f | offs >> 16, false)
         }
-        66 => {
+        R_LARCH_B26 => {
             let offs = fits(relative >> 2, 26)?;
             put_word(bytes, offset, i16(insn, offs) & !0x3ff | offs >> 16, false)
         }
-        // ABS_HI20, ABS_LO12, ABS64_LO20, ABS64_HI12: `lu12i.w; ori;
-        // lu32i.d; lu52i.d`.
-        67 => put_word(
+        // `lu12i.w; ori; lu32i.d; lu52i.d`.
+        R_LARCH_ABS_HI20 => put_word(
             bytes,
             offset,
             si20(insn, u32::try_from(target >> 12 & 0xf_ffff).ok()?),
             false,
         ),
-        68 => put_word(bytes, offset, i12(insn, low12), false),
-        69 => put_word(
+        R_LARCH_ABS_LO12 => put_word(bytes, offset, i12(insn, low12), false),
+        R_LARCH_ABS64_LO20 => put_word(
             bytes,
             offset,
             si20(insn, u32::try_from(target >> 32 & 0xf_ffff).ok()?),
             false,
         ),
-        70 => put_word(
+        R_LARCH_ABS64_HI12 => put_word(
             bytes,
             offset,
             i12(insn, u32::try_from(target >> 52).ok()?),
             false,
         ),
-        // PCALA_HI20, PCALA_LO12; GOT_PC_HI20 and GOT_PC_LO12 for imports,
-        // whose slot stands in for the GOT entry.
-        71 | 75 if kind == 71 || fix.undefined => {
+        // The GOT forms for imports, whose slot stands in for the GOT
+        // entry.
+        R_LARCH_PCALA_HI20 | R_LARCH_GOT_PC_HI20 if kind == R_LARCH_PCALA_HI20 || fix.undefined => {
             let pages = page(target).wrapping_sub(fix.place & !0xfff).cast_signed() >> 12;
             put_word(
                 bytes,
@@ -799,15 +903,17 @@ fn loongarch(bytes: &mut [u8], offset: usize, kind: u32, fix: Fix) -> Option<()>
                 false,
             )
         }
-        72 | 76 if kind == 72 || fix.undefined => put_word(bytes, offset, i12(insn, low12), false),
-        // PCREL20_S2: `pcaddi`.
-        103 => put_word(bytes, offset, si20(insn, fits(relative >> 2, 20)?), false),
-        // CALL36: `pcaddu18i` and the `jirl` after it.
-        110 => {
+        R_LARCH_PCALA_LO12 | R_LARCH_GOT_PC_LO12 if kind == R_LARCH_PCALA_LO12 || fix.undefined => {
+            put_word(bytes, offset, i12(insn, low12), false)
+        }
+        // `pcaddi`.
+        R_LARCH_PCREL20_S2 => put_word(bytes, offset, si20(insn, fits(relative >> 2, 20)?), false),
+        // `pcaddu18i` and the `jirl` after it.
+        R_LARCH_CALL36 => {
             let high = relative.wrapping_add(0x2_0000) >> 18;
-            let low = relative.wrapping_sub(high << 18) >> 2;
+            let low = relative.wrapping_sub(high.wrapping_shl(18)) >> 2;
             let next = offset.checked_add(4)?;
-            let jirl = word_at(bytes, next, false)?;
+            let jirl = word(bytes, next, false)?;
             put_word(bytes, offset, si20(insn, fits(high, 20)?), false)?;
             put_word(bytes, next, i16(jirl, fits(low, 16)?), false)
         }
@@ -835,7 +941,7 @@ mod tests {
             place: 0x800_0101,
             undefined: true,
         };
-        x86_64(&mut code, 1, 4, fix);
+        x86_64(&mut code, 1, R_X86_64_PLT32, fix);
         assert_eq!(target(&code), Some(0x800_2000));
     }
 
@@ -849,7 +955,7 @@ mod tests {
             place: 0x800_0101,
             undefined: false,
         };
-        i386(&mut code, 1, 2, fix);
+        i386(&mut code, 1, R_386_PC32, fix);
         assert_eq!(target(&code), Some(0x800_0400));
     }
 
@@ -866,15 +972,41 @@ mod tests {
             place,
             undefined: false,
         };
-        aarch64(&mut code, 0, 283, at(0x800_1000, 0x800_1040));
-        aarch64(&mut code, 4, 275, at(0x800_1004, 0x800_5678));
-        aarch64(&mut code, 8, 277, at(0x800_1008, 0x800_5678));
+        aarch64(&mut code, 0, R_AARCH64_CALL26, at(0x800_1000, 0x800_1040));
+        aarch64(
+            &mut code,
+            4,
+            R_AARCH64_ADR_PREL_PG_HI21,
+            at(0x800_1004, 0x800_5678),
+        );
+        aarch64(
+            &mut code,
+            8,
+            R_AARCH64_ADD_ABS_LO12_NC,
+            at(0x800_1008, 0x800_5678),
+        );
         let words: Vec<u32> = code
             .chunks_exact(4)
             .filter_map(|w| w.try_into().ok().map(u32::from_le_bytes))
             .collect();
         // bl +0x40; adrp x0, +4 pages; add x0, x0, #0x678
         assert_eq!(words, [0x9400_0010, 0x9000_0020, 0x9100_0000 | 0x678 << 10]);
+        // Backwards, and out of reach.
+        let mut code = 0x9400_0000_u32.to_le_bytes();
+        assert_eq!(branch26(&mut code, 0, 0x800_0ff0, 0x800_1000), Some(()));
+        assert_eq!(code, 0x97ff_fffc_u32.to_le_bytes());
+        assert_eq!(branch26(&mut code, 0, 0x2000_0000, 0x800_1000), None);
+    }
+
+    #[test]
+    fn fits_signed_fields() {
+        assert_eq!(fits(-1, 8), Some(0xff));
+        assert_eq!(fits(127, 8), Some(0x7f));
+        assert_eq!(fits(128, 8), None);
+        assert_eq!(fits(-129, 8), None);
+        assert_eq!(fits(i64::MIN, 32), None);
+        assert_eq!(fits(-1, 32), Some(u32::MAX));
+        assert_eq!(fits(0, 0), None);
     }
 
     /// Where the Arm code at `place` in `code` (Thumb when `place` is odd)
@@ -895,16 +1027,16 @@ mod tests {
         // An A32 `bl` (addend -8 in place) to Thumb code at a halfword:
         // `blx`, with the H bit.
         let mut code = 0xebff_fffe_u32.to_le_bytes();
-        arm(&mut code, 0, 28, at(0x800_0100, 0x800_0203));
+        arm(&mut code, 0, R_ARM_CALL, at(0x800_0100, 0x800_0203));
         assert_eq!(arm_call(&code, 0x800_0100), Flow::Call(0x800_0203));
         // A Thumb `bl` (addend -4 in place) at a halfword-aligned place,
         // to A32 code: `blx`, from the word-aligned PC.
         let mut code = [0xff, 0xf7, 0xfe, 0xff];
-        arm(&mut code, 0, 10, at(0x800_0102, 0x800_0400));
+        arm(&mut code, 0, R_ARM_THM_CALL, at(0x800_0102, 0x800_0400));
         assert_eq!(arm_call(&code, 0x800_0103), Flow::Call(0x800_0400));
         // And to Thumb code, backwards: `bl`.
         let mut code = [0xff, 0xf7, 0xfe, 0xff];
-        arm(&mut code, 0, 10, at(0x800_0102, 0x800_0041));
+        arm(&mut code, 0, R_ARM_THM_CALL, at(0x800_0102, 0x800_0041));
         assert_eq!(arm_call(&code, 0x800_0103), Flow::Call(0x800_0041));
     }
 
@@ -940,21 +1072,51 @@ mod tests {
             .iter()
             .flat_map(|w| w.to_le_bytes())
             .collect();
-        riscv(&mut code, 0, 19, at(0x800_1000, 0x801_3a00), &mut high);
+        riscv(
+            &mut code,
+            0,
+            R_RISCV_CALL_PLT,
+            at(0x800_1000, 0x801_3a00),
+            &mut high,
+        );
         assert_eq!(riscv_flows(&code, 0x800_1000)[1], Flow::Call(0x801_3a00));
         // beq a0, a1, 0, backwards; jal ra, 0, forwards.
         let mut code = 0x00b5_0063_u32.to_le_bytes();
-        riscv(&mut code, 0, 16, at(0x800_1000, 0x800_0f00), &mut high);
+        riscv(
+            &mut code,
+            0,
+            R_RISCV_BRANCH,
+            at(0x800_1000, 0x800_0f00),
+            &mut high,
+        );
         assert_eq!(riscv_flows(&code, 0x800_1000), [Flow::Branch(0x800_0f00)]);
         let mut code = 0x0000_00ef_u32.to_le_bytes();
-        riscv(&mut code, 0, 17, at(0x800_1000, 0x808_0000), &mut high);
+        riscv(
+            &mut code,
+            0,
+            R_RISCV_JAL,
+            at(0x800_1000, 0x808_0000),
+            &mut high,
+        );
         assert_eq!(riscv_flows(&code, 0x800_1000), [Flow::Call(0x808_0000)]);
         // c.beqz a0, 0; c.j 0.
         let mut code = 0xc101_u16.to_le_bytes();
-        riscv(&mut code, 0, 44, at(0x800_1000, 0x800_0f42), &mut high);
+        riscv(
+            &mut code,
+            0,
+            R_RISCV_RVC_BRANCH,
+            at(0x800_1000, 0x800_0f42),
+            &mut high,
+        );
         assert_eq!(riscv_flows(&code, 0x800_1000), [Flow::Branch(0x800_0f42)]);
         let mut code = 0xa001_u16.to_le_bytes();
-        riscv(&mut code, 0, 45, at(0x800_1000, 0x800_17fe), &mut high);
+        riscv(
+            &mut code,
+            0,
+            R_RISCV_RVC_JUMP,
+            at(0x800_1000, 0x800_17fe),
+            &mut high,
+        );
         assert_eq!(riscv_flows(&code, 0x800_1000), [Flow::Jump(0x800_17fe)]);
     }
 
@@ -988,15 +1150,30 @@ mod tests {
                 .iter()
                 .flat_map(|w| w.to_le_bytes())
                 .collect();
-            loongarch(&mut code, 0, 110, at(0x833_3000, to));
+            loongarch(&mut code, 0, R_LARCH_CALL36, at(0x833_3000, to));
             assert_eq!(decode(&words(&code), 0x833_3000)[1].flow, Flow::Call(to));
         }
         // bl 0, forwards; b 0, backwards; bnez a0, 0; bltu a2, a0, 0.
         for (word, kind, to, flow) in [
-            (0x5400_0000_u32, 66, 0x900_0000, Flow::Call(0x900_0000)),
-            (0x5000_0000, 66, 0x7f0_0000, Flow::Jump(0x7f0_0000)),
-            (0x4400_0080, 65, 0x7f8_0004, Flow::Branch(0x7f8_0004)),
-            (0x6800_00c4, 64, 0x800_1ffc, Flow::Branch(0x800_1ffc)),
+            (
+                0x5400_0000_u32,
+                R_LARCH_B26,
+                0x900_0000,
+                Flow::Call(0x900_0000),
+            ),
+            (0x5000_0000, R_LARCH_B26, 0x7f0_0000, Flow::Jump(0x7f0_0000)),
+            (
+                0x4400_0080,
+                R_LARCH_B21,
+                0x7f8_0004,
+                Flow::Branch(0x7f8_0004),
+            ),
+            (
+                0x6800_00c4,
+                R_LARCH_B16,
+                0x800_1ffc,
+                Flow::Branch(0x800_1ffc),
+            ),
         ] {
             let mut code = word.to_le_bytes().to_vec();
             loongarch(&mut code, 0, kind, at(0x800_0000, to));
@@ -1007,8 +1184,8 @@ mod tests {
             .iter()
             .flat_map(|w| w.to_le_bytes())
             .collect();
-        loongarch(&mut code, 0, 71, at(0x800_1000, 0x804_5ab8));
-        loongarch(&mut code, 4, 72, at(0x800_1004, 0x804_5ab8));
+        loongarch(&mut code, 0, R_LARCH_PCALA_HI20, at(0x800_1000, 0x804_5ab8));
+        loongarch(&mut code, 4, R_LARCH_PCALA_LO12, at(0x800_1004, 0x804_5ab8));
         assert_eq!(
             decode(&words(&code), 0x800_1000)[1].note,
             Note::Address {
@@ -1031,13 +1208,35 @@ mod tests {
             .iter()
             .flat_map(|w| w.to_le_bytes())
             .collect();
-        mips(&mut code, 0, 37, at(0x800_0100), false);
-        mips(&mut code, 4, 37, at(0x800_0200), false);
-        assert_eq!(word_at(&code, 0, false), Some(0x0e00_0040));
-        assert_eq!(word_at(&code, 4, false), Some(0x0a00_0080));
+        mips(&mut code, 0, R_MIPS_JALR, at(0x800_0100), false);
+        mips(&mut code, 4, R_MIPS_JALR, at(0x800_0200), false);
+        assert_eq!(word(&code, 0, false), Some(0x0e00_0040));
+        assert_eq!(word(&code, 4, false), Some(0x0a00_0080));
         // Out of the delay slot's 256 MB region: left alone.
         let mut code = 0x0320_f809_u32.to_be_bytes();
-        assert_eq!(mips(&mut code, 0, 37, at(0x1000_0000), true), None);
+        assert_eq!(mips(&mut code, 0, R_MIPS_JALR, at(0x1000_0000), true), None);
         assert_eq!(code, 0x0320_f809_u32.to_be_bytes());
+    }
+
+    /// Copies for relocation stop at the byte budget; sections past it are
+    /// left as the file has them.
+    #[test]
+    fn copies_spend_a_budget() {
+        let bytes = [7_u8; 64];
+        let mut budget = 100;
+        let mut sections: Vec<Cow<'_, [u8]>> = (0..3).map(|_| Cow::Borrowed(&bytes[..])).collect();
+        let copied = sections
+            .iter_mut()
+            .map(|section| writable(section, &mut budget).is_some())
+            .filter(|&copied| copied)
+            .count();
+        assert_eq!((copied, budget), (1, 36));
+        let section = sections
+            .first_mut()
+            .map(|section| writable(section, &mut budget));
+        assert!(
+            section.is_some_and(|s| s.is_some()),
+            "a copy is not copied again"
+        );
     }
 }

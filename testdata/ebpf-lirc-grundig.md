@@ -9,4 +9,4 @@ Instructions are 8 bytes, `lddw` 16; jumps count instructions from the next one.
 - Size: 2288 bytes (767 compressed)
 
 `ebpf-lirc-grundig.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`ebpf-lirc-grundig.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`ebpf-lirc-grundig.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

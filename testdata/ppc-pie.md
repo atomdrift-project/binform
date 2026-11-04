@@ -46,4 +46,4 @@ int main(int argc, char **argv) {
 ```
 
 `ppc-pie.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`ppc-pie.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`ppc-pie.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

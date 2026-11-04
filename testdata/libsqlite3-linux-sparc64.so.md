@@ -9,4 +9,4 @@ Debian on SPARC V9: SQLite 3.53.4 built by GCC. Its `.plt` is writable and, in t
 - License: SQLite is public domain
 
 `libsqlite3-linux-sparc64.so.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`libsqlite3-linux-sparc64.so.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`libsqlite3-linux-sparc64.so.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

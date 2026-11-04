@@ -10,4 +10,4 @@ Addresses are `imm hi; addik rD, r0, lo` (no literal pools), and the `imm` prefi
 - **Malware:** this file is hostile. It is kept compressed and only ever parsed; never run it.
 
 `bot-microblaze-static.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`bot-microblaze-static.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`bot-microblaze-static.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

@@ -5,11 +5,10 @@ pub(crate) mod table;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::functions::table::Tracker;
-use crate::isa::{Decoder, Flow, Insn, Memory, Note};
-use crate::{Binary, Found, Function, Functions, Limits, Origin, Ref, RefKind};
+use crate::isa::{Decoder, Flow, Insn, Mem, Memory, Note};
+use crate::{Arch, Binary, Dest, Found, Function, Limits, Origin, Recovery, Ref, RefKind};
 
-/// Functions that never return, by name. Rizin's list, so a call to one ends
-/// its basic block in both tools.
+/// Recovery that never return, by name: a call to one ends its basic block.
 const NORETURN: &[&str] = &[
     "ExitProcess",
     "ExitThread",
@@ -72,7 +71,6 @@ const NORETURN: &[&str] = &[
     "runtime.throw",
 ];
 
-/// C runtime start routines, and which of their arguments is `main`.
 /// How deep a call chain the walk that decides whether a call returns
 /// follows (`_start_c` -> `__libc_start_main` -> `exit` -> `_Exit`).
 const RETURN_DEPTH: u8 = 6;
@@ -80,6 +78,20 @@ const RETURN_DEPTH: u8 = 6;
 /// The most instructions that walk decodes in one function.
 const RETURN_WALK: usize = 1 << 12;
 
+/// The share of the instruction budget, one part in this many, that the
+/// walks deciding whether calls return may spend between them.
+const RETURN_SHARE: usize = 4;
+
+/// The most instructions a stub runs before its jump through a slot: up to
+/// five of padding or of the address arithmetic that finds the slot (on
+/// 64-bit PowerPC, a TOC save and restore around the load as well).
+const STUB_INSNS: usize = 6;
+
+/// How far back, in bytes, a call the sweep finds is taken for a literal
+/// word rather than code: no function calls just behind itself.
+const NEAR_BEHIND: u64 = 16;
+
+/// C runtime start routines, and which of their arguments is `main`.
 const STARTS: [(&str, usize); 3] = [
     ("__libc_start_main", 0),
     ("__uClibc_main", 0),
@@ -108,8 +120,8 @@ fn main_argument(name: &str) -> Option<usize> {
     })
 }
 
-/// What recovery knows about a function beyond what consumers read: kept
-/// for the golden fixtures and the comparison tools.
+/// What recovery knows about a function beyond [`Function`]: how it was
+/// found, how its blocks connect, and the slot a stub jumps through.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Detail {
     /// Control-flow edges between blocks, including edges that leave the
@@ -124,9 +136,9 @@ pub(crate) struct Detail {
 
 /// Recover the functions of `image`, and each one's [`Detail`], in the same
 /// (entry) order.
-pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Functions, Vec<Detail>) {
+pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Recovery, Vec<Detail>) {
     let Some(arch) = image.arch else {
-        return (Functions::default(), Vec::new());
+        return (Recovery::default(), Vec::new());
     };
     let mut work = Work {
         memory: Memory::for_arch(&image.segments, arch),
@@ -135,11 +147,15 @@ pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Functions, Vec<De
         table_entries: limits.table_entries,
         truncated: false,
         entries: BTreeMap::new(),
-        imports: image.slots.iter().map(|slot| slot.slot).collect(),
+        imports: image
+            .slots
+            .iter()
+            .map(|slot| (slot.slot, slot.import))
+            .collect(),
         rebased: image.rebased.iter().copied().collect(),
         noreturn: HashSet::new(),
         returns: HashMap::new(),
-        return_budget: limits.instructions / 4,
+        return_budget: limits.instructions / RETURN_SHARE,
         thunks: HashMap::new(),
         pools: HashSet::new(),
         handlers: HashMap::new(),
@@ -187,10 +203,9 @@ pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Functions, Vec<De
     work.sweep(limits.functions);
 
     let mut functions = Vec::new();
-    let mut runs = Vec::new();
+    let mut runs = Runs::default();
     let (mut invalid, mut unresolved) = (0_u64, 0_u64);
     let mut queue: Vec<u64> = work.entries.keys().rev().copied().collect();
-    let mut done = HashSet::new();
     let mut scanned = false;
     // Addresses code builds, kept for when everything called is explored.
     let mut noted = BTreeSet::new();
@@ -202,13 +217,12 @@ pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Functions, Vec<De
             // in code: one inside a function explored is no function's
             // start, unless code jumps there or it sets up a frame.
             if !noted.is_empty() {
-                let merged = merge(&runs);
                 for pointer in std::mem::take(&mut noted) {
                     let frame = work
                         .memory
                         .code(pointer)
                         .is_some_and(|code| work.decoder.starts_frame(code));
-                    if (frame || targets.contains(&pointer) || !inside(&merged, pointer))
+                    if (frame || targets.contains(&pointer) || !runs.contains(pointer))
                         && let Some(entry) =
                             work.add_entry(pointer, Found::POINTER, limits.functions)
                     {
@@ -231,7 +245,7 @@ pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Functions, Vec<De
             continue;
         };
         // A start another function absorbed is gone from the entries.
-        if !work.entries.contains_key(&entry) || !done.insert(entry) {
+        if !work.entries.contains_key(&entry) || work.explored.contains(&entry) {
             continue;
         }
         if work.truncated {
@@ -260,14 +274,16 @@ pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Functions, Vec<De
                 noted.insert(pointer);
             }
         }
-        runs.extend(explored.runs);
+        for (start, end) in explored.runs {
+            runs.insert(start, end);
+        }
         targets.extend(
             explored
                 .function
                 .refs
                 .iter()
-                .filter(|r| r.kind != crate::RefKind::Call)
-                .map(|r| r.to),
+                .filter(|r| r.kind != RefKind::Call)
+                .map(Ref::addr),
         );
         invalid = invalid.saturating_add(explored.invalid);
         unresolved = unresolved.saturating_add(explored.unresolved);
@@ -299,12 +315,19 @@ pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Functions, Vec<De
         function.name = names
             .get(&function.entry)
             .copied()
-            .or_else(|| detail.thunk.and_then(|slot| image.import(slot)))
+            .or_else(|| {
+                let (_, import) = image.import(detail.thunk?)?;
+                Some(import.name.as_str())
+            })
             .map(str::to_owned);
     }
     functions.sort_by_key(|(function, _)| function.entry);
+    let stubs = functions
+        .iter()
+        .filter_map(|(function, detail)| Some((function.entry, detail.thunk?)))
+        .collect();
     let (functions, details) = functions.into_iter().unzip();
-    let recovered = Functions {
+    let recovered = Recovery {
         functions,
         code: image
             .segments
@@ -312,10 +335,11 @@ pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Functions, Vec<De
             .filter(|segment| segment.executable)
             .map(|segment| segment.bytes.len() as u64)
             .fold(0, u64::saturating_add),
-        covered: covered(runs),
+        covered: runs.bytes(),
         invalid,
         unresolved,
         truncated: work.truncated,
+        stubs,
     };
     (recovered, details)
 }
@@ -325,16 +349,10 @@ pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Functions, Vec<De
 /// function covers that sets up a frame (as only a function's first
 /// instructions do). Not on Arm: a pointer to Thumb code carries bit 0, and
 /// an even word into Thumb code is no function's address.
-fn data_pointers(
-    image: &Binary<'_>,
-    arch: crate::Arch,
-    work: &Work<'_>,
-    runs: &[(u64, u64)],
-) -> Vec<u64> {
-    if arch == crate::Arch::Arm {
+fn data_pointers(image: &Binary<'_>, arch: Arch, work: &Work<'_>, runs: &Runs) -> Vec<u64> {
+    if arch == Arch::Arm {
         return Vec::new();
     }
-    let merged = merge(runs);
     let width = usize::from(arch.address_width());
     let big = arch.big_endian();
     let align = work.decoder.alignment();
@@ -347,7 +365,7 @@ fn data_pointers(
                 .memory
                 .code(value)
                 .is_some_and(|code| work.decoder.starts_frame(code))
-            && !inside(&merged, value)
+            && !runs.contains(value)
         {
             found.insert(value);
         }
@@ -357,10 +375,15 @@ fn data_pointers(
         candidate(value);
     }
     for segment in image.segments.iter().filter(|segment| !segment.executable) {
-        let start = segment.addr.next_multiple_of(width as u64) - segment.addr;
+        // Words aligned in the address space; a segment that ends the
+        // address space has none past its last aligned one.
+        let skip = segment
+            .addr
+            .checked_next_multiple_of(width as u64)
+            .map_or(u64::MAX, |aligned| aligned.wrapping_sub(segment.addr));
         let Some(words) = segment
             .bytes
-            .get(usize::try_from(start).unwrap_or(usize::MAX)..)
+            .get(usize::try_from(skip).unwrap_or(usize::MAX)..)
         else {
             continue;
         };
@@ -379,39 +402,43 @@ fn data_pointers(
     found.into_iter().collect()
 }
 
-/// Half-open address ranges, sorted and with overlaps joined.
-fn merge(runs: &[(u64, u64)]) -> Vec<(u64, u64)> {
-    let mut sorted = runs.to_vec();
-    sorted.sort_unstable();
-    let mut merged: Vec<(u64, u64)> = Vec::new();
-    for (start, end) in sorted {
-        match merged.last_mut() {
-            Some(last) if start <= last.1 => last.1 = last.1.max(end),
-            _ => merged.push((start, end)),
-        }
-    }
-    merged
-}
+/// Half-open address ranges, joined where they overlap or touch: start ->
+/// end.
+#[derive(Default)]
+struct Runs(BTreeMap<u64, u64>);
 
-/// Whether `merge`'s ranges hold `addr`.
-fn inside(merged: &[(u64, u64)], addr: u64) -> bool {
-    let at = merged.partition_point(|&(start, _)| start <= addr);
-    at > 0 && merged.get(at - 1).is_some_and(|&(_, end)| addr < end)
-}
-
-/// Bytes in the union of half-open address ranges.
-fn covered(mut runs: Vec<(u64, u64)>) -> u64 {
-    runs.sort_unstable();
-    let mut total = 0_u64;
-    let mut reach = 0_u64;
-    for (start, end) in runs {
-        let start = start.max(reach);
-        if end > start {
-            total = total.saturating_add(end - start);
-            reach = end;
+impl Runs {
+    fn insert(&mut self, mut start: u64, mut end: u64) {
+        if start >= end {
+            return;
         }
+        if let Some((&before, &reach)) = self.0.range(..=start).next_back()
+            && reach >= start
+        {
+            start = before;
+            end = end.max(reach);
+        }
+        while let Some((&inner, &reach)) = self.0.range(start..=end).next() {
+            self.0.remove(&inner);
+            end = end.max(reach);
+        }
+        self.0.insert(start, end);
     }
-    total
+
+    fn contains(&self, addr: u64) -> bool {
+        self.0
+            .range(..=addr)
+            .next_back()
+            .is_some_and(|(_, &end)| addr < end)
+    }
+
+    /// Bytes in the union.
+    fn bytes(&self) -> u64 {
+        self.0
+            .iter()
+            .map(|(&start, &end)| end.saturating_sub(start))
+            .fold(0, u64::saturating_add)
+    }
 }
 
 struct Work<'a> {
@@ -423,7 +450,8 @@ struct Work<'a> {
     truncated: bool,
     /// Function starts known so far, and how each was found.
     entries: BTreeMap<u64, Found>,
-    imports: HashSet<u64>,
+    /// Import slots, and the import of each.
+    imports: HashMap<u64, Option<usize>>,
     /// Slots the loader fills with an address, and the address.
     rebased: HashMap<u64, u64>,
     /// Slots and functions whose callers never resume.
@@ -447,6 +475,53 @@ struct Work<'a> {
     explored: HashSet<u64>,
     /// Function start -> the end of the code unwind tables say it spans.
     extents: HashMap<u64, u64>,
+}
+
+/// One function's walk under way.
+struct Walk {
+    entry: u64,
+    /// Every instruction decoded, by address.
+    insns: BTreeMap<u64, Insn>,
+    /// Block starts.
+    leaders: BTreeSet<u64>,
+    /// Block starts still to walk, with the register values on the path
+    /// that found them.
+    pending: Vec<(u64, Tracker)>,
+    refs: Vec<Ref>,
+    calls: Vec<u64>,
+    mains: Vec<u64>,
+    pointers: Vec<u64>,
+    tails: Vec<u64>,
+    /// Calls that never return.
+    ends: HashSet<u64>,
+    /// Indirect jump -> how many targets its table gave.
+    cases: HashMap<u64, u32>,
+    invalid: u64,
+    unresolved: u64,
+}
+
+impl Walk {
+    fn new(entry: u64) -> Self {
+        Self {
+            entry,
+            insns: BTreeMap::new(),
+            leaders: BTreeSet::from([entry]),
+            pending: Vec::new(),
+            refs: Vec::new(),
+            calls: Vec::new(),
+            mains: Vec::new(),
+            pointers: Vec::new(),
+            tails: Vec::new(),
+            ends: HashSet::new(),
+            cases: HashMap::new(),
+            invalid: 0,
+            unresolved: 0,
+        }
+    }
+
+    fn refer(&mut self, from: u64, to: Dest, kind: RefKind) {
+        self.refs.push(Ref { from, to, kind });
+    }
 }
 
 /// One explored function, and what it found beyond itself.
@@ -476,14 +551,19 @@ impl Work<'_> {
             self.truncated = true;
             return None;
         }
-        self.budget -= 1;
-        let mut insn = self.decoder.decode(bytes, addr);
-        // A MIPS GOT slot for a function of this binary holds its address
-        // until the loader relocates it: the call or jump goes there.
+        self.budget = self.budget.saturating_sub(1);
+        let insn = self.decoder.decode(bytes, addr);
+        Some(self.slot_targets(insn))
+    }
+
+    /// `insn`, with a call or jump through a slot that holds a function of
+    /// this binary made direct: a MIPS GOT slot holds its function's address
+    /// until the loader relocates it.
+    fn slot_targets(&self, mut insn: Insn) -> Insn {
         if self.decoder.slots_hold_targets() {
             let target = |slot: u64| {
                 let to = self.memory.read(slot, self.decoder.address_width())?;
-                (!self.imports.contains(&slot) && self.memory.is_code(to)).then_some(to)
+                (!self.imports.contains_key(&slot) && self.memory.is_code(to)).then_some(to)
             };
             insn.flow = match insn.flow {
                 Flow::CallSlot(slot) => target(slot).map_or(insn.flow, Flow::Call),
@@ -491,17 +571,14 @@ impl Work<'_> {
                 flow => flow,
             };
         }
-        Some(insn)
+        insn
     }
 
     /// Record a function start inside code, found `how`: the function's
     /// own entry, when `addr` is one past the start (64-bit ELFv2's local
     /// entry). The entry, when it is new.
     fn add_entry(&mut self, addr: u64, how: Found, most: usize) -> Option<u64> {
-        let addr = addr
-            .checked_sub(8)
-            .and_then(|before| self.memory.code(before))
-            .map_or(addr, |before| self.decoder.global_entry(addr, before));
+        let addr = self.decoder.global_entry(addr, &self.memory);
         if let Some(found) = self.entries.get_mut(&addr) {
             *found |= how;
             return None;
@@ -510,6 +587,7 @@ impl Work<'_> {
             return None;
         }
         let inferred = Found::CALL | Found::SWEEP | Found::TAIL_CALL | Found::POINTER;
+        // Pools hold aligned words; Thumb code addresses carry bit 0.
         if inferred.contains(how) && self.pools.contains(&(addr & !3)) {
             return None;
         }
@@ -526,13 +604,6 @@ impl Work<'_> {
         Some(addr)
     }
 
-    /// Linear sweep of every code segment for direct calls into code,
-    /// direct jumps to code that starts a frame, and code only a function
-    /// starts with (64-bit ELFv2's global entry). (Code after `int3` padding
-    /// is no sign of a function: MSVC aligns jump targets inside functions
-    /// with it.) Windows of bytes as random as compressed or encrypted data
-    /// (a packer's payload kept in `.text`) are skipped: what decodes there
-    /// is noise, and its calls go nowhere real.
     /// Record the literal-pool words a segment's `l32r`s read, so the
     /// sweep steps over them as data. A linear decode finds them; where it
     /// strays into a pool it resyncs within a few instructions, and a word
@@ -556,119 +627,143 @@ impl Work<'_> {
         self.decoder.reset();
     }
 
+    /// Linear sweep of every code segment for direct calls into code,
+    /// direct jumps to code that starts a frame, and code only a function
+    /// starts with (64-bit ELFv2's global entry). (Code after `int3` padding
+    /// is no sign of a function: MSVC aligns jump targets inside functions
+    /// with it.) Windows of bytes as random as compressed or encrypted data
+    /// (a packer's payload kept in `.text`) are skipped: what decodes there
+    /// is noise, and its calls go nowhere real.
     fn sweep(&mut self, most: usize) {
         let segments: Vec<(u64, &[u8])> = self
             .memory
             .code_segments()
             .map(|segment| (segment.addr, segment.bytes))
             .collect();
-        let step = self.decoder.alignment();
-        let mode = self.decoder.sweep_mode();
-        let behind = self.decoder.literals_behind();
-        for (base, bytes) in &segments {
-            if behind {
-                self.collect_literals(*base, bytes);
+        if self.decoder.literals_behind() {
+            for &(base, bytes) in &segments {
+                self.collect_literals(base, bytes);
             }
         }
         for (base, bytes) in segments {
-            self.decoder.reset();
-            let mut offset = 0_usize;
-            let mut window = usize::MAX;
-            // Literal-pool words ahead, which hold data.
-            let mut pools = BTreeSet::new();
-            // Whether only padding and pools have followed a pool or the
-            // end of a block: the code after that starts a function when
-            // it sets up a frame (one nothing calls, in a static binary).
-            // Only on sets with pools, whose frames are distinctive.
-            let mut after_end = false;
-            while let Some(rest) = bytes.get(offset..).filter(|rest| !rest.is_empty()) {
-                if offset / WINDOW != window {
-                    window = offset / WINDOW;
-                    let start = window * WINDOW;
-                    if bytes.get(start..start + WINDOW).is_some_and(random) {
-                        offset = start + WINDOW;
-                        self.decoder.reset();
-                        continue;
-                    }
-                }
-                let addr = base.wrapping_add(offset as u64) | mode;
-                // A literal pool found in the pass before this one: skip
-                // the word as data, the way code after it would.
-                if behind && addr.is_multiple_of(4) && self.pools.contains(&addr) {
-                    offset = offset.saturating_add(4);
-                    self.decoder.reset();
-                    after_end = true;
-                    continue;
-                }
-                while pools.first().is_some_and(|&pool| pool + 4 <= addr) {
-                    pools.pop_first();
-                }
-                if let Some(&pool) = pools.first().filter(|&&pool| pool <= addr) {
-                    self.pools.insert(pool);
-                    offset = offset.saturating_add(usize::try_from(step).unwrap_or(1));
-                    self.decoder.reset();
-                    after_end = true;
-                    continue;
-                }
-                if !behind && let Some(pool) = self.decoder.literal(rest, addr) {
-                    pools.insert(pool);
-                }
-                let Some(insn) = self.decode(rest, addr) else {
-                    return;
-                };
-                if let Some(entry) = self.decoder.entry_of(rest, addr) {
-                    self.add_entry(entry, Found::SWEEP, most);
-                } else if (after_end || self.decoder.calls_open_frames())
-                    && addr.is_multiple_of(self.decoder.function_alignment())
-                    && self.decoder.starts_frame(rest)
-                {
-                    self.add_entry(addr, Found::SWEEP, most);
-                }
-                after_end = (after_end && insn.pad)
-                    || (!pools.is_empty() || !self.pools.is_empty())
-                        && matches!(
-                            insn.flow,
-                            Flow::Return | Flow::Jump(_) | Flow::JumpRegister(_) | Flow::Stop
-                        )
-                        && !insn.falls;
-                let framed = |work: &Self, target| {
-                    !work.decoder.calls_open_frames()
-                        || work
-                            .memory
-                            .code(target)
-                            .is_some_and(|code| work.decoder.starts_frame(code))
-                };
-                // A small negative integer in a literal pool decodes as a
-                // call a few bytes back (Arm's `0xfbfffffc`, `blx` six
-                // bytes back): no function calls just behind itself. (A call
-                // to itself is `bl .`, a weak symbol left unresolved; a call
-                // just ahead may be real: musl's `_start` calls the
-                // `_start_c` that follows it.) The sweep reads one Arm mode;
-                // a call into the other (a `blx` from A32) is more often a
-                // data word (`0xfafafafa`) than code, and a walk follows the
-                // real ones.
-                let near = |target: u64| target < (addr & !1) && (addr & !1) - target <= 16;
-                let same_mode = |target: u64| target & 1 == mode;
-                match insn.flow {
-                    Flow::Call(target)
-                        if framed(self, target) && !near(target) && same_mode(target) =>
-                    {
-                        self.add_entry(target, Found::SWEEP, most);
-                    }
-                    Flow::Jump(target) if !self.decoder.frames_late() => {
-                        let frame = self
-                            .memory
-                            .code(target)
-                            .is_some_and(|code| self.decoder.starts_frame(code));
-                        if frame {
-                            self.add_entry(target, Found::TAIL_CALL, most);
-                        }
-                    }
-                    _ => {}
-                }
-                let len = u64::from(insn.len).max(step);
-                offset = offset.saturating_add(usize::try_from(len).unwrap_or(usize::MAX));
+            if !self.sweep_segment(base, bytes, most) {
+                return;
             }
+        }
+    }
+
+    /// Sweep the code segment at `base`; false when the budget ran out.
+    fn sweep_segment(&mut self, base: u64, bytes: &[u8], most: usize) -> bool {
+        let step = usize::try_from(self.decoder.alignment()).unwrap_or(1);
+        let mode = self.decoder.sweep_mode();
+        // Pools found in a pass before this one (sets whose literals sit
+        // behind the code that reads them), or else as the sweep meets the
+        // code ahead of them.
+        let behind = self.decoder.literals_behind();
+        self.decoder.reset();
+        let mut offset = 0_usize;
+        let mut window = usize::MAX;
+        // Literal-pool words ahead, which hold data.
+        let mut pools: BTreeSet<u64> = BTreeSet::new();
+        // Whether only padding and pools have followed a pool or the end of
+        // a block: the code after that starts a function when it sets up a
+        // frame (one nothing calls, in a static binary). Only on sets with
+        // pools, whose frames are distinctive.
+        let mut after_end = false;
+        while let Some(rest) = bytes.get(offset..).filter(|rest| !rest.is_empty()) {
+            if offset / WINDOW != window {
+                window = offset / WINDOW;
+                let start = window.saturating_mul(WINDOW);
+                let end = start.saturating_add(WINDOW);
+                if bytes.get(start..end).is_some_and(random) {
+                    offset = end;
+                    self.decoder.reset();
+                    continue;
+                }
+            }
+            let addr = base.wrapping_add(offset as u64) | mode;
+            // A literal-pool word: skip it as data, the way code after it
+            // would.
+            if behind && addr.is_multiple_of(4) && self.pools.contains(&addr) {
+                offset = offset.saturating_add(4);
+                self.decoder.reset();
+                after_end = true;
+                continue;
+            }
+            while pools
+                .first()
+                .is_some_and(|&pool| pool.saturating_add(4) <= addr)
+            {
+                pools.pop_first();
+            }
+            if let Some(&pool) = pools.first().filter(|&&pool| pool <= addr) {
+                self.pools.insert(pool);
+                offset = offset.saturating_add(step);
+                self.decoder.reset();
+                after_end = true;
+                continue;
+            }
+            if !behind && let Some(pool) = self.decoder.literal(rest, addr) {
+                pools.insert(pool);
+            }
+            let Some(insn) = self.decode(rest, addr) else {
+                return false;
+            };
+            self.seed_from(rest, addr, &insn, after_end, most);
+            after_end = (after_end && insn.pad)
+                || (!pools.is_empty() || !self.pools.is_empty())
+                    && matches!(
+                        insn.flow,
+                        Flow::Return | Flow::Jump(_) | Flow::JumpRegister(_) | Flow::Stop
+                    )
+                    && !insn.falls;
+            let len = usize::try_from(insn.len).unwrap_or(usize::MAX).max(step);
+            offset = offset.saturating_add(len);
+        }
+        true
+    }
+
+    /// The function starts the sweep finds at `insn`, at `addr`, whose
+    /// bytes start `code`: a frame set up where one may start (after the
+    /// end of a block, when `after_end`), a direct call, or a direct jump to
+    /// code that sets up a frame.
+    fn seed_from(&mut self, code: &[u8], addr: u64, insn: &Insn, after_end: bool, most: usize) {
+        if let Some(entry) = self.decoder.entry_of(code, addr) {
+            self.add_entry(entry, Found::SWEEP, most);
+        } else if (after_end || self.decoder.calls_open_frames())
+            && addr.is_multiple_of(self.decoder.function_alignment())
+            && self.decoder.starts_frame(code)
+        {
+            self.add_entry(addr, Found::SWEEP, most);
+        }
+        let frames = |work: &Self, target| {
+            work.memory
+                .code(target)
+                .is_some_and(|code| work.decoder.starts_frame(code))
+        };
+        // A small negative integer in a literal pool decodes as a call a
+        // few bytes back (Arm's `0xfbfffffc`, `blx` six bytes back): no
+        // function calls just behind itself. (A call to itself is `bl .`, a
+        // weak symbol left unresolved; a call just ahead may be real: musl's
+        // `_start` calls the `_start_c` that follows it.) The sweep reads
+        // one Arm mode; a call into the other (a `blx` from A32) is more
+        // often a data word (`0xfafafafa`) than code, and a walk follows the
+        // real ones.
+        let here = addr & !1;
+        let near = |target: u64| target < here && here.wrapping_sub(target) <= NEAR_BEHIND;
+        let mode = self.decoder.sweep_mode();
+        match insn.flow {
+            Flow::Call(target)
+                if (!self.decoder.calls_open_frames() || frames(self, target))
+                    && !near(target)
+                    && target & 1 == mode =>
+            {
+                self.add_entry(target, Found::SWEEP, most);
+            }
+            Flow::Jump(target) if !self.decoder.frames_late() && frames(self, target) => {
+                self.add_entry(target, Found::TAIL_CALL, most);
+            }
+            _ => {}
         }
     }
 
@@ -677,25 +772,23 @@ impl Work<'_> {
         if let Some(&known) = self.thunks.get(&addr) {
             return known;
         }
-        self.decoder.reset();
+        // A copy decodes it, so the state of a walk under way stays as it
+        // is. A stub's few instructions, decoded once, come out of no budget.
+        let mut decoder = self.decoder.clone();
+        decoder.reset();
         let mut found = None;
         let mut at = addr;
-        // A stub is a jump through a slot, after at most five instructions
-        // of padding or the address arithmetic that finds the slot (on
-        // 64-bit PowerPC, a TOC save and restore around the load as well).
-        for _ in 0..6 {
+        for _ in 0..STUB_INSNS {
             let Some(bytes) = self.memory.code(at) else {
                 break;
             };
-            let Some(insn) = self.decode(bytes, at) else {
-                break;
-            };
+            let insn = self.slot_targets(decoder.decode(bytes, at));
             match insn.flow {
                 Flow::JumpSlot(slot) => {
-                    found = self.imports.contains(&slot).then_some(slot);
+                    found = self.imports.contains_key(&slot).then_some(slot);
                     break;
                 }
-                Flow::Next if insn.pad || self.decoder.stub_arithmetic() => {
+                Flow::Next if insn.pad || decoder.stub_arithmetic() => {
                     at = at.wrapping_add(u64::from(insn.len));
                 }
                 _ => break,
@@ -749,8 +842,8 @@ impl Work<'_> {
     /// returns: by name, or, when what follows the call soon fails to
     /// decode (the data word after musl's call to `_start_c`, past the TOC
     /// restore a 64-bit PowerPC call leaves), by a walk of the callee.
-    /// rizin infers no more (a stripped `abort` wrapper's callers run on
-    /// into their padding), and binform matches it there.
+    /// Nothing else marks a call as final: the callers of a stripped wrapper
+    /// of `abort` run on into what follows the call.
     fn never_returns(&mut self, target: u64, next: u64) -> bool {
         if self.named_noreturn(target) {
             return true;
@@ -759,7 +852,7 @@ impl Work<'_> {
         let mut decoder = self.decoder.clone();
         let mut at = next;
         let mut nothing = false;
-        for i in 0..2 + u8::from(self.decoder.delay_slots()) {
+        for i in 0..2_u8.saturating_add(u8::from(self.decoder.delay_slots())) {
             let Some(bytes) = self.memory.code(at) else {
                 nothing = true;
                 break;
@@ -816,13 +909,13 @@ impl Work<'_> {
                 if seen.len() > RETURN_WALK || self.return_budget == 0 {
                     return true;
                 }
-                self.return_budget -= 1;
+                self.return_budget = self.return_budget.saturating_sub(1);
                 let Some(bytes) = self.memory.code(addr) else {
                     return true;
                 };
                 let insn = decoder.decode(bytes, addr);
                 let callee_returns = |work: &mut Self, to: u64| {
-                    !work.named_noreturn(to) && work.may_return(to, depth - 1)
+                    !work.named_noreturn(to) && work.may_return(to, depth.saturating_sub(1))
                 };
                 let ends = match insn.flow {
                     Flow::Next | Flow::CallIndirect | Flow::CallRegister(_) => false,
@@ -832,7 +925,9 @@ impl Work<'_> {
                     }
                     Flow::Call(to) => !callee_returns(self, to),
                     Flow::CallSlot(slot) => self.noreturn.contains(&slot),
-                    // A jump to another function's start returns when it does.
+                    // A jump to another function's start: a tail call, which
+                    // returns when that function does. Either way, this
+                    // path goes no further.
                     Flow::Jump(to) if to != target && self.entries.contains_key(&to) => {
                         if callee_returns(self, to) {
                             return true;
@@ -865,314 +960,321 @@ impl Work<'_> {
 
     fn explore(&mut self, entry: u64) -> Explored {
         self.explored.insert(entry);
-        let mut insns: BTreeMap<u64, Insn> = BTreeMap::new();
-        let mut leaders = BTreeSet::from([entry]);
-        // Block starts still to walk, with the register values on the path
-        // that found them. Landing pads sit beneath the entry, so the body
-        // claims its own code first; each starts a block nothing branches to.
+        let mut walk = Walk::new(entry);
+        // Landing pads sit beneath the entry, so the body claims its own
+        // code first; each starts a block nothing branches to.
         let fresh = Tracker::new(self.decoder.address_width());
-        let mut pending = Vec::new();
         for &pad in self.handlers.get(&entry).into_iter().flatten().rev() {
-            if !self.entries.contains_key(&pad) && self.memory.is_code(pad) && leaders.insert(pad) {
-                pending.push((pad, fresh.clone()));
+            if !self.entries.contains_key(&pad)
+                && self.memory.is_code(pad)
+                && walk.leaders.insert(pad)
+            {
+                walk.pending.push((pad, fresh.clone()));
             }
         }
-        pending.push((entry, fresh));
-        let mut refs = Vec::new();
-        let mut calls = Vec::new();
-        let mut mains = Vec::new();
-        let mut pointers = Vec::new();
-        let mut tails = Vec::new();
-        let mut ends = HashSet::new(); // calls that never return
-        let mut cases: HashMap<u64, u32> = HashMap::new();
-        let (mut invalid, mut unresolved) = (0_u64, 0_u64);
+        walk.pending.push((entry, fresh));
         let extent = self.extents.get(&entry).copied();
         // How far into the extent the search for unreached code has come.
         let mut cursor = entry;
-
         loop {
-            while let Some((start, mut tracker)) = pending.pop() {
-                let mut addr = start;
-                self.decoder.reset();
-                // Whether the last instruction walked runs into `addr`, other
-                // than by returning from a call (which may never return).
-                let mut falls = false;
-                loop {
-                    if insns.contains_key(&addr) {
-                        break;
-                    }
-                    if addr != entry
-                        && let Some(&found) = self.entries.get(&addr)
-                    {
-                        // Code that runs straight into a start known only from
-                        // unwind data continues there: a compiler that
-                        // shrink-wraps a function gives its parts their own
-                        // unwind entries. Anything else there is another
-                        // function.
-                        if !(falls && found == Found::UNWIND) || self.explored.contains(&addr) {
-                            break;
-                        }
-                        self.entries.remove(&addr);
-                        if refs.iter().any(|r: &Ref| r.to == addr) {
-                            leaders.insert(addr);
-                        }
-                    }
-                    let Some(bytes) = self.memory.code(addr) else {
-                        break;
-                    };
-                    let Some(insn) = self.decode(bytes, addr) else {
-                        break;
-                    };
-                    insns.insert(addr, insn);
-                    // Padding after a call that never returns runs into
-                    // nothing.
-                    if !insn.pad {
-                        falls = insn.falls || matches!(insn.flow, Flow::Next | Flow::Branch(_));
-                    }
-                    let next = addr.wrapping_add(u64::from(insn.len));
-                    let target =
-                        |to: u64,
-                         tracker: &Tracker,
-                         leaders: &mut BTreeSet<u64>,
-                         pending: &mut Vec<(u64, Tracker)>| {
-                            // A jump to another function's start is a tail call.
-                            let local = to == entry || !self.entries.contains_key(&to);
-                            if local && self.memory.is_code(to) && leaders.insert(to) {
-                                pending.push((to, tracker.clone()));
-                            }
-                        };
-                    if let Note::Address { addr: to, .. } = insn.note
-                        && self.decoder.notes_pointers()
-                        && to.is_multiple_of(self.decoder.alignment())
-                        && to != entry
-                        && self.memory.is_code(to)
-                    {
-                        pointers.push(to);
-                    }
-                    // Branches and calls only read registers; what a call
-                    // changes, `call` forgets below.
-                    // A compare-and-branch bounds a case value too. A delay
-                    // slot runs before a call or jump arrives.
-                    if matches!(insn.flow, Flow::Next | Flow::Branch(_))
-                        || matches!(insn.note, Note::Pc { .. })
-                        || (self.decoder.delay_slots()
-                            && matches!(
-                                insn.flow,
-                                Flow::Call(_)
-                                    | Flow::CallIndirect
-                                    | Flow::CallSlot(_)
-                                    | Flow::Jump(_)
-                            ))
-                    {
-                        let note = match insn.note {
-                            // A slot of this binary that holds an address.
-                            Note::Fetch {
-                                reg,
-                                mem,
-                                size,
-                                signed,
-                            } => tracker
-                                .fixed(mem)
-                                .filter(|slot| !self.imports.contains(slot))
-                                .and_then(|slot| match self.memory.read(slot, size) {
-                                    Some(0) | None => self.rebased.get(&slot).copied(),
-                                    value => value,
-                                })
-                                .map(|value| {
-                                    let shift = 64 - 8 * u32::from(size.clamp(1, 8));
-                                    if signed {
-                                        ((value << shift).cast_signed() >> shift).cast_unsigned()
-                                    } else {
-                                        value
-                                    }
-                                })
-                                .map_or(Note::Write(reg), |addr| Note::Address { reg, addr }),
-                            note => note,
-                        };
-                        tracker.note(note);
-                    }
-                    // A register holding a fixed address of code: a call
-                    // there. The walk below sees which.
-                    let flow = match insn.flow {
-                        Flow::CallRegister(reg) => tracker
-                            .held(reg)
-                            .filter(|&to| self.memory.is_code(to))
-                            .map_or(Flow::CallIndirect, Flow::Call),
-                        flow => flow,
-                    };
-                    match flow {
-                        Flow::Next => {}
-                        Flow::CallIndirect | Flow::CallRegister(_) => {
-                            tracker.call(self.decoder.call_preserved());
-                        }
-                        Flow::Call(to) => {
-                            mains.extend(self.main(entry, to, next, &tracker));
-                            tracker.call(self.decoder.call_preserved());
-                            // A PC thunk returns the address after the call.
-                            let thunk = self
-                                .memory
-                                .code(to)
-                                .and_then(|code| self.decoder.pc_thunk(code, addr, next));
-                            if let Some(note) = thunk {
-                                tracker.note(note);
-                            }
-                            refs.push(Ref {
-                                from: addr,
-                                to,
-                                kind: RefKind::Call,
-                            });
-                            calls.push(to);
-                            if self.never_returns(to, next) {
-                                ends.insert(addr);
-                                break;
-                            }
-                        }
-                        Flow::CallSlot(slot) => {
-                            mains.extend(self.main(entry, slot, next, &tracker));
-                            tracker.call(self.decoder.call_preserved());
-                            refs.push(Ref {
-                                from: addr,
-                                to: slot,
-                                kind: RefKind::Call,
-                            });
-                            if self.noreturn.contains(&slot) {
-                                ends.insert(addr);
-                                break;
-                            }
-                        }
-                        Flow::Branch(to) => {
-                            refs.push(Ref {
-                                from: addr,
-                                to,
-                                kind: RefKind::Branch,
-                            });
-                            target(to, &tracker, &mut leaders, &mut pending);
-                            // The fall-through starts a block; this walk decodes it.
-                            leaders.insert(next);
-                        }
-                        Flow::Jump(to) => {
-                            refs.push(Ref {
-                                from: addr,
-                                to,
-                                kind: RefKind::Jump,
-                            });
-                            target(to, &tracker, &mut leaders, &mut pending);
-                            break;
-                        }
-                        Flow::JumpSlot(slot) => {
-                            refs.push(Ref {
-                                from: addr,
-                                to: slot,
-                                kind: RefKind::Jump,
-                            });
-                            if !insn.falls {
-                                break;
-                            }
-                        }
-                        // A register holding a fixed address of code: a
-                        // tail call, as code of this function would be
-                        // reached by a direct branch (musl's PowerPC start
-                        // code computes the next stage's address from the
-                        // PC; s390x `larl %r1, f; br %r1`).
-                        Flow::JumpRegister(reg)
-                            if tracker
-                                .held(reg)
-                                .is_some_and(|to| to != entry && self.memory.is_code(to)) =>
-                        {
-                            let to = tracker.held(reg).unwrap_or_default();
-                            refs.push(Ref {
-                                from: addr,
-                                to,
-                                kind: RefKind::Jump,
-                            });
-                            tails.push(to);
-                            if !insn.falls {
-                                break;
-                            }
-                        }
-                        Flow::JumpMemory(_)
-                        | Flow::JumpRegister(_)
-                        | Flow::JumpAdd { .. }
-                        | Flow::JumpTable { .. } => {
-                            let table = tracker.jump(insn.flow);
-                            let mut targets = table
-                                .map(|table| table.targets(&self.memory, self.table_entries))
-                                .unwrap_or_default();
-                            // An unbounded table ends before a target past
-                            // another function's start: the next table, of
-                            // the next function (glibc's printf variants).
-                            if table.is_some_and(|table| !table.bounded()) {
-                                let crosses = |to: u64| {
-                                    let (low, high) = (addr.min(to), addr.max(to));
-                                    self.entries
-                                        .range(low.wrapping_add(1)..=high)
-                                        .next()
-                                        .is_some()
-                                };
-                                if let Some(end) = targets.iter().position(|&to| crosses(to)) {
-                                    targets.truncate(end);
-                                }
-                            }
-                            cases.insert(addr, u32::try_from(targets.len()).unwrap_or(u32::MAX));
-                            if targets.is_empty() {
-                                unresolved = unresolved.saturating_add(1);
-                            }
-                            for to in targets {
-                                refs.push(Ref {
-                                    from: addr,
-                                    to,
-                                    kind: RefKind::Case,
-                                });
-                                target(to, &tracker, &mut leaders, &mut pending);
-                            }
-                            if !insn.falls {
-                                break;
-                            }
-                        }
-                        Flow::JumpIndirect => {
-                            unresolved = unresolved.saturating_add(1);
-                            if !insn.falls {
-                                break;
-                            }
-                        }
-                        Flow::Invalid => {
-                            invalid = invalid.saturating_add(1);
-                            break;
-                        }
-                        Flow::Return | Flow::Stop if !insn.falls => break,
-                        Flow::Return | Flow::Stop => {}
-                    }
-                    // A conditional return or jump ends its block; the code
-                    // after it, reached when the condition fails, starts one.
-                    if insn.falls {
-                        leaders.insert(next);
-                    }
-                    addr = next;
-                }
+            while let Some((start, tracker)) = walk.pending.pop() {
+                self.walk_block(&mut walk, start, tracker);
             }
             // After a jump to targets not known, code the unwind table gives
             // this function that no path reached is reached from there: the
             // cases of a table without a bound (a switch on an enum the
             // compiler knows the range of).
-            let Some(end) = extent.filter(|_| unresolved > 0) else {
+            let Some(end) = extent.filter(|_| walk.unresolved > 0) else {
                 break;
             };
-            let Some(gap) = self.unreached(entry, end, &mut cursor, &insns) else {
+            let Some(gap) = self.unreached(entry, end, &mut cursor, &walk.insns) else {
                 break;
             };
-            leaders.insert(gap);
-            pending.push((gap, Tracker::new(self.decoder.address_width())));
+            walk.leaders.insert(gap);
+            walk.pending
+                .push((gap, Tracker::new(self.decoder.address_width())));
         }
+        self.finish(walk)
+    }
 
-        let (blocks, edges, exits) = self.graph(entry, &insns, &leaders, &ends, &cases);
-        let complexity = (i64::from(edges) - i64::from(blocks) + 2 * i64::from(exits)).max(0);
-        let low = insns.keys().next().copied().unwrap_or(entry);
-        let high = insns
+    /// Walk the block at `start`, with the register values `tracker` holds
+    /// on the path that found it, to its end: the block's own terminator,
+    /// code walked before, or another function's start.
+    fn walk_block(&mut self, walk: &mut Walk, start: u64, mut tracker: Tracker) {
+        let mut addr = start;
+        self.decoder.reset();
+        // Whether the last instruction walked runs into `addr`, other than
+        // by returning from a call (which may never return).
+        let mut falls = false;
+        loop {
+            if walk.insns.contains_key(&addr) {
+                return;
+            }
+            if addr != walk.entry
+                && let Some(&found) = self.entries.get(&addr)
+            {
+                // Code that runs straight into a start known only from
+                // unwind data continues there: a compiler that shrink-wraps
+                // a function gives its parts their own unwind entries.
+                // Anything else there is another function.
+                if !(falls && found == Found::UNWIND) || self.explored.contains(&addr) {
+                    return;
+                }
+                self.entries.remove(&addr);
+                if walk.refs.iter().any(|r| r.to == Dest::Code(addr)) {
+                    walk.leaders.insert(addr);
+                }
+            }
+            let Some(bytes) = self.memory.code(addr) else {
+                return;
+            };
+            let Some(insn) = self.decode(bytes, addr) else {
+                return;
+            };
+            walk.insns.insert(addr, insn);
+            // Padding after a call that never returns runs into nothing.
+            if !insn.pad {
+                falls = insn.falls || matches!(insn.flow, Flow::Next | Flow::Branch(_));
+            }
+            if let Note::Address { addr: to, .. } = insn.note
+                && self.decoder.notes_pointers()
+                && to.is_multiple_of(self.decoder.alignment())
+                && to != walk.entry
+                && self.memory.is_code(to)
+            {
+                walk.pointers.push(to);
+            }
+            self.track(&insn, &mut tracker);
+            let next = addr.wrapping_add(u64::from(insn.len));
+            if !self.step(walk, addr, next, &insn, &mut tracker) {
+                return;
+            }
+            // A conditional return or jump ends its block; the code after
+            // it, reached when the condition fails, starts one.
+            if insn.falls {
+                walk.leaders.insert(next);
+            }
+            addr = next;
+        }
+    }
+
+    /// Carry what `insn` does to registers into `tracker`. Branches and
+    /// calls only read registers; what a call changes, [`Self::step`]
+    /// forgets. A compare-and-branch bounds a case value too, and a delay
+    /// slot runs before a call or jump arrives.
+    fn track(&self, insn: &Insn, tracker: &mut Tracker) {
+        let delayed = self.decoder.delay_slots()
+            && matches!(
+                insn.flow,
+                Flow::Call(_) | Flow::CallIndirect | Flow::CallSlot(_) | Flow::Jump(_)
+            );
+        if !(matches!(insn.flow, Flow::Next | Flow::Branch(_))
+            || matches!(insn.note, Note::Value { .. })
+            || delayed)
+        {
+            return;
+        }
+        let note = match insn.note {
+            Note::Fetch {
+                reg,
+                mem,
+                size,
+                signed,
+            } => self
+                .fetched(tracker, mem, size, signed)
+                .map_or(Note::Write(reg), |addr| Note::Address { reg, addr }),
+            note => note,
+        };
+        tracker.note(note);
+    }
+
+    /// The address a load of `size` bytes from `mem` reads, when `mem` is
+    /// a slot of this binary that holds one (written there, or by the
+    /// loader).
+    fn fetched(&self, tracker: &Tracker, mem: Mem, size: u8, signed: bool) -> Option<u64> {
+        let slot = tracker
+            .fixed(mem)
+            .filter(|slot| !self.imports.contains_key(slot))?;
+        let value = match self.memory.read(slot, size) {
+            Some(0) | None => self.rebased.get(&slot).copied(),
+            value => value,
+        }?;
+        Some(if signed {
+            table::sign_extend(value, size)
+        } else {
+            value
+        })
+    }
+
+    /// Follow `insn`, at `addr`, out of its block: record what it calls,
+    /// branches and jumps to, and queue its targets in this function.
+    /// Whether the walk goes on to `next`.
+    fn step(
+        &mut self,
+        walk: &mut Walk,
+        addr: u64,
+        next: u64,
+        insn: &Insn,
+        tracker: &mut Tracker,
+    ) -> bool {
+        // A register holding a fixed address of code: a call there.
+        let flow = match insn.flow {
+            Flow::CallRegister(reg) => tracker
+                .held(reg)
+                .filter(|&to| self.memory.is_code(to))
+                .map_or(Flow::CallIndirect, Flow::Call),
+            flow => flow,
+        };
+        // A jump through a register holding a fixed address of code: a tail
+        // call, as code of this function would be reached by a direct
+        // branch (musl's PowerPC start code computes the next stage's
+        // address from the PC; s390x `larl %r1, f; br %r1`).
+        if let Flow::JumpRegister(reg) = flow
+            && let Some(to) = tracker
+                .held(reg)
+                .filter(|&to| to != walk.entry && self.memory.is_code(to))
+        {
+            walk.refer(addr, Dest::Code(to), RefKind::Jump);
+            walk.tails.push(to);
+            return insn.falls;
+        }
+        match flow {
+            Flow::Next => {}
+            Flow::CallIndirect | Flow::CallRegister(_) => {
+                tracker.call(self.decoder.call_preserved());
+            }
+            Flow::Call(to) => {
+                walk.mains.extend(self.main(walk.entry, to, next, tracker));
+                tracker.call(self.decoder.call_preserved());
+                // A PC thunk returns the address after the call.
+                let thunk = self
+                    .memory
+                    .code(to)
+                    .and_then(|code| self.decoder.pc_thunk(code, addr, next));
+                if let Some(note) = thunk {
+                    tracker.note(note);
+                }
+                walk.refer(addr, Dest::Code(to), RefKind::Call);
+                walk.calls.push(to);
+                if self.never_returns(to, next) {
+                    walk.ends.insert(addr);
+                    return false;
+                }
+            }
+            Flow::CallSlot(slot) => {
+                walk.mains
+                    .extend(self.main(walk.entry, slot, next, tracker));
+                tracker.call(self.decoder.call_preserved());
+                walk.refer(addr, self.slot(slot), RefKind::Call);
+                if self.noreturn.contains(&slot) {
+                    walk.ends.insert(addr);
+                    return false;
+                }
+            }
+            Flow::Branch(to) => {
+                walk.refer(addr, Dest::Code(to), RefKind::Branch);
+                self.reach(walk, to, tracker);
+                // The fall-through starts a block; this walk decodes it.
+                walk.leaders.insert(next);
+            }
+            Flow::Jump(to) => {
+                walk.refer(addr, Dest::Code(to), RefKind::Jump);
+                self.reach(walk, to, tracker);
+                return false;
+            }
+            Flow::JumpSlot(slot) => {
+                walk.refer(addr, self.slot(slot), RefKind::Jump);
+                return insn.falls;
+            }
+            Flow::JumpMemory(_)
+            | Flow::JumpRegister(_)
+            | Flow::JumpAdd { .. }
+            | Flow::JumpTable { .. } => {
+                let targets = self.table_targets(addr, flow, tracker);
+                walk.cases
+                    .insert(addr, u32::try_from(targets.len()).unwrap_or(u32::MAX));
+                if targets.is_empty() {
+                    walk.unresolved = walk.unresolved.saturating_add(1);
+                }
+                for to in targets {
+                    walk.refer(addr, Dest::Code(to), RefKind::Case);
+                    self.reach(walk, to, tracker);
+                }
+                return insn.falls;
+            }
+            Flow::JumpIndirect => {
+                walk.unresolved = walk.unresolved.saturating_add(1);
+                return insn.falls;
+            }
+            Flow::Invalid => {
+                walk.invalid = walk.invalid.saturating_add(1);
+                return false;
+            }
+            Flow::Return | Flow::Stop => return insn.falls,
+        }
+        true
+    }
+
+    /// Where a transfer through the memory slot at `addr` goes.
+    fn slot(&self, addr: u64) -> Dest {
+        Dest::Slot {
+            addr,
+            import: self.imports.get(&addr).copied().flatten(),
+        }
+    }
+
+    /// Queue `to`, reached with the register values in `tracker`, as a
+    /// block of the function `walk` explores; a jump to another function's
+    /// start is a tail call, and queues nothing.
+    fn reach(&self, walk: &mut Walk, to: u64, tracker: &Tracker) {
+        let local = to == walk.entry || !self.entries.contains_key(&to);
+        if local && self.memory.is_code(to) && walk.leaders.insert(to) {
+            walk.pending.push((to, tracker.clone()));
+        }
+    }
+
+    /// The case targets of the indirect jump at `addr`, as far as `tracker`
+    /// knows its table. An unbounded table ends before a target past
+    /// another function's start: the next table, of the next function
+    /// (glibc's printf variants).
+    fn table_targets(&self, addr: u64, flow: Flow, tracker: &Tracker) -> Vec<u64> {
+        let Some(table) = tracker.jump(flow) else {
+            return Vec::new();
+        };
+        let mut targets = table.targets(&self.memory, self.table_entries);
+        if !table.bounded() {
+            let crosses = |to: u64| {
+                let (low, high) = (addr.min(to), addr.max(to));
+                low < high
+                    && self
+                        .entries
+                        .range(low.wrapping_add(1)..=high)
+                        .next()
+                        .is_some()
+            };
+            if let Some(end) = targets.iter().position(|&to| crosses(to)) {
+                targets.truncate(end);
+            }
+        }
+        targets
+    }
+
+    /// The function `walk` explored, from its instructions.
+    fn finish(&mut self, mut walk: Walk) -> Explored {
+        let entry = walk.entry;
+        let (blocks, edges, exits) = self.graph(&walk);
+        // McCabe's: edges - blocks + 2 per exit, as a count.
+        let complexity = u64::from(edges)
+            .saturating_add(2 * u64::from(exits))
+            .saturating_sub(u64::from(blocks));
+        let low = walk.insns.keys().next().copied().unwrap_or(entry);
+        let high = walk
+            .insns
             .iter()
             .map(|(&addr, insn)| addr.saturating_add(u64::from(insn.len)))
             .max()
             .unwrap_or(entry);
-        refs.sort_by_key(|r| (r.from, r.to));
+        walk.refs.sort_by_key(|r| (r.from, r.addr()));
         let thunk = self.thunk(entry);
         Explored {
             function: Function {
@@ -1182,7 +1284,7 @@ impl Work<'_> {
                 size: high.saturating_sub(low),
                 blocks,
                 complexity: u32::try_from(complexity).unwrap_or(u32::MAX),
-                refs,
+                refs: walk.refs,
             },
             detail: Detail {
                 edges,
@@ -1190,13 +1292,13 @@ impl Work<'_> {
                 // Filled in once every caller is known.
                 found: Found::default(),
             },
-            calls,
-            mains,
-            pointers,
-            tails,
-            runs: runs(&insns),
-            invalid,
-            unresolved,
+            calls: walk.calls,
+            mains: walk.mains,
+            pointers: walk.pointers,
+            tails: walk.tails,
+            runs: runs(&walk.insns),
+            invalid: walk.invalid,
+            unresolved: walk.unresolved,
         }
     }
 
@@ -1238,14 +1340,16 @@ impl Work<'_> {
 
     /// Count blocks, edges and exit blocks: a block starts at each leader
     /// that was decoded and runs to its terminator or the next leader.
-    fn graph(
-        &self,
-        entry: u64,
-        insns: &BTreeMap<u64, Insn>,
-        leaders: &BTreeSet<u64>,
-        ends: &HashSet<u64>,
-        cases: &HashMap<u64, u32>,
-    ) -> (u32, u32, u32) {
+    fn graph(&self, walk: &Walk) -> (u32, u32, u32) {
+        let Walk {
+            entry,
+            insns,
+            leaders,
+            ends,
+            cases,
+            ..
+        } = walk;
+        let entry = *entry;
         let (mut blocks, mut edges, mut exits) = (0_u32, 0_u32, 0_u32);
         for &leader in leaders {
             if !insns.contains_key(&leader) {
@@ -1319,7 +1423,7 @@ fn random(bytes: &[u8]) -> bool {
     let mut counts = [0_u32; 256];
     for &byte in bytes {
         if let Some(count) = counts.get_mut(usize::from(byte)) {
-            *count += 1;
+            *count = count.saturating_add(1);
         }
     }
     let total = f64::from(u32::try_from(bytes.len()).unwrap_or(u32::MAX));

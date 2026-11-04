@@ -21,15 +21,22 @@
 //! `ldb_s`); ARCv2 adds `bi [c]` and `bih [c]`, which jump into a run of
 //! branch instructions.
 
-use crate::isa::{Extend, Flow, Insn, Mem, Note};
+use crate::isa::{Decode, Extend, Flow, Insn, Mem, Note, Regs, sext, u16_at};
+
+/// The decoder: ARCv2's encodings when `v2`, ARCompact's otherwise.
+#[derive(Clone, Debug)]
+pub(crate) struct Decoder {
+    v2: bool,
+    state: State,
+}
 
 /// What earlier instructions left that a later one needs.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct State {
+struct State {
     /// The constant in each core register, and whether it was built like
     /// an address (from a `limm` or `pcl`) rather than from a short
     /// immediate.
-    regs: [Option<(u64, bool)>; 32],
+    regs: Regs<(u64, bool), 32>,
     /// A register holding another plus a constant, which a load folds
     /// into its displacement: the register and the constant. The walk was
     /// told the register is a copy of the other.
@@ -53,17 +60,18 @@ const PCL: u32 = 63;
 const STORED: u32 = 61;
 /// The registers a call may change: the arguments and temporaries (`r0`
 /// to `r12`) and the link register.
-const VOLATILE: u32 = 0x8000_1fff;
+const VOLATILE: u64 = 0x8000_1fff;
+/// Addresses are 32 bits.
+const MASK: u64 = 0xffff_ffff;
 
 /// The halfword at `at`.
 fn half(bytes: &[u8], at: usize) -> Option<u32> {
-    let b: [u8; 2] = bytes.get(at..at + 2)?.try_into().ok()?;
-    Some(u32::from(u16::from_le_bytes(b)))
+    u16_at(bytes, at, false).map(u32::from)
 }
 
 /// The 32-bit word at `at`, high halfword first.
-fn word_at(bytes: &[u8], at: usize) -> Option<u32> {
-    Some(half(bytes, at)? << 16 | half(bytes, at + 2)?)
+fn word(bytes: &[u8], at: usize) -> Option<u32> {
+    Some(half(bytes, at)? << 16 | half(bytes, at.checked_add(2)?)?)
 }
 
 /// The bytes a load or store of size field `zz` moves: a word, a byte, a
@@ -77,16 +85,10 @@ const fn zz_size(zz: u32) -> u8 {
     }
 }
 
-/// `value`'s low `bits` bits, sign-extended.
-fn sign(value: u32, bits: u32) -> i64 {
-    let shift = 64 - bits;
-    (i64::from(value) << shift) >> shift
-}
-
 /// A 16-bit instruction's three-bit register field: `r0`-`r3`, `r12`-`r15`.
 const fn short(field: u32) -> u32 {
     let field = field & 7;
-    if field < 4 { field } else { field + 8 }
+    if field < 4 { field } else { field | 8 }
 }
 
 /// What one instruction is.
@@ -105,6 +107,17 @@ enum Kind {
     },
 }
 
+impl Kind {
+    /// The instruction of `len` bytes this is, on its own.
+    const fn insn(self, len: u32) -> Insn {
+        match self {
+            Self::Op(Some(note)) => Insn::note(len, note),
+            Self::Op(None) => Insn::new(len, Flow::Invalid),
+            Self::Transfer { flow, .. } => Insn::new(len, flow),
+        }
+    }
+}
+
 /// A second operand.
 #[derive(Clone, Copy, Debug)]
 enum Src {
@@ -113,84 +126,173 @@ enum Src {
     Imm(u64),
 }
 
-pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64, v2: bool) -> Insn {
-    let mut cx = Cx { state, addr, v2 };
-    let Some((len, kind)) = cx.parse(bytes) else {
-        *cx.state = State::default();
-        return Insn::new(2, Flow::Invalid);
-    };
-    let (flow, delay, falls, compare) = match kind {
-        Kind::Op(Some(note)) => {
-            let mut insn = Insn::new(len, Flow::Next);
-            insn.note = note;
-            // nop_s, nop (mov 0, 0)
-            insn.pad = matches!(half(bytes, 0), Some(0x78e0))
-                || (len == 4 && word_at(bytes, 0) == Some(0x264a_7000));
-            return insn;
+/// A load `dest = [base + index * scale]` of `size` bytes, sign-extended
+/// when `signed`, with addressing mode `aa` (1 and 2 write the address
+/// back to `base`; 3 scales the index by the size).
+#[derive(Clone, Copy, Debug)]
+struct Access {
+    dest: u32,
+    base: u32,
+    index: Src,
+    scale: u8,
+    aa: u32,
+    size: u8,
+    signed: bool,
+}
+
+impl Access {
+    /// A word load with no write-back.
+    const fn word(dest: u32, base: u32, index: Src) -> Self {
+        Self {
+            dest,
+            base,
+            index,
+            scale: 1,
+            aa: 0,
+            size: 4,
+            signed: false,
         }
-        Kind::Op(None) => {
-            *cx.state = State::default();
+    }
+}
+
+impl Decoder {
+    pub(crate) fn new(v2: bool) -> Self {
+        Self {
+            v2,
+            state: State::default(),
+        }
+    }
+}
+
+impl Decode for Decoder {
+    fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
+        let mut cx = Cx {
+            state: &mut self.state,
+            addr,
+            v2: self.v2,
+        };
+        let Some((len, kind)) = cx.parse(bytes) else {
             return Insn::new(2, Flow::Invalid);
-        }
-        Kind::Transfer {
+        };
+        let Kind::Transfer {
             flow,
             delay,
             falls,
             compare,
-        } => (flow, delay, falls, compare),
-    };
-    let mut len = len;
-    let mut note = compare.unwrap_or(Note::None);
-    if delay {
-        // A transfer may not sit in a delay slot; one with no slot after it
-        // is cut short.
-        let at = usize::try_from(len).unwrap_or(usize::MAX);
-        cx.addr = addr.wrapping_add(u64::from(len)) & 0xffff_ffff;
-        let slot = bytes.get(at..).and_then(|slot| cx.parse(slot));
-        let Some((slot_len, Kind::Op(Some(slot_note)))) = slot else {
-            *cx.state = State::default();
-            return Insn::new(2, Flow::Invalid);
+        } = kind
+        else {
+            let mut insn = kind.insn(len);
+            // nop_s, nop (mov 0, 0)
+            insn.pad = matches!(half(bytes, 0), Some(0x78e0))
+                || (len == 4 && word(bytes, 0) == Some(0x264a_7000));
+            return insn;
         };
-        len += slot_len;
+        let mut insn = Insn::new(len, flow);
+        insn.note = compare.unwrap_or(Note::None);
+        insn.falls = falls;
+        if !delay {
+            return insn;
+        }
+        cx.addr = addr.wrapping_add(u64::from(len)) & MASK;
+        let slot = usize::try_from(len)
+            .ok()
+            .and_then(|at| bytes.get(at..))
+            .and_then(|slot| cx.parse(slot))
+            .map(|(len, kind)| kind.insn(len));
+        let mut insn = insn.with_slot(slot);
         // The slot's note, unless it leaves the compared register alone:
         // `brhs.d r1, 7, default; ld r4, [r5, -4]` still bounds `r1`.
-        note = match compare {
-            Some(compare @ Note::Compare { reg, .. })
-                if slot_note.writes() >> reg & 1 == 0
-                    && !matches!(
-                        slot_note,
-                        Note::Address { .. }
-                            | Note::Fetch {
-                                mem: Mem { base: None, .. },
-                                ..
-                            }
-                    ) =>
-            {
-                compare
-            }
-            _ => slot_note,
-        };
+        if let Some(compare @ Note::Compare { reg, .. }) = compare
+            && insn.flow != Flow::Invalid
+            && insn.note.writes() >> reg & 1 == 0
+            && !matches!(
+                insn.note,
+                Note::Address { .. }
+                    | Note::Fetch {
+                        mem: Mem { base: None, .. },
+                        ..
+                    }
+            )
+        {
+            insn.note = compare;
+        }
+        insn
     }
-    let state = cx.state;
-    match flow {
-        Flow::Next | Flow::Branch(_) => {}
-        Flow::Call(_) | Flow::CallIndirect | Flow::CallRegister(_) | Flow::CallSlot(_) => {
-            state.loaded = None;
-            state.entry = None;
-            state.displaced = None;
-            for (reg, value) in state.regs.iter_mut().enumerate() {
-                if VOLATILE >> reg & 1 != 0 {
-                    *value = None;
+
+    fn reset(&mut self) {
+        self.state = State::default();
+    }
+
+    fn call(&mut self) {
+        let state = &mut self.state;
+        state.loaded = None;
+        state.entry = None;
+        state.displaced = None;
+        state.regs.forget(VOLATILE);
+    }
+
+    /// Whether `bytes` begin a frame: the link register pushed (`push_s
+    /// blink`, `st.a blink, [sp, -n]`), the stack pointer lowered (`sub_s
+    /// sp, sp, u7`, `sub sp, sp, n`, `st.a rN, [sp, -n]`) or ARCv2's
+    /// `enter_s` among the first three instructions.
+    fn starts_frame(&self, bytes: &[u8]) -> bool {
+        let v2 = self.v2;
+        let mut state = State::default();
+        let mut at = 0_usize;
+        for _ in 0..3 {
+            let Some(rest) = bytes.get(at..) else {
+                return false;
+            };
+            let Some(first) = half(rest, 0) else {
+                return false;
+            };
+            let major = first >> 11;
+            let wide = if v2 { major < 8 } else { major < 12 };
+            if wide {
+                let Some(word) = word(rest, 0) else {
+                    return false;
+                };
+                let b = (word >> 24) & 7 | ((word >> 12) & 7) << 3;
+                // st.a c, [sp, -n]
+                if word >> 27 == 3 && b == SP && (word >> 3) & 3 == 1 && word & 0x8000 != 0 {
+                    return true;
                 }
+                // sub sp, sp, u6 / s12
+                if word >> 27 == 4
+                    && (word >> 16) & 0x3f == 0x02
+                    && b == SP
+                    && matches!((word >> 22) & 3, 1 | 2)
+                    && ((word >> 22) & 3 == 2 || word & 0x3f == SP)
+                {
+                    return true;
+                }
+            } else if first == 0xc0f1
+                || first & 0xffe0 == 0xc1a0
+                || (v2 && first & 0xfce1 == 0xc0e0)
+            {
+                return true;
+            }
+            let mut cx = Cx {
+                state: &mut state,
+                addr: 0,
+                v2,
+            };
+            match cx.parse(rest) {
+                Some((len, Kind::Op(Some(_)))) => {
+                    at = at.saturating_add(usize::try_from(len).unwrap_or(usize::MAX));
+                }
+                _ => return false,
             }
         }
-        _ if falls => {}
-        _ => *state = State::default(),
+        false
     }
-    let mut insn = Insn::new(len, flow);
-    insn.note = note;
-    insn.falls = falls;
-    insn
+
+    /// The entries into GCC's millicode epilogue (`__ld_r13_to_rN_ret`),
+    /// which functions built with `-mmillicode` jump to rather than call:
+    /// each is a function's start.
+    fn entry_of(&self, bytes: &[u8], addr: u64) -> Option<u64> {
+        millicode(bytes).then_some(addr)
+    }
 }
 
 struct Cx<'a> {
@@ -205,13 +307,18 @@ impl Cx<'_> {
         self.addr & 0xffff_fffc
     }
 
+    /// `pcl` plus `offset`.
+    fn relative(&self, offset: i64) -> u64 {
+        self.pcl().wrapping_add_signed(offset) & MASK
+    }
+
     /// The value of register `reg`, reading `limm` from `limm`, and whether
     /// it was built like an address.
     fn value(&self, reg: u32, limm: Option<u32>) -> Option<(u64, bool)> {
         match reg {
             LIMM => limm.map(|limm| (u64::from(limm), true)),
             PCL => Some((self.pcl(), true)),
-            _ => self.state.regs.get(reg as usize).copied().flatten(),
+            _ => self.state.regs.get(reg),
         }
     }
 
@@ -223,9 +330,9 @@ impl Cx<'_> {
     }
 
     fn set(&mut self, reg: u32, value: Option<(u64, bool)>) {
-        if let Some(slot) = self.state.regs.get_mut(reg as usize) {
-            *slot = value.map(|(value, addr)| (value & 0xffff_ffff, addr));
-        }
+        self.state
+            .regs
+            .set(reg, value.map(|(value, addr)| (value & MASK, addr)));
     }
 
     /// `reg` changes some way not modelled.
@@ -250,12 +357,12 @@ impl Cx<'_> {
         if reg >= 32 {
             return self.clobber(reg);
         }
-        let value = value & 0xffff_ffff;
+        let value = value & MASK;
         self.set(reg, Some((value, addr)));
         if addr {
             Note::Address { reg, addr: value }
         } else {
-            Note::Pc { reg, addr: value }
+            Note::Value { reg, value }
         }
     }
 
@@ -269,8 +376,7 @@ impl Cx<'_> {
         if src >= 32 {
             return self.clobber(reg);
         }
-        let value = self.value(src, limm);
-        self.set(reg, value);
+        self.set(reg, None);
         if reg == src {
             return Note::None;
         }
@@ -295,23 +401,19 @@ impl Cx<'_> {
         let major = first >> 11;
         let wide = if self.v2 { major < 8 } else { major < 12 };
         if wide {
-            let word = word_at(bytes, 0)?;
-            let limm_at = |uses: bool| -> Option<Option<u32>> {
-                if uses {
-                    word_at(bytes, 4).map(Some)
-                } else {
-                    Some(None)
-                }
-            };
+            let word = word(bytes, 0)?;
             let uses = self.uses_limm(word);
-            let limm = limm_at(uses)?;
+            let limm = if uses {
+                Some(self::word(bytes, 4)?)
+            } else {
+                None
+            };
             let len = if uses { 8 } else { 4 };
-            let kind = self.wide(word, limm, len);
-            Some((len, kind))
+            Some((len, self.wide(word, limm, len)))
         } else {
             let (uses, len) = self.short_limm(first);
-            let limm = if uses { Some(word_at(bytes, 2)?) } else { None };
-            Some((len, self.narrow(first, limm, len)))
+            let limm = if uses { Some(word(bytes, 2)?) } else { None };
+            Some((len, self.narrow(first, limm)))
         }
     }
 
@@ -376,14 +478,12 @@ impl Cx<'_> {
         let c = (word >> 6) & 0x3f;
         let a = word & 0x3f;
         let delay = word & 0x20 != 0;
-        let pcl = self.pcl();
-        let relative = |offset: i64| pcl.wrapping_add_signed(offset) & 0xffff_ffff;
         match major {
             // Bcc s21; B s25
             0 => {
                 let low = ((word >> 17) & 0x3ff) << 1 | ((word >> 6) & 0x3ff) << 11;
                 if word & 0x1_0000 == 0 {
-                    let to = relative(sign(low, 21));
+                    let to = self.relative(sext(low, 21));
                     let cond = word & 0x1f;
                     let flow = if cond == 0 {
                         Flow::Jump(to)
@@ -395,7 +495,7 @@ impl Cx<'_> {
                     if word & 0x10 != 0 {
                         return Kind::Op(None);
                     }
-                    let to = relative(sign(low | (word & 0xf) << 21, 25));
+                    let to = self.relative(sext(low | (word & 0xf) << 21, 25));
                     transfer(Flow::Jump(to), delay)
                 }
             }
@@ -403,12 +503,12 @@ impl Cx<'_> {
                 // BLcc s21; BL s25
                 let low = ((word >> 18) & 0x1ff) << 2 | ((word >> 6) & 0x3ff) << 11;
                 let to = if word & 0x2_0000 == 0 {
-                    relative(sign(low, 21))
+                    self.relative(sext(low, 21))
                 } else {
                     if word & 0x10 != 0 {
                         return Kind::Op(None);
                     }
-                    relative(sign(low | (word & 0xf) << 21, 25))
+                    self.relative(sext(low | (word & 0xf) << 21, 25))
                 };
                 transfer(Flow::Call(to), delay)
             }
@@ -418,7 +518,7 @@ impl Cx<'_> {
                 // is not read.
                 let sub = word & 7;
                 let offset = ((word >> 17) & 0x7f) << 1 | ((word >> 15) & 1) << 8;
-                let to = relative(sign(offset, 9));
+                let to = self.relative(sext(offset, 9));
                 let src = if word & 0x10 == 0 {
                     Src::Reg(c)
                 } else {
@@ -438,7 +538,7 @@ impl Cx<'_> {
             }
             // LD a, [b, s9]
             2 => {
-                let s9 = sign(((word >> 15) & 1) << 8 | ((word >> 16) & 0xff), 9);
+                let s9 = sext(((word >> 15) & 1) << 8 | ((word >> 16) & 0xff), 9);
                 let aa = (word >> 9) & 3;
                 let zz = (word >> 7) & 3;
                 let signed = word & 0x40 != 0;
@@ -451,16 +551,13 @@ impl Cx<'_> {
                     3 => s9 << zz_size(zz).trailing_zeros().min(2),
                     _ => s9,
                 };
-                Kind::Op(Some(self.load(
-                    a,
-                    b,
-                    Src::Imm(disp.cast_unsigned()),
-                    1,
+                let access = Access {
                     aa,
                     size,
                     signed,
-                    limm,
-                )))
+                    ..Access::word(a, b, Src::Imm(disp.cast_unsigned()))
+                };
+                Kind::Op(Some(self.load(access, limm)))
             }
             // ST c, [b, s9]
             3 => {
@@ -498,17 +595,35 @@ impl Cx<'_> {
         let b = (word >> 24) & 7 | ((word >> 12) & 7) << 3;
         let c = (word >> 6) & 0x3f;
         let a = word & 0x3f;
-        let valid: u64 = match (major, self.v2) {
-            (4, false) => 0x00ff_8f0f_3fff_ffff,
-            (4, true) => 0xffff_bfff_ffff_ffff,
-            (5, false) => 0x03ff_93c0_0017_7dcf,
-            (5, true) => u64::MAX,
-            (6, false) => 0x0000_87ff_03ff_ff07,
-            (6, true) => 0x03ff_bfff_ffff_ffff,
-            (7, true) => 0x0000_8007_0000_0000,
-            _ => 0,
+        // The sub-opcodes each major opcode defines; 0x2f is the
+        // single-operand group throughout.
+        let valid = match (major, self.v2) {
+            // ADD to MPYU (0x00-0x1d), J and JL (0x20-0x23), LP, FLAG, LR,
+            // SR (0x28-0x2b), and LD a, [b, c] (0x30-0x37).
+            (4, false) => matches!(sub, 0x00..=0x1d | 0x20..=0x23 | 0x28..=0x2b | 0x2f..=0x37),
+            // ARCv2 fills the rest but 0x2e (BI, BIH, LDI, AEX, ...).
+            (4, true) => sub != 0x2e,
+            // The extension set: shifts, rotates and the saturating ops
+            // (ASL to ROR, ADDS, SUBS, DIVAW, ASLS, ASRS, ...), and DSP.
+            (5, false) => matches!(
+                sub,
+                0x00..=0x03
+                    | 0x06..=0x08
+                    | 0x0a..=0x0e
+                    | 0x10..=0x12
+                    | 0x14
+                    | 0x26..=0x29
+                    | 0x2c
+                    | 0x2f..=0x39
+            ),
+            (5, true) => true,
+            // Extension ALU operations.
+            (6, false) => matches!(sub, 0x00..=0x02 | 0x08..=0x19 | 0x20..=0x2a | 0x2f),
+            (6, true) => matches!(sub, 0x00..=0x2d | 0x2f..=0x39),
+            (7, true) => matches!(sub, 0x20..=0x22 | 0x2f),
+            _ => false,
         };
-        if valid >> sub & 1 == 0 {
+        if !valid {
             return Kind::Op(None);
         }
         // LD a, [b, c]: the addressing mode sits where `p` is.
@@ -520,24 +635,21 @@ impl Cx<'_> {
             }
             let size = zz_size(zz);
             let scale = if aa == 3 { zz_size(zz) } else { 1 };
-            let signed = word & 0x1_0000 != 0;
-            return Kind::Op(Some(self.load(
-                a,
-                b,
-                Src::Reg(c),
+            let access = Access {
                 scale,
                 aa,
                 size,
-                signed,
-                limm,
-            )));
+                signed: word & 0x1_0000 != 0,
+                ..Access::word(a, b, Src::Reg(c))
+            };
+            return Kind::Op(Some(self.load(access, limm)));
         }
         let (dest, src, cond) = match p {
             0 => (a, Src::Reg(c), 0),
             1 => (a, Src::Imm(u64::from(c)), 0),
             2 => (
                 b,
-                Src::Imm(sign(c | (word & 0x3f) << 6, 12).cast_unsigned() & 0xffff_ffff),
+                Src::Imm(sext(c | (word & 0x3f) << 6, 12).cast_unsigned() & MASK),
                 0,
             ),
             _ => (
@@ -576,7 +688,7 @@ impl Cx<'_> {
                     let Src::Reg(reg) = src else {
                         return Kind::Op(None);
                     };
-                    let next = self.addr.wrapping_add(u64::from(len)) & 0xffff_ffff;
+                    let next = self.addr.wrapping_add(u64::from(len)) & MASK;
                     return Kind::Transfer {
                         flow: Flow::JumpTable {
                             mem: Mem {
@@ -597,11 +709,10 @@ impl Cx<'_> {
                 // LP: a zero-overhead loop, ending at its target.
                 0x28 => {
                     let offset = match (p, src) {
-                        (2, Src::Imm(imm)) => imm.cast_signed() << 1,
-                        (3, Src::Imm(imm)) => imm.cast_signed() << 1,
+                        (2 | 3, Src::Imm(imm)) => imm.cast_signed() << 1,
                         _ => return Kind::Op(None),
                     };
-                    let to = self.pcl().wrapping_add_signed(offset) & 0xffff_ffff;
+                    let to = self.relative(offset);
                     return Kind::Transfer {
                         flow: Flow::Branch(to),
                         delay: false,
@@ -645,8 +756,8 @@ impl Cx<'_> {
             // ADD, SUB, ADD1-3, SUB1-3
             0x00 | 0x02 | 0x14..=0x19 if !conditional => {
                 let shift = match sub {
-                    0x14..=0x16 => sub - 0x13,
-                    0x17..=0x19 => sub - 0x16,
+                    0x14..=0x16 => sub.wrapping_sub(0x13),
+                    0x17..=0x19 => sub.wrapping_sub(0x16),
                     _ => 0,
                 };
                 let negate = sub == 0x02 || sub >= 0x17;
@@ -771,12 +882,12 @@ impl Cx<'_> {
                 Note::Offset {
                     reg: dest,
                     src: b,
-                    imm: y & 0xffff_ffff,
+                    imm: y & MASK,
                 }
             }
             (None, Some((y, _))) if b < 32 => {
                 let note = self.copy(dest, b, limm);
-                self.state.displaced = Some((dest, scaled(y) & 0xffff_ffff));
+                self.state.displaced = Some((dest, scaled(y) & MASK));
                 note
             }
             (Some((x, _)), None) if !negate && shift == 0 => match src {
@@ -786,11 +897,11 @@ impl Cx<'_> {
                         return Note::Offset {
                             reg: dest,
                             src: reg,
-                            imm: x & 0xffff_ffff,
+                            imm: x & MASK,
                         };
                     }
                     let note = self.copy(dest, reg, limm);
-                    self.state.displaced = Some((dest, x & 0xffff_ffff));
+                    self.state.displaced = Some((dest, x & MASK));
                     note
                 }
                 _ => self.clobber(dest),
@@ -812,20 +923,17 @@ impl Cx<'_> {
         }
     }
 
-    /// `a = [b + index * scale]`, `index` a register or a constant offset,
-    /// with addressing mode `aa` (1 and 2 write the address back to `b`).
-    #[allow(clippy::too_many_arguments)]
-    fn load(
-        &mut self,
-        a: u32,
-        b: u32,
-        index: Src,
-        scale: u8,
-        aa: u32,
-        size: u8,
-        signed: bool,
-        limm: Option<u32>,
-    ) -> Note {
+    /// The load `access`, its index a register or a constant offset.
+    fn load(&mut self, access: Access, limm: Option<u32>) -> Note {
+        let Access {
+            dest: a,
+            base: b,
+            index,
+            scale,
+            aa,
+            size,
+            signed,
+        } = access;
         if matches!(aa, 1 | 2) && b < 32 {
             return self.clobber2(a, b);
         }
@@ -846,7 +954,7 @@ impl Cx<'_> {
                         base: None,
                         index: Some(reg),
                         scale,
-                        disp: disp & 0xffff_ffff,
+                        disp: disp & MASK,
                     },
                     size,
                     signed,
@@ -865,7 +973,7 @@ impl Cx<'_> {
                         base: None,
                         index: Some(b),
                         scale: 1,
-                        disp: folded(b).unwrap_or(0).wrapping_add(offset) & 0xffff_ffff,
+                        disp: folded(b).unwrap_or(0).wrapping_add(offset) & MASK,
                     },
                     size,
                     signed,
@@ -888,7 +996,7 @@ impl Cx<'_> {
         }
         match (base, offset) {
             (Some((base, _)), Some(offset)) => {
-                let slot = base.wrapping_add(offset) & 0xffff_ffff;
+                let slot = base.wrapping_add(offset) & MASK;
                 self.state.loaded = Some((a, slot));
                 Note::Fetch {
                     reg: a,
@@ -908,7 +1016,7 @@ impl Cx<'_> {
                     base: Some(b),
                     index: None,
                     scale: 1,
-                    disp: offset & 0xffff_ffff,
+                    disp: offset & MASK,
                 },
                 size,
                 signed: false,
@@ -919,16 +1027,13 @@ impl Cx<'_> {
 
     /// A 16-bit instruction.
     #[allow(clippy::too_many_lines)]
-    fn narrow(&mut self, half: u32, limm: Option<u32>, len: u32) -> Kind {
+    fn narrow(&mut self, half: u32, limm: Option<u32>) -> Kind {
         let major = half >> 11;
         let b = short(half >> 8);
         let c = short(half >> 5);
         let a = short(half);
-        let pcl = self.pcl();
-        let relative = |offset: i64| pcl.wrapping_add_signed(offset) & 0xffff_ffff;
         let op = |note: Note| Kind::Op(Some(note));
         let branch = |flow: Flow| transfer(flow, false);
-        let _ = len;
         match major {
             // ARCv2: mov_s g, h; ld_s r0-r3, [h, u5]
             0x08 => {
@@ -943,17 +1048,22 @@ impl Cx<'_> {
                 } else {
                     let dest = (half >> 8) & 3;
                     let u5 = (((half >> 3) & 3) | ((half >> 10) & 1) << 2) << 2;
-                    op(self.load(dest, h, Src::Imm(u64::from(u5)), 1, 0, 4, false, limm))
+                    op(self.load(Access::word(dest, h, Src::Imm(u64::from(u5))), limm))
                 }
             }
             // ARCv2: ld_s.as a, [b, c]; sub_s a, b, c; add_s r0/r1, b, u6
             0x09 => {
                 if half & 8 != 0 {
                     let dest = (half >> 7) & 1;
-                    let u6 = ((half & 7) | ((half >> 4) & 7) << 3) as u64;
+                    let u6 = u64::from((half & 7) | ((half >> 4) & 7) << 3);
                     op(self.add(dest, b, Src::Imm(u6), 0, false, None))
                 } else if half & 0x10 == 0 {
-                    op(self.load(a, b, Src::Reg(c), 4, 3, 4, false, None))
+                    let access = Access {
+                        scale: 4,
+                        aa: 3,
+                        ..Access::word(a, b, Src::Reg(c))
+                    };
+                    op(self.load(access, None))
                 } else {
                     op(self.clobber(a))
                 }
@@ -985,7 +1095,13 @@ impl Cx<'_> {
                         1 => 1,
                         _ => 2,
                     };
-                    op(self.load(a, b, Src::Reg(c), 1, 0, size, false, None))
+                    op(self.load(
+                        Access {
+                            size,
+                            ..Access::word(a, b, Src::Reg(c))
+                        },
+                        None,
+                    ))
                 }
             },
             // add_s c, b, u3; sub_s; asl_s; asr_s
@@ -1042,8 +1158,13 @@ impl Cx<'_> {
                     0x12 => (2, false),
                     _ => (2, true),
                 };
-                let u5 = u64::from(half & 0x1f) * u64::from(size);
-                op(self.load(c, b, Src::Imm(u5), 1, 0, size, signed, None))
+                let u5 = u64::from(half & 0x1f).wrapping_mul(u64::from(size));
+                let access = Access {
+                    size,
+                    signed,
+                    ..Access::word(c, b, Src::Imm(u5))
+                };
+                op(self.load(access, None))
             }
             // st_s, stb_s, stw_s
             0x14..=0x16 => op(Note::None),
@@ -1058,10 +1179,9 @@ impl Cx<'_> {
             0x18 => {
                 let u5 = half & 0x1f;
                 match (half >> 5) & 7 {
-                    0 => op(self.load(b, SP, Src::Imm(u64::from(u5 * 4)), 1, 0, 4, false, None)),
-                    1 => op(self.clobber(b)),
+                    0 => op(self.load(Access::word(b, SP, Src::Imm(u64::from(u5) << 2)), None)),
+                    1 | 4 => op(self.clobber(b)),
                     2 | 3 => op(Note::None),
-                    4 => op(self.clobber(b)),
                     // add_s, sub_s sp, sp, u7
                     5 => match (half >> 8) & 7 {
                         0 | 1 => op(self.clobber(SP)),
@@ -1092,8 +1212,8 @@ impl Cx<'_> {
             0x19 => op(self.clobber(0)),
             // ld_s b, [pcl, u10]
             0x1a => {
-                let u10 = u64::from(half & 0xff) * 4;
-                op(self.load(b, PCL, Src::Imm(u10), 1, 0, 4, false, None))
+                let u10 = u64::from(half & 0xff) << 2;
+                op(self.load(Access::word(b, PCL, Src::Imm(u10)), None))
             }
             // mov_s b, u8
             0x1b => op(self.constant(b, u64::from(half & 0xff), false)),
@@ -1111,15 +1231,15 @@ impl Cx<'_> {
                 }
             }
             // breq_s, brne_s b, 0, s8
-            0x1d => branch(Flow::Branch(relative(sign((half & 0x7f) << 1, 8)))),
+            0x1d => branch(Flow::Branch(self.relative(sext((half & 0x7f) << 1, 8)))),
             // b_s, beq_s, bne_s s10; bcc_s s7
             0x1e => match (half >> 9) & 3 {
-                0 => branch(Flow::Jump(relative(sign((half & 0x1ff) << 1, 10)))),
-                1 | 2 => branch(Flow::Branch(relative(sign((half & 0x1ff) << 1, 10)))),
-                _ => branch(Flow::Branch(relative(sign((half & 0x3f) << 1, 7)))),
+                0 => branch(Flow::Jump(self.relative(sext((half & 0x1ff) << 1, 10)))),
+                1 | 2 => branch(Flow::Branch(self.relative(sext((half & 0x1ff) << 1, 10)))),
+                _ => branch(Flow::Branch(self.relative(sext((half & 0x3f) << 1, 7)))),
             },
             // bl_s s13
-            _ => branch(Flow::Call(relative(sign((half & 0x7ff) << 2, 13)))),
+            _ => branch(Flow::Call(self.relative(sext((half & 0x7ff) << 2, 13)))),
         }
     }
 
@@ -1168,7 +1288,9 @@ impl Cx<'_> {
             // tst_s
             0x0b => op(Note::None),
             // add1_s, add2_s, add3_s
-            sub @ 0x14..=0x16 => op(self.add(b, b, Src::Reg(c), sub - 0x13, false, None)),
+            sub @ 0x14..=0x16 => {
+                op(self.add(b, b, Src::Reg(c), sub.wrapping_sub(0x13), false, None))
+            }
             // trap_s u6: a system call, which returns.
             0x1e => op(Note::None),
             // brk_s; ARCv2's swi_s u6
@@ -1192,11 +1314,10 @@ const fn transfer(flow: Flow, delay: bool) -> Kind {
 /// (`__ld_r13_to_rN_ret`), which functions built with `-mmillicode` jump to
 /// rather than call: a run of `ld rN, [sp, 4 * (N - 13)]`, highest first,
 /// ending in `ld blink, [sp, r12]`.
-pub(crate) fn millicode(bytes: &[u8]) -> bool {
-    let mut at = 0;
+fn millicode(bytes: &[u8]) -> bool {
     let mut last = 26;
-    for _ in 0..14 {
-        let Some(word) = word_at(bytes, at) else {
+    for chunk in bytes.chunks(4).take(14) {
+        let Some(word) = word(chunk, 0) else {
             return false;
         };
         // ld blink, [sp, r12]
@@ -1210,61 +1331,10 @@ pub(crate) fn millicode(bytes: &[u8]) -> bool {
         if word >> 27 != 2 || b != SP || word & 0x7c0 != 0 || !(13..last).contains(&a) {
             return false;
         }
-        if s9 != 4 * (a - 13) {
+        if s9 != a.wrapping_sub(13) << 2 {
             return false;
         }
         last = a;
-        at += 4;
-    }
-    false
-}
-
-/// Whether `bytes` begin a frame: the link register pushed (`push_s
-/// blink`, `st.a blink, [sp, -n]`), the stack pointer lowered (`sub_s sp,
-/// sp, u7`, `sub sp, sp, n`, `st.a rN, [sp, -n]`) or ARCv2's `enter_s`
-/// among the first three instructions.
-pub(crate) fn starts_frame(bytes: &[u8], v2: bool) -> bool {
-    let mut state = State::default();
-    let mut at = 0usize;
-    for _ in 0..3 {
-        let Some(rest) = bytes.get(at..) else {
-            return false;
-        };
-        let Some(first) = half(rest, 0) else {
-            return false;
-        };
-        let major = first >> 11;
-        let wide = if v2 { major < 8 } else { major < 12 };
-        if wide {
-            let Some(word) = word_at(rest, 0) else {
-                return false;
-            };
-            let b = (word >> 24) & 7 | ((word >> 12) & 7) << 3;
-            // st.a c, [sp, -n]
-            if word >> 27 == 3 && b == SP && (word >> 3) & 3 == 1 && word & 0x8000 != 0 {
-                return true;
-            }
-            // sub sp, sp, u6 / s12
-            if word >> 27 == 4
-                && (word >> 16) & 0x3f == 0x02
-                && b == SP
-                && matches!((word >> 22) & 3, 1 | 2)
-                && ((word >> 22) & 3 == 2 || word & 0x3f == SP)
-            {
-                return true;
-            }
-        } else if first == 0xc0f1 || first & 0xffe0 == 0xc1a0 || (v2 && first & 0xfce1 == 0xc0e0) {
-            return true;
-        }
-        let mut cx = Cx {
-            state: &mut state,
-            addr: 0,
-            v2,
-        };
-        match cx.parse(rest) {
-            Some((len, Kind::Op(Some(_)))) => at += len as usize,
-            _ => return false,
-        }
     }
     false
 }
@@ -1281,11 +1351,11 @@ mod tests {
 
     fn run(halves: &[u16], addr: u64, v2: bool) -> Vec<(u64, Insn)> {
         let code = code(halves);
-        let mut state = State::default();
+        let mut decoder = Decoder::new(v2);
         let mut at = 0;
         let mut insns = Vec::new();
         while at < code.len() {
-            let insn = decode(&mut state, &code[at..], addr + at as u64, v2);
+            let insn = decoder.advance(&code[at..], addr + at as u64);
             insns.push((addr + at as u64, insn));
             at += insn.len as usize;
         }
@@ -1299,7 +1369,8 @@ mod tests {
             .collect()
     }
 
-    /// From rizin's disassembly of a bot's `.text`.
+    /// Calls, branches and returns, with and without delay slots: a
+    /// call's slot and a return's are part of them.
     #[test]
     fn transfers() {
         assert_eq!(
@@ -1342,7 +1413,7 @@ mod tests {
                 addr: 0x10160
             }
         );
-        assert_eq!(insns[1].1.note, Note::Pc { reg: 2, addr: 0 });
+        assert_eq!(insns[1].1.note, Note::Value { reg: 2, value: 0 });
     }
 
     /// `cmp r0, 240; bhi default; add_s r0, r0, 4; ldw.as r0, [pcl, r0];
@@ -1514,10 +1585,34 @@ mod tests {
 
     #[test]
     fn frames() {
+        let decoder = Decoder::new(false);
         // push_s blink
-        assert!(starts_frame(&code(&[0xc0f1]), false));
+        assert!(decoder.starts_frame(&code(&[0xc0f1])));
         // mov_s r2, 0; st.a r13, [sp, -48]
-        assert!(starts_frame(&code(&[0xda00, 0x1cd0, 0xb348]), false));
-        assert!(!starts_frame(&code(&[0xda00, 0x7fe0]), false));
+        assert!(decoder.starts_frame(&code(&[0xda00, 0x1cd0, 0xb348])));
+        assert!(!decoder.starts_frame(&code(&[0xda00, 0x7fe0])));
+    }
+
+    /// A delay slot that is itself a transfer, or is missing, makes the
+    /// pair invalid.
+    #[test]
+    fn slots_hold_no_transfers() {
+        // j_s.d [blink]; j_s [r0]
+        let insns = run(&[0x7fe0, 0x7800], 0x1000, false);
+        assert_eq!(insns[0].1.flow, Flow::Invalid);
+        // j_s.d [blink], at the end of the bytes.
+        assert_eq!(run(&[0x7fe0], 0x1000, false)[0].1.flow, Flow::Invalid);
+    }
+
+    /// The entries into the millicode epilogue start functions.
+    #[test]
+    fn millicode_entries() {
+        let decoder = Decoder::new(false);
+        // ld r14, [sp, 4]; ld r13, [sp, 0]; ld blink, [sp, r12]
+        let entry = code(&[0x1404, 0x300e, 0x1400, 0x300d, 0x2430, 0x331f]);
+        assert_eq!(decoder.entry_of(&entry, 0x2000), Some(0x2000));
+        // Out of order.
+        let entry = code(&[0x1400, 0x300d, 0x1404, 0x300e, 0x2430, 0x331f]);
+        assert_eq!(decoder.entry_of(&entry, 0x2000), None);
     }
 }

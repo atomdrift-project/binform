@@ -9,7 +9,7 @@
 //! through. The decoder also follows the address arithmetic of a PLT stub
 //! (`add ip, pc, #n; add ip, ip, #n; ldr pc, [ip, #n]!`) to its slot.
 
-use crate::isa::{Flow, Insn, Mem, Note};
+use crate::isa::{Flow, Insn, Mem, Note, Regs, sext, u16_at, u32_at};
 
 /// The link register.
 const LR: u32 = 14;
@@ -35,14 +35,12 @@ pub(crate) struct State {
     /// import slots need: MSVC loads a slot's address from a literal pool,
     /// the pointer from the slot, and calls it (`ldr r4, [pc, #n]; ldr r4,
     /// [r4]; blx r4`).
-    regs: [Held; 16],
+    regs: Regs<Held, 16>,
 }
 
-/// What a register holds.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+/// What a register holds, when known.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Held {
-    #[default]
-    Unknown,
     /// A fixed address.
     Address(u32),
     /// The word stored at a fixed address: a slot's pointer.
@@ -60,7 +58,7 @@ enum Writes {
 }
 
 /// The registers a call may change: r0-r3, ip, lr.
-const CALLER_SAVED: u32 = 0x500f;
+const CALLER_SAVED: u64 = 0x500f;
 
 pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
     if addr & 1 != 0 {
@@ -75,12 +73,7 @@ pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
 pub(crate) fn starts_frame(thumb: bool, bytes: &[u8]) -> bool {
     if thumb {
         // push {..., lr}; push.w {..., lr}
-        let half = |i: usize| {
-            bytes
-                .get(i..i + 2)
-                .and_then(|h| h.try_into().ok())
-                .map(u16::from_le_bytes)
-        };
+        let half = |at: usize| u16_at(bytes, at, false);
         match half(0) {
             Some(first) if first & 0xff00 == 0xb500 => true,
             Some(0xe92d) => half(2).is_some_and(|second| second & 0x4000 != 0),
@@ -88,19 +81,8 @@ pub(crate) fn starts_frame(thumb: bool, bytes: &[u8]) -> bool {
         }
     } else {
         // stmdb sp!, {..., lr}
-        word(bytes).is_some_and(|word| word & 0xffff_4000 == 0xe92d_4000)
+        u32_at(bytes, 0, false).is_some_and(|word| word & 0xffff_4000 == 0xe92d_4000)
     }
-}
-
-fn word(bytes: &[u8]) -> Option<u32> {
-    Some(u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?))
-}
-
-/// Sign-extend the low `bits` bits of `value`.
-fn signed(value: u32, bits: u32) -> i64 {
-    let field = i64::from(value) & ((1 << bits) - 1);
-    let sign = 1_i64 << (bits - 1);
-    (field ^ sign) - sign
 }
 
 /// Keep an address to 32 bits.
@@ -153,7 +135,7 @@ fn thumb_immediate(imm12: u32) -> u32 {
 }
 
 fn a32(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
-    let Some(word) = word(bytes) else {
+    let Some(word) = u32_at(bytes, 0, false) else {
         return Insn::new(4, Flow::Invalid);
     };
     let pc = addr.wrapping_add(8);
@@ -162,13 +144,13 @@ fn a32(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
     let rd = (word >> 12) & 0xf;
     let rn = (word >> 16) & 0xf;
     let load = word & 0x0010_0000 != 0;
-    let branch = || wrap(pc.wrapping_add_signed(signed(word, 24) * 4));
-    let rotated = || (word & 0xff).rotate_right(((word >> 8) & 0xf) * 2);
+    let branch = || wrap(pc.wrapping_add_signed(sext(word, 24) << 2));
+    let rotated = || (word & 0xff).rotate_right(((word >> 8) & 0xf) << 1);
     let linked = std::mem::replace(&mut state.linked, word & 0x0fff_ffff == 0x01a0_e00f);
     let flow = if cond == 0xf {
         // BLX (immediate): to Thumb, at a halfword the H bit picks.
         if (word >> 25) & 7 == 5 {
-            let half = u64::from((word >> 24) & 1) * 2;
+            let half = u64::from((word >> 24) & 1) << 1;
             Flow::Call(wrap(branch().wrapping_add(half)) | 1)
         } else {
             Flow::Next
@@ -313,12 +295,7 @@ fn a32(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
 
 /// The Thumb instruction at `addr` (even; Thumb addresses out are odd).
 fn thumb(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
-    let half = |i: usize| {
-        bytes
-            .get(i..i + 2)
-            .and_then(|h| h.try_into().ok())
-            .map(u16::from_le_bytes)
-    };
+    let half = |at: usize| u16_at(bytes, at, false);
     let Some(first) = half(0) else {
         return Insn::new(2, Flow::Invalid);
     };
@@ -332,7 +309,7 @@ fn thumb(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
         };
         let (first, second) = (u32::from(first), u32::from(second));
         let flow = through_slot(state, t32(first, second, pc, conditional, state.ip), None);
-        track_t32(state, bytes, addr, first, second, flow);
+        track_t32(state, bytes, addr, first, second);
         // MOVW, MOVT into ip: the address a Windows import thunk jumps
         // through (`movw ip, #lo; movt ip, #hi; ldr.w pc, [ip]`).
         let imm16 =
@@ -359,11 +336,11 @@ fn thumb(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
             0xe => Flow::Stop,
             // SVC
             0xf => Flow::Next,
-            _ => Flow::Branch(to(signed(word, 8) * 2)),
+            _ => Flow::Branch(to(sext(word, 8) << 1)),
         }
     } else if word & 0xf800 == 0xe000 {
         // B: conditional when last in an `it` block.
-        let target = to(signed(word, 11) * 2);
+        let target = to(sext(word, 11) << 1);
         if conditional {
             Flow::Branch(target)
         } else {
@@ -390,7 +367,7 @@ fn thumb(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
     } else if word & 0xf500 == 0xb100 {
         // CBZ, CBNZ
         let offset = (word >> 3) & 0x1f | (word >> 4) & 0x20;
-        Flow::Branch(to(i64::from(offset) * 2))
+        Flow::Branch(to(i64::from(offset) << 1))
     } else if word & 0xff00 == 0xbe00 {
         // BKPT
         Flow::Stop
@@ -398,7 +375,7 @@ fn thumb(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
         // IT: the next instructions, up to four, by the mask's lowest set
         // bit. Under the "always" condition they run unconditionally.
         let mask = word & 0xf;
-        let count = 4 - mask.trailing_zeros();
+        let count = 4_u32.saturating_sub(mask.trailing_zeros());
         state.it = if (word >> 4) & 0xf == 0xe {
             0
         } else {
@@ -409,7 +386,7 @@ fn thumb(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
         Flow::Next
     };
     let flow = through_slot(state, flow, Some(word));
-    track_t16(state, bytes, addr, word, flow);
+    track_t16(state, bytes, addr, word);
     let mut decoded = insn(2, flow, conditional);
     // NOP and the other hints, `mov r8, r8`
     decoded.pad = word == 0xbf00 || word == 0x46c0;
@@ -430,11 +407,11 @@ fn through_slot(state: &State, flow: Flow, word: Option<u32>) -> Flow {
         return flow;
     };
     let rm = (word >> 3) & 0xf;
-    match (flow, state.regs.get(rm as usize)) {
-        (Flow::CallIndirect, Some(&Held::Loaded(slot))) if word & 0xff87 == 0x4780 => {
+    match (flow, state.regs.get(rm)) {
+        (Flow::CallIndirect, Some(Held::Loaded(slot))) if word & 0xff87 == 0x4780 => {
             Flow::CallSlot(u64::from(slot))
         }
-        (Flow::JumpRegister(_), Some(&Held::Loaded(slot))) => Flow::JumpSlot(u64::from(slot)),
+        (Flow::JumpRegister(_), Some(Held::Loaded(slot))) => Flow::JumpSlot(u64::from(slot)),
         _ => flow,
     }
 }
@@ -442,51 +419,44 @@ fn through_slot(state: &State, flow: Flow, word: Option<u32>) -> Flow {
 /// The little-endian word at `at` in `bytes`, which start at `addr`.
 fn literal(bytes: &[u8], addr: u64, at: u64) -> Option<u32> {
     let offset = usize::try_from(at.checked_sub(addr)?).ok()?;
-    word(bytes.get(offset..)?)
+    u32_at(bytes, offset, false)
 }
 
 /// Apply `writes` to the registers.
 fn forget(state: &mut State, writes: Writes) {
-    let mask = match writes {
-        Writes::None => return,
-        Writes::Regs(mask) => mask,
-        Writes::All => u32::MAX,
-    };
-    for (i, held) in state.regs.iter_mut().enumerate() {
-        if mask >> i & 1 != 0 {
-            *held = Held::Unknown;
-        }
-    }
+    state.regs.forget(match writes {
+        Writes::None => 0,
+        Writes::Regs(mask) => u64::from(mask),
+        Writes::All => u64::MAX,
+    });
 }
 
-fn set(state: &mut State, reg: u32, held: Held) {
-    if let Some(slot) = state.regs.get_mut(reg as usize) {
-        *slot = held;
-    }
+fn set(state: &mut State, reg: u32, held: Option<Held>) {
+    state.regs.set(reg, held);
 }
 
 /// `held`, an address `offset` on, loaded from.
-fn load(held: Held, offset: u32) -> Held {
-    match held {
-        Held::Address(addr) => Held::Loaded(addr.wrapping_add(offset)),
-        _ => Held::Unknown,
+fn load(held: Option<Held>, offset: u32) -> Option<Held> {
+    match held? {
+        Held::Address(addr) => Some(Held::Loaded(addr.wrapping_add(offset))),
+        Held::Loaded(_) => None,
     }
 }
 
 /// What the 16-bit Thumb `word` at `addr` leaves in the registers.
-fn track_t16(state: &mut State, bytes: &[u8], addr: u64, word: u32, flow: Flow) {
+fn track_t16(state: &mut State, bytes: &[u8], addr: u64, word: u32) {
     let low = word & 7;
     let high = (word >> 8) & 7;
-    let held = |reg: u32| state.regs.get(reg as usize).copied().unwrap_or_default();
+    let held = |reg: u32| state.regs.get(reg);
     // LDR rt, [pc, #imm8 * 4]: a literal.
     if word & 0xf800 == 0x4800 {
-        let at = (addr.wrapping_add(4) & !3).wrapping_add(u64::from(word & 0xff) * 4);
-        let value = literal(bytes, addr, at).map_or(Held::Unknown, Held::Address);
+        let at = (addr.wrapping_add(4) & !3).wrapping_add(u64::from(word & 0xff) << 2);
+        let value = literal(bytes, addr, at).map(Held::Address);
         return set(state, high, value);
     }
     // LDR rt, [rn, #imm5 * 4]
     if word & 0xf800 == 0x6800 {
-        let value = load(held((word >> 3) & 7), ((word >> 6) & 0x1f) * 4);
+        let value = load(held((word >> 3) & 7), ((word >> 6) & 0x1f) << 2);
         return set(state, low, value);
     }
     // MOV rd, rm (high registers too)
@@ -532,26 +502,23 @@ fn track_t16(state: &mut State, bytes: &[u8], addr: u64, word: u32, flow: Flow) 
         _ => Writes::All,
     };
     forget(state, writes);
-    if matches!(flow, Flow::Call(_) | Flow::CallSlot(_) | Flow::CallIndirect) {
-        forget(state, Writes::Regs(CALLER_SAVED));
-    }
 }
 
 /// What the 32-bit Thumb instruction at `addr` leaves in the registers.
-fn track_t32(state: &mut State, bytes: &[u8], addr: u64, first: u32, second: u32, flow: Flow) {
+fn track_t32(state: &mut State, bytes: &[u8], addr: u64, first: u32, second: u32) {
     let rt = second >> 12;
     let rd = (second >> 8) & 0xf;
     let rn = first & 0xf;
-    let held = |reg: u32| state.regs.get(reg as usize).copied().unwrap_or_default();
+    let held = |reg: u32| state.regs.get(reg);
     let imm16 =
         (first & 0xf) << 12 | (first >> 10 & 1) << 11 | (second >> 12 & 7) << 8 | second & 0xff;
     match first & 0xfbf0 {
         // MOVW, MOVT
-        0xf240 if second & 0x8000 == 0 => return set(state, rd, Held::Address(imm16)),
+        0xf240 if second & 0x8000 == 0 => return set(state, rd, Some(Held::Address(imm16))),
         0xf2c0 if second & 0x8000 == 0 => {
             let value = match held(rd) {
-                Held::Address(low) => Held::Address(low & 0xffff | imm16 << 16),
-                _ => Held::Unknown,
+                Some(Held::Address(low)) => Some(Held::Address(low & 0xffff | imm16 << 16)),
+                _ => None,
             };
             return set(state, rd, value);
         }
@@ -566,7 +533,7 @@ fn track_t32(state: &mut State, bytes: &[u8], addr: u64, first: u32, second: u32
         } else {
             base.wrapping_sub(offset)
         };
-        let value = literal(bytes, addr, at).map_or(Held::Unknown, Held::Address);
+        let value = literal(bytes, addr, at).map(Held::Address);
         return set(state, rt, value);
     }
     // LDR.W rt, [rn, #imm12]
@@ -595,9 +562,6 @@ fn track_t32(state: &mut State, bytes: &[u8], addr: u64, first: u32, second: u32
         Writes::All
     };
     forget(state, writes);
-    if matches!(flow, Flow::Call(_) | Flow::CallSlot(_) | Flow::CallIndirect) {
-        forget(state, Writes::Regs(CALLER_SAVED));
-    }
 }
 
 /// A 32-bit Thumb instruction's flow, from its halfwords.
@@ -609,7 +573,7 @@ fn t32(first: u32, second: u32, pc: u64, conditional: bool, ip: Option<u64>) -> 
         // T4, BL, BLX: S:I1:I2:imm10:imm11:0, I = not (J xor S).
         let long = || {
             let (i1, i2) = (!(j1 ^ s) & 1, !(j2 ^ s) & 1);
-            signed(
+            sext(
                 s << 24 | i1 << 23 | i2 << 22 | (first & 0x3ff) << 12 | imm11 << 1,
                 25,
             )
@@ -626,7 +590,7 @@ fn t32(first: u32, second: u32, pc: u64, conditional: bool, ip: Option<u64>) -> 
                 let cond = (first >> 6) & 0xf;
                 if cond < 0xe {
                     // B<c>.W: S:J2:J1:imm6:imm11:0
-                    let offset = signed(
+                    let offset = sext(
                         s << 20 | j2 << 19 | j1 << 18 | (first & 0x3f) << 12 | imm11 << 1,
                         21,
                     );
@@ -689,6 +653,45 @@ fn t32(first: u32, second: u32, pc: u64, conditional: bool, ip: Option<u64>) -> 
         };
     }
     Flow::Next
+}
+
+/// The 32-bit Arm decoder, for an image whose code is mostly Thumb when
+/// `thumb`.
+#[derive(Clone, Debug)]
+pub(crate) struct Decoder {
+    thumb: bool,
+    state: State,
+}
+
+impl Decoder {
+    pub(crate) fn new(thumb: bool) -> Self {
+        Self {
+            thumb,
+            state: State::default(),
+        }
+    }
+}
+
+impl crate::isa::Decode for Decoder {
+    fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
+        decode(&mut self.state, bytes, addr)
+    }
+
+    fn reset(&mut self) {
+        self.state = State::default();
+    }
+
+    fn call(&mut self) {
+        let state = &mut self.state;
+        state.regs.forget(CALLER_SAVED);
+        state.ip = None;
+        state.ip_slot = None;
+        state.linked = false;
+    }
+
+    fn starts_frame(&self, bytes: &[u8]) -> bool {
+        starts_frame(self.thumb, bytes)
+    }
 }
 
 #[cfg(test)]
@@ -868,6 +871,26 @@ mod tests {
         // movw r3, #0x2000; ldr.w r2, [r3, #8]; bx r2
         let insns = t(&[0xf242, 0x0300, 0xf8d3, 0x2008, 0x4710], 0x1000);
         assert_eq!(insns[2].flow, Flow::JumpSlot(0x2008));
+    }
+
+    /// A call forgets what caller-saved registers held, and keeps the
+    /// rest: `ldr r4, [pc, #4]; ldr r5, [r4]; ldr r3, [r4]`, a call, then
+    /// `bx r5` and `bx r3`.
+    #[test]
+    fn calls_forget_caller_saved_registers() {
+        use crate::isa::Decode as _;
+        let code: Vec<u8> = [0x4c01_u16, 0x6825, 0x6823, 0x4770, 0x2000, 0]
+            .iter()
+            .flat_map(|half| half.to_le_bytes())
+            .collect();
+        let mut decoder = Decoder::new(true);
+        for at in [0, 2, 4] {
+            decoder.decode(&code[at..], 0x1001 + at as u64);
+        }
+        decoder.call();
+        let after = |half: u16| decoder.clone().decode(&half.to_le_bytes(), 0x1007).flow;
+        assert_eq!(after(0x4728), Flow::JumpSlot(0x2000));
+        assert_eq!(after(0x4718), Flow::JumpRegister(3));
     }
 
     #[test]

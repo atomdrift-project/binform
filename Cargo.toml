@@ -12,14 +12,23 @@ readme = "README.md"
 repository = "https://github.com/atomdrift-project/binform"
 keywords = ["binary", "disassembly", "cfg", "reverse-engineering", "malware"]
 categories = ["development-tools", "parser-implementations"]
-exclude = ["testdata/", "tools/"]
+exclude = ["testdata/", "tools/", "fuzz/", "docs/", ".github/"]
 
 [workspace]
 members = [".", "tools"]
+exclude = ["fuzz"]
 
 [dependencies]
 iced-x86 = { version = "1.22", default-features = false, features = ["decoder", "std", "instr_info"] }
 gimli = { version = "0.32", default-features = false, features = ["read", "std"] }
+
+[features]
+# Per-function recovery diagnostics, for inspecting recovery: not part of
+# the stable API.
+diagnostics = []
+
+[package.metadata.docs.rs]
+all-features = true
 
 [dev-dependencies]
 zstd = "0.13"
@@ -47,6 +56,7 @@ todo = "warn"
 unimplemented = "warn"
 unreachable = "warn"
 cast_possible_truncation = "warn"
+arithmetic_side_effects = "warn"
 
 [profile.test]
 opt-level = 2

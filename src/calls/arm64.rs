@@ -1,232 +1,371 @@
-//! AArch64 value tracking. Instruction length is fixed at four bytes and
-//! control flow comes from binform's arm64 decoder; this layer adds the
-//! constants and stack stores a syscall or call sequence builds with `movz`/
-//! `movk`, `mov`, `add`/`sub`, `adr`/`adrp` and the stores.
+//! AArch64 value tracking. Instructions are four bytes and control flow
+//! comes from binform's arm64 decoder; this layer adds the constants and
+//! frame bytes a call or syscall sequence leaves: `movz`/`movn`/`movk`,
+//! `mov`, `add`/`sub` of an immediate, `adr`/`adrp`, `rev16`, literal loads,
+//! and loads and stores of one register or a pair. Any other instruction
+//! clears the register it writes.
+//!
+//! Register 31 is the stack pointer as a base and as the destination of
+//! `add`/`sub` immediate, and the zero register elsewhere; the model numbers
+//! the stack pointer 31.
 //!
 //! The Linux AArch64 syscall ABI takes the number in `x8` and arguments in
-//! `x0..x5`; a `bl` call takes arguments in `x0..x7`.
+//! `x0..x5`; a call takes arguments in `x0..x7`.
 
-use super::state::{State, Val};
-use super::{RawTarget, Site, Step};
-use crate::isa::{Decoder, Flow};
+use super::state::{State, Val, rev16, word};
+use super::{RawTarget, Site, Step, Tracker, flow};
+use crate::Binary;
+use crate::isa::Decoder;
 
-/// The stack pointer / zero register number.
 const SP: u32 = 31;
+/// What a call may change: `x0..x18` and the link register.
+const CLOBBERED: &[u32] = &[
+    0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 30,
+];
 
-pub(crate) fn step(state: &mut State<'_>, decoder: &mut Decoder, bytes: &[u8], addr: u64) -> Step {
-    let insn = decoder.decode(bytes, addr);
-    let len = insn.len.max(1);
-    let Some(w) = word(bytes) else {
-        return Step::stop(len);
-    };
+pub(crate) struct Arm64<'a> {
+    decoder: Decoder,
+    code: &'a [u8],
+}
 
-    // SVC #0: `1101 0100 000 imm16 0 0001`. Linux issues `svc #0`, so the
-    // imm16 comment is zero; a non-zero one is not a Linux syscall, and
-    // requiring zero keeps data sharing the opcode from reading as one. The
-    // number is in x8.
-    if w == 0xd400_0001 {
-        let args = (0..=5).map(|r| state.value(r)).collect();
-        let number = match state.get(8) {
-            Val::Int(n) => n,
-            _ => u64::MAX,
+impl Arm64<'_> {
+    pub(crate) fn new(bin: &Binary<'_>) -> Self {
+        Self {
+            decoder: Decoder::new(bin, crate::Arch::Arm64),
+            code: &[],
+        }
+    }
+}
+
+impl<'a> Tracker<'a> for Arm64<'a> {
+    fn sp(&self) -> u32 {
+        SP
+    }
+
+    fn pointer(&self) -> u8 {
+        8
+    }
+
+    fn begin(&mut self, code: &'a [u8], _start: u64) {
+        self.code = code;
+    }
+
+    fn reset(&mut self) {
+        self.decoder.reset();
+    }
+
+    fn step(&mut self, state: &mut State<'_>, at: usize, addr: u64) -> Step {
+        let Some(bytes) = self.code.get(at..) else {
+            return Step::stop(1);
         };
-        state.clear(0); // the kernel returns in x0.
-        return Step {
-            len,
-            site: Some(Site { raw: RawTarget::Syscall(number), args }),
-            barrier: false,
+        let insn = self.decoder.decode(bytes, addr);
+        let Some(w) = word(bytes) else {
+            return Step::stop(insn.len);
         };
-    }
-
-    match insn.flow {
-        Flow::Call(to) => {
-            let site = call_site(state, RawTarget::Call(to));
-            clobber(state);
-            Step { len, site: Some(site), barrier: false }
+        // `svc #0`, the Linux syscall: any other comment is no Linux
+        // syscall. The number is in x8.
+        if w == 0xd400_0001 {
+            let args = (0..=5).map(|r| state.value(r)).collect();
+            let number = match state.get(8) {
+                Val::Int(n) => Some(n),
+                _ => None,
+            };
+            state.clear(0); // the kernel returns in x0.
+            return Step::site(
+                insn.len,
+                Site {
+                    raw: RawTarget::Syscall(number),
+                    args,
+                },
+            );
         }
-        Flow::CallSlot(slot) => {
-            let site = call_site(state, RawTarget::Call(slot));
-            clobber(state);
-            Step { len, site: Some(site), barrier: false }
+        if let Some(step) = flow(state, &insn, 0..=7, CLOBBERED) {
+            return step;
         }
-        Flow::CallIndirect | Flow::CallRegister(_) => {
-            let site = call_site(state, RawTarget::Indirect);
-            clobber(state);
-            Step { len, site: Some(site), barrier: false }
-        }
-        Flow::Jump(_) | Flow::JumpSlot(_) | Flow::JumpMemory(_) | Flow::JumpRegister(_)
-        | Flow::JumpIndirect | Flow::JumpAdd { .. } | Flow::JumpTable { .. }
-        | Flow::Return | Flow::Stop | Flow::Invalid => Step::stop(len),
-        Flow::Branch(_) => Step::go(len),
-        Flow::Next => {
-            track(state, w, addr);
-            Step::go(len)
-        }
+        track(state, w, addr);
+        Step::go(insn.len)
     }
 }
 
-fn call_site(state: &State<'_>, raw: RawTarget) -> Site {
-    Site { raw, args: (0..=7).map(|r| state.value(r)).collect() }
+/// Read register `r` where 31 is the zero register.
+fn zr(state: &State<'_>, r: u32) -> Val {
+    if r == 31 { Val::Int(0) } else { state.get(r) }
 }
 
-/// Forget the registers a call may change: `x0..x18` and the link register.
-fn clobber(state: &mut State<'_>) {
-    for r in 0..=18 {
-        state.clear(r);
+/// Write register `r` where 31 is the zero register, which discards it.
+fn set_zr(state: &mut State<'_>, r: u32, value: Val) {
+    if r != 31 {
+        state.set(r, value);
     }
-    state.clear(30);
 }
 
-fn word(bytes: &[u8]) -> Option<u32> {
-    bytes.first_chunk::<4>().map(|&b| u32::from_le_bytes(b))
+/// A result as an operand of width `sf` leaves it: a 32-bit operation keeps
+/// the low half of a constant, and cannot hold a stack pointer.
+fn sized(value: Val, sf: bool) -> Val {
+    match value {
+        _ if sf => value,
+        Val::Int(_) => value.low32(),
+        _ => Val::Unknown,
+    }
+}
+
+/// `bits` of `w` from bit `low` up, sign-extended.
+fn signed(w: u32, low: u32, bits: u32) -> i64 {
+    let top = 32_u32.saturating_sub(low.saturating_add(bits));
+    i64::from(
+        w.wrapping_shl(top)
+            .cast_signed()
+            .wrapping_shr(top.saturating_add(low)),
+    )
 }
 
 fn track(state: &mut State<'_>, w: u32, addr: u64) {
     let rd = w & 0x1f;
-    let rn = (w >> 5) & 0x1f;
-    let sf = w & 0x8000_0000 != 0; // 64-bit operand.
+    let rn = w >> 5 & 0x1f;
+    let sf = w & 0x8000_0000 != 0;
 
-    // Move wide: MOVZ/MOVN/MOVK, `sf op 100101 hw(2) imm16 Rd`.
+    // Move wide: `sf opc 100101 hw imm16 Rd`.
     if w & 0x1f80_0000 == 0x1280_0000 {
-        let imm16 = u64::from((w >> 5) & 0xffff);
-        let shift = ((w >> 21) & 0x3) * 16;
-        let op = (w >> 29) & 0x3;
-        let value = match op {
-            0b10 => imm16 << shift,                       // MOVZ
-            0b00 => !(imm16 << shift),                    // MOVN
-            0b11 => match state.get(rd) {                 // MOVK: keep the rest
-                Val::Int(v) => (v & !(0xffff << shift)) | (imm16 << shift),
-                _ => {
-                    state.clear(rd);
-                    return;
-                }
+        let imm16 = u64::from(w >> 5 & 0xffff);
+        let shift = w >> 17 & 0x30; // hw * 16
+        let value = match w >> 29 & 3 {
+            0b00 => Val::Int(!(imm16 << shift)), // MOVN
+            0b10 => Val::Int(imm16 << shift),    // MOVZ
+            0b11 => match zr(state, rd) {
+                // MOVK
+                Val::Int(v) => Val::Int((v & !(0xffff << shift)) | imm16 << shift),
+                _ => Val::Unknown,
             },
-            _ => {
-                state.clear(rd);
-                return;
-            }
+            _ => Val::Unknown,
         };
-        set(state, rd, Val::Int(mask(value, sf)));
+        set_zr(state, rd, sized(value, sf));
         return;
     }
-
-    // ADD/SUB immediate: `sf op 0 100010 sh imm12 Rn Rd`.
-    if w & 0x1f00_0000 == 0x1100_0000 {
-        let imm12 = (w >> 10) & 0xfff;
-        let shifted = if w & 0x0040_0000 != 0 { imm12 << 12 } else { imm12 };
-        let sub = w & 0x4000_0000 != 0;
-        set_offset(state, rd, rn, i64::from(shifted), sub, sf);
+    // ADD/SUB immediate: `sf op S 100010 sh imm12 Rn Rd`. Rn is the stack
+    // pointer; so is Rd, unless `S` sets flags (`cmp`, `cmn`).
+    if w & 0x1f80_0000 == 0x1100_0000 {
+        let imm12 = i64::from(w >> 10 & 0xfff);
+        let imm = if w & 1 << 22 != 0 {
+            imm12.wrapping_shl(12)
+        } else {
+            imm12
+        };
+        let delta = if w & 1 << 30 != 0 {
+            imm.wrapping_neg()
+        } else {
+            imm
+        };
+        let value = sized(state.get(rn).plus(delta), sf);
+        if w & 1 << 29 != 0 {
+            set_zr(state, rd, value);
+        } else {
+            state.set(rd, value);
+        }
         return;
     }
-
-    // ADR / ADRP: `op immlo(2) 10000 immhi(19) Rd`.
+    // ADR / ADRP: `op immlo 10000 immhi Rd`, a 21-bit signed immediate.
     if w & 0x1f00_0000 == 0x1000_0000 {
-        let imm = (i64::from((w >> 5) & 0x7ffff) << 2) | i64::from((w >> 29) & 0x3);
-        let page = w & 0x8000_0000 != 0;
-        let value = if page {
-            let imm = imm << 12;
-            (addr & !0xfff).wrapping_add_signed(imm)
+        let imm = signed(w, 5, 19).wrapping_shl(2) | i64::from(w >> 29 & 3);
+        let value = if w & 0x8000_0000 != 0 {
+            (addr & !0xfff).wrapping_add_signed(imm.wrapping_shl(12))
         } else {
             addr.wrapping_add_signed(imm)
         };
-        set(state, rd, Val::Int(value));
+        set_zr(state, rd, Val::Int(value));
         return;
     }
-
-    // ORR (shifted register) with Rn == XZR, no shift, is `mov Rd, Rm`.
+    // ORR (shifted register) of the zero register, unshifted: `mov Rd, Rm`.
     if w & 0x7fe0_ffe0 == 0x2a00_03e0 {
-        let rm = (w >> 16) & 0x1f;
-        set(state, rd, read(state, rm, sf));
+        set_zr(state, rd, sized(zr(state, w >> 16 & 0x1f), sf));
         return;
     }
-
-    // Store (unsigned offset): `size 111 0 01 00 imm12 Rn Rt`.
-    if w & 0x3b00_0000 == 0x3900_0000 {
-        let size = w >> 30; // 0=byte,1=half,2=word,3=dword
-        let count = 1u8 << size;
-        let imm12 = i64::from((w >> 10) & 0xfff);
-        store(state, rn, rd, count, imm12 * i64::from(count));
+    // REV16: `sf 1 0 11010110 00000 000001 Rn Rd`.
+    if w & 0x7fff_fc00 == 0x5ac0_0400 {
+        let value = match zr(state, rn) {
+            Val::Int(v) => sized(Val::Int(rev16(v)), sf),
+            _ => Val::Unknown,
+        };
+        set_zr(state, rd, value);
         return;
     }
-
-    // REV16 Rd, Rn (both widths): byte-swap within each halfword.
-    if w & 0x7ffe_fc00 == 0x5ac0_0400 {
-        match read(state, rn, sf) {
-            Val::Int(v) => set(state, rd, Val::Int(mask(rev16(v), sf))),
-            _ => state.clear(rd),
+    // Loads and stores: `op0 1 op1 0 ...`.
+    if w & 0x0a00_0000 == 0x0800_0000 {
+        load_store(state, w, addr);
+        return;
+    }
+    // Branches, exceptions and system instructions: of those that go on,
+    // only MRS and SYSL write a register.
+    if w & 0x1c00_0000 == 0x1400_0000 {
+        if w & 0xffe0_0000 == 0xd520_0000 {
+            set_zr(state, rd, Val::Unknown);
         }
         return;
     }
-
-    // Any other instruction that writes Rd: clear it. Stores and branches
-    // (Rt/no destination) are handled above or do not reach here.
-    if writes_rd(w) {
+    // Data processing writes Rd: the zero register, except in the forms
+    // whose Rd may be the stack pointer (logical immediate, and add/sub
+    // extended register or with tags, without `S`).
+    let sp_rd = (w & 0x1f80_0000 == 0x1200_0000 && w >> 29 & 3 != 3)
+        || w & 0x3fe0_0000 == 0x0b20_0000
+        || w & 0x3f80_0000 == 0x1180_0000;
+    if sp_rd {
         state.clear(rd);
+    } else {
+        set_zr(state, rd, Val::Unknown);
     }
 }
 
-/// Whether the instruction's destination is the register in bits 4:0. Most
-/// data-processing and load encodings write there; the store and compare
-/// forms that do not are matched before this.
-fn writes_rd(w: u32) -> bool {
-    // Exclude the compare-and-branch / test-branch and unconditional branch
-    // spaces, which encode no Rd. Everything else is cleared conservatively.
-    w & 0x1c00_0000 != 0x1400_0000
+/// How a load or store addresses memory and writes its base back.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Index {
+    /// At base plus offset; the base is unchanged.
+    Offset,
+    /// At base plus offset, which the base becomes.
+    Pre,
+    /// At the base, which then moves by the offset.
+    Post,
 }
 
-fn read(state: &State<'_>, reg: u32, sf: bool) -> Val {
-    match state.get(reg) {
-        Val::Int(v) => Val::Int(mask(v, sf)),
-        other => other,
-    }
-}
+fn load_store(state: &mut State<'_>, w: u32, addr: u64) {
+    let rt = w & 0x1f;
+    let rt2 = w >> 10 & 0x1f;
+    let rn = w >> 5 & 0x1f;
+    let simd = w & 1 << 26 != 0;
+    let size = w >> 30;
+    let opc = w >> 22 & 3;
 
-fn set(state: &mut State<'_>, reg: u32, value: Val) {
-    // Writes to the zero register are discarded; writes to the stack pointer
-    // keep it a frame pointer.
-    if reg == SP {
-        if let Val::Stack(_) = value {
-            state.set(reg, value);
+    // LDR (literal): `opc 011 V 00 imm19 Rt`, word or doubleword.
+    if w & 0x3b00_0000 == 0x1800_0000 {
+        if !simd && size < 2 {
+            let at = addr.wrapping_add_signed(signed(w, 5, 19).wrapping_mul(4));
+            set_zr(state, rt, state.read(at, if size == 0 { 4 } else { 8 }));
+        } else if !simd && size == 2 {
+            set_zr(state, rt, Val::Unknown); // LDRSW
         }
         return;
     }
-    state.set(reg, value);
-}
-
-/// `reg = base ± imm`, following the stack pointer.
-fn set_offset(state: &mut State<'_>, reg: u32, base: u32, imm: i64, sub: bool, sf: bool) {
-    let delta = if sub { -imm } else { imm };
-    let value = match base_val(state, base) {
-        Val::Stack(off) => Val::Stack(off.wrapping_add(delta)),
-        Val::Int(n) => Val::Int(mask((n as i64).wrapping_add(delta) as u64, sf)),
-        Val::Unknown => Val::Unknown,
+    // One register: `size 111 V 0 1 opc imm12 Rn Rt` with an unsigned
+    // scaled offset, or `size 111 V 0 0 opc 0 imm9 idx Rn Rt` with a signed
+    // one, unscaled or pre- or post-indexed.
+    let single = if w & 0x3b00_0000 == 0x3900_0000 {
+        let width = if simd && opc & 2 != 0 {
+            16
+        } else {
+            1_u8 << size
+        };
+        Some((
+            i64::from(w >> 10 & 0xfff).wrapping_mul(width.into()),
+            Index::Offset,
+            width,
+        ))
+    } else if w & 0x3b20_0000 == 0x3800_0000 {
+        let index = match w >> 10 & 3 {
+            1 => Index::Post,
+            3 => Index::Pre,
+            _ => Index::Offset,
+        };
+        let width = if simd && opc & 2 != 0 {
+            16
+        } else {
+            1_u8 << size
+        };
+        Some((signed(w, 12, 9), index, width))
+    } else {
+        None
     };
-    set(state, reg, value);
-}
-
-fn base_val(state: &State<'_>, reg: u32) -> Val {
-    match state.get(reg) {
-        Val::Unknown if reg == SP => Val::Stack(0),
-        other => other,
-    }
-}
-
-fn store(state: &mut State<'_>, rn: u32, rt: u32, count: u8, imm: i64) {
-    let Val::Stack(base) = base_val(state, rn) else {
+    if let Some((offset, index, width)) = single {
+        let base = state.get(rn);
+        let at = if index == Index::Post {
+            base
+        } else {
+            base.plus(offset)
+        };
+        // opc: 00 store, 01 load, 1x a sign-extending load (or with
+        // size 11, a prefetch); for SIMD registers, bit 0 is load.
+        let (store, load) = if simd {
+            (opc & 1 == 0, false)
+        } else {
+            (opc == 0, opc == 1)
+        };
+        let loaded = match at {
+            Val::Stack(off) if load => state.load(off, width),
+            _ => Val::Unknown,
+        };
+        if let (true, Val::Stack(off)) = (store, at) {
+            if simd {
+                state.forget(off, width.into());
+            } else {
+                state.store(off, zr(state, rt), width);
+            }
+        }
+        if index != Index::Offset {
+            state.set(rn, base.plus(offset));
+        }
+        if !simd && !store && !(size == 3 && opc == 2) {
+            set_zr(state, rt, loaded);
+        }
         return;
-    };
-    let off = base.wrapping_add(imm);
-    match state.get(rt) {
-        Val::Int(v) => state.store_stack(off, v, count),
-        _ => state.forget_stack(off, count),
     }
-}
-
-/// Keep the low 32 bits of a 32-bit operand's result.
-fn mask(value: u64, sf: bool) -> u64 {
-    if sf { value } else { value & 0xffff_ffff }
-}
-
-fn rev16(v: u64) -> u64 {
-    (v & 0x00ff_00ff_00ff_00ff) << 8 | (v & 0xff00_ff00_ff00_ff00) >> 8
+    // A pair: `opc 101 V 0 idx L imm7 Rt2 Rn Rt`.
+    if w & 0x3a00_0000 == 0x2800_0000 {
+        let load = w & 1 << 22 != 0;
+        let width: u8 = match (simd, size) {
+            (false, 0 | 1) => 4,
+            (false, _) => 8,
+            (true, _) => 4 << size.min(2),
+        };
+        let index = match w >> 23 & 3 {
+            1 => Index::Post,
+            3 => Index::Pre,
+            _ => Index::Offset,
+        };
+        let offset = signed(w, 15, 7).wrapping_mul(width.into());
+        let base = state.get(rn);
+        let at = if index == Index::Post {
+            base
+        } else {
+            base.plus(offset)
+        };
+        // LDPSW (opc 01) sign-extends.
+        let follows = !simd && size != 1;
+        let mut loaded = [Val::Unknown; 2];
+        for (value, delta) in loaded.iter_mut().zip([0, i64::from(width)]) {
+            if let (true, Val::Stack(off)) = (load && follows, at.plus(delta)) {
+                *value = state.load(off, width);
+            }
+        }
+        if let (false, Val::Stack(off)) = (load, at) {
+            if simd || size == 1 {
+                // SIMD registers, or STGP's two doublewords and tags.
+                let bytes = if simd {
+                    u16::from(width).wrapping_mul(2)
+                } else {
+                    16
+                };
+                state.forget(off, bytes);
+            } else {
+                state.store(off, zr(state, rt), width);
+                state.store(off.wrapping_add(width.into()), zr(state, rt2), width);
+            }
+        }
+        if index != Index::Offset {
+            state.set(rn, base.plus(offset));
+        }
+        if load && !simd {
+            let [first, second] = loaded;
+            set_zr(state, rt, first);
+            set_zr(state, rt2, second);
+        }
+        return;
+    }
+    // Register offsets, exclusives, atomics, SIMD structures: may store
+    // anywhere in a frame the base points into, and may write the registers
+    // the Rt, Rt2 and Rs fields name.
+    if matches!(state.get(rn), Val::Stack(_)) {
+        state.forget_frame();
+    }
+    if !simd {
+        set_zr(state, rt, Val::Unknown);
+        set_zr(state, rt2, Val::Unknown);
+        set_zr(state, w >> 16 & 0x1f, Val::Unknown);
+    }
 }

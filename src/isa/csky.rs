@@ -12,7 +12,7 @@
 //! r1, [offset]; addu r1, r15; ...; jmp r1`): no call, and a jump inside
 //! the function.
 
-use crate::isa::{Flow, Insn, Mem, Note};
+use crate::isa::{Decode, Flow, Insn, Mem, Note, Regs, relative, u16_at, u32_at};
 
 /// Where a constant in a register came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -27,13 +27,14 @@ enum Kind {
     Gb,
 }
 
-/// What earlier instructions left in each register: a constant, and where
-/// it came from. The GOT base, once code computes it (`bsr 1f; 1: lrw r14,
-/// [offset]; addu r14, r15`), is the same in every function: each starts
-/// with it in `r14`, so a call to `r14` plus a pool offset resolves.
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct State {
-    regs: [Option<(u32, Kind)>; 16],
+/// The decoder, and what earlier instructions left in each register: a
+/// constant, and where it came from. The GOT base, once code computes it
+/// (`bsr 1f; 1: lrw r14, [offset]; addu r14, r15`), is the same in every
+/// function: each starts with it in `r14`, so a call to `r14` plus a pool
+/// offset resolves.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Decoder {
+    regs: Regs<(u32, Kind), 16>,
     gb: Option<u32>,
 }
 
@@ -44,31 +45,26 @@ const LR: u32 = 15;
 /// The registers a call may change: `r1` to `r7` and the link register.
 const VOLATILE: u32 = 0x80fe;
 
+/// Addresses are 32 bits.
+const MASK: u64 = 0xffff_ffff;
+
 fn half(bytes: &[u8], at: usize) -> Option<u16> {
-    let b: [u8; 2] = bytes.get(at..at + 2)?.try_into().ok()?;
-    Some(u16::from_le_bytes(b))
+    u16_at(bytes, at, false)
 }
 
-fn word(bytes: &[u8], at: usize) -> Option<u32> {
-    let b: [u8; 4] = bytes.get(at..at + 4)?.try_into().ok()?;
-    Some(u32::from_le_bytes(b))
+/// The literal-pool slot an `lrw`, `jmpi` or `jsri` `h` at `addr` reads:
+/// its word displacement from the next instruction, rounded down to a word.
+fn pool(h: u32, addr: u64) -> u64 {
+    addr.wrapping_add(2).wrapping_add(u64::from(h & 0xff) << 2) & !3 & MASK
 }
 
-impl State {
-    /// The state a block starts in: nothing known but the GOT base.
-    pub(crate) fn reset(&mut self) {
-        self.regs = [None; 16];
-        self.set(GB, self.gb.map(|gb| (gb, Kind::Gb)));
-    }
-
+impl Decoder {
     fn get(&self, reg: u32) -> Option<(u32, Kind)> {
-        self.regs.get(reg as usize).copied().flatten()
+        self.regs.get(reg)
     }
 
     fn set(&mut self, reg: u32, value: Option<(u32, Kind)>) {
-        if let Some(slot) = self.regs.get_mut(reg as usize) {
-            *slot = value;
-        }
+        self.regs.set(reg, value);
     }
 
     fn clobber(&mut self, reg: u32) -> Note {
@@ -83,25 +79,22 @@ impl State {
         if kind == Kind::Pool {
             Note::Address { reg, addr: value }
         } else {
-            Note::Pc { reg, addr: value }
+            Note::Value { reg, value }
         }
     }
 }
 
-pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
+fn decode(state: &mut Decoder, bytes: &[u8], addr: u64) -> Insn {
     let Some(h) = half(bytes, 0) else {
         return Insn::new(2, Flow::Invalid);
     };
     let h = u32::from(h);
     let z = h & 15;
     let x = (h >> 4) & 15;
-    let next = addr.wrapping_add(2) & 0xffff_ffff;
-    // A literal-pool slot, as `lrw`, `jmpi` and `jsri` address it.
-    let pool = (next + u64::from(h & 0xff) * 4) & !3;
-    let literal = || {
-        let at = usize::try_from(pool.checked_sub(addr)?).ok()?;
-        word(bytes, at)
-    };
+    let next = addr.wrapping_add(2) & MASK;
+    let pool = pool(h, addr);
+    // The pool lies ahead, within the bytes being decoded.
+    let literal = || u32_at(bytes, usize::try_from(pool.checked_sub(addr)?).ok()?, false);
     let mut note = Note::None;
     let flow = match h >> 11 {
         // bt, bf
@@ -183,29 +176,16 @@ pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
     insn.note = note;
     // mov r0, r0
     insn.pad = h == 0x1200;
-    match flow {
-        Flow::Next | Flow::Branch(_) => {}
-        Flow::Call(_) | Flow::CallRegister(_) | Flow::CallSlot(_) | Flow::CallIndirect => {
-            for reg in 0..16 {
-                if VOLATILE >> reg & 1 != 0 {
-                    state.set(reg, None);
-                }
-            }
-        }
-        _ => state.reset(),
-    }
     insn
 }
 
 /// A branch's target: an 11-bit halfword displacement from `next`.
 fn branch(next: u64, h: u32) -> u64 {
-    let field = i64::from(h & 0x7ff);
-    let offset = ((field ^ 0x400) - 0x400) * 2;
-    next.wrapping_add_signed(offset) & 0xffff_ffff
+    relative(next, h & 0x7ff, 11, 2) & MASK
 }
 
 /// What a non-transfer `h` does to registers.
-fn step(state: &mut State, h: u32, z: u32, x: u32) -> Note {
+fn step(state: &mut Decoder, h: u32, z: u32, x: u32) -> Note {
     let imm5 = (h >> 4) & 31;
     match h >> 8 {
         // sync, wait, doze, idly4, trap, mvtc, cprc, cpseti
@@ -272,7 +252,7 @@ fn step(state: &mut State, h: u32, z: u32, x: u32) -> Note {
         0x02..=0x1f => state.clobber(z),
         // addi, subi rz, imm + 1
         0x20 | 0x21 | 0x24 | 0x25 => {
-            let imm = imm5 + 1;
+            let imm = imm5.wrapping_add(1);
             match state.get(z) {
                 Some((value, kind)) => {
                     let value = if h >> 9 == 0x10 {
@@ -290,7 +270,9 @@ fn step(state: &mut State, h: u32, z: u32, x: u32) -> Note {
         // bgeni rz, imm (7 and up; below, divs and coprocessor moves)
         0x32 | 0x33 if imm5 >= 7 => state.constant(z, 1 << imm5, Kind::Imm),
         // bmaski rz, imm (8 and up; below, divu and the MAC moves)
-        0x2c | 0x2d if imm5 >= 8 => state.constant(z, u32::MAX >> (32 - imm5), Kind::Imm),
+        0x2c | 0x2d if imm5 >= 8 => {
+            state.constant(z, u32::MAX >> 32_u32.wrapping_sub(imm5), Kind::Imm)
+        }
         // bseti, bclri, lsli on a constant
         0x34 | 0x35 | 0x30 | 0x31 | 0x3c | 0x3d => match state.get(z) {
             Some((value, kind)) => {
@@ -315,7 +297,7 @@ fn step(state: &mut State, h: u32, z: u32, x: u32) -> Note {
         // ldw rz, (rx, disp)
         0x80..=0x8f => {
             let rz = (h >> 8) & 15;
-            let disp = u64::from((h >> 4) & 15) * 4;
+            let disp = u64::from((h >> 4) & 15) << 2;
             let base = state.get(z);
             state.set(rz, None);
             Note::Fetch {
@@ -325,7 +307,7 @@ fn step(state: &mut State, h: u32, z: u32, x: u32) -> Note {
                         base: None,
                         index: None,
                         scale: 1,
-                        disp: (u64::from(value) + disp) & 0xffff_ffff,
+                        disp: u64::from(value).wrapping_add(disp) & MASK,
                     },
                     None => Mem {
                         base: Some(z),
@@ -345,34 +327,51 @@ fn step(state: &mut State, h: u32, z: u32, x: u32) -> Note {
     }
 }
 
-/// The literal-pool word an `lrw`, `jmpi` or `jsri` at `addr` reads: data
-/// a linear sweep steps over.
-pub(crate) fn literal(bytes: &[u8], addr: u64) -> Option<u64> {
-    let h = u32::from(half(bytes, 0)?);
-    matches!(h >> 11, 0x0e | 0x0f)
-        .then(|| (addr.wrapping_add(2) + u64::from(h & 0xff) * 4) & !3 & 0xffff_ffff)
-}
+impl Decode for Decoder {
+    fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
+        decode(self, bytes, addr)
+    }
 
-/// Whether `bytes` begin a frame: GCC's first instruction lowers the
-/// stack pointer (`subi r0, n`) or saves registers (`stm rN-r15, (r0)`).
-/// Not a far branch, which saves `r15` around the `bsr` that reads the PC
-/// (`subi r0, 8; stw r15, (r0, 0); bsr 1f; 1: lrw r1, [offset]`), and
-/// lands inside a function.
-pub(crate) fn starts_frame(bytes: &[u8]) -> bool {
-    let far = half(bytes, 4) == Some(0xf800)
-        && half(bytes, 6).is_some_and(|h| h >> 12 == 7 && u32::from((h >> 8) & 15) != GB);
-    !far && half(bytes, 0).is_some_and(|h| h & 0xfe0f == 0x2400 || h & 0xfff0 == 0x0070)
+    /// The state a block starts in: nothing known but the GOT base.
+    fn reset(&mut self) {
+        self.regs = Regs::default();
+        self.set(GB, self.gb.map(|gb| (gb, Kind::Gb)));
+    }
+
+    fn call(&mut self) {
+        self.regs.forget(u64::from(VOLATILE));
+    }
+
+    /// Whether `bytes` begin a frame: GCC's first instruction lowers the
+    /// stack pointer (`subi r0, n`) or saves registers (`stm rN-r15, (r0)`).
+    /// Not a far branch, which saves `r15` around the `bsr` that reads the PC
+    /// (`subi r0, 8; stw r15, (r0, 0); bsr 1f; 1: lrw r1, [offset]`), and
+    /// lands inside a function.
+    fn starts_frame(&self, bytes: &[u8]) -> bool {
+        let far = half(bytes, 4) == Some(0xf800)
+            && half(bytes, 6).is_some_and(|h| h >> 12 == 7 && u32::from((h >> 8) & 15) != GB);
+        !far && half(bytes, 0).is_some_and(|h| h & 0xfe0f == 0x2400 || h & 0xfff0 == 0x0070)
+    }
+
+    /// The literal-pool word an `lrw`, `jmpi` or `jsri` at `addr` reads: data
+    /// a linear sweep steps over.
+    fn literal(&self, bytes: &[u8], addr: u64) -> Option<u64> {
+        let h = u32::from(half(bytes, 0)?);
+        matches!(h >> 11, 0x0e | 0x0f).then(|| pool(h, addr))
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Each instruction of `halves`, decoded from `addr`, carrying what it
+    /// leaves in registers on as `isa::Decoder` does.
     fn run(halves: &[u16], addr: u64) -> Vec<Insn> {
         let code: Vec<u8> = halves.iter().flat_map(|h| h.to_le_bytes()).collect();
-        let mut state = State::default();
+        let mut decoder = Decoder::default();
         (0..halves.len())
-            .map(|i| decode(&mut state, &code[i * 2..], addr + i as u64 * 2))
+            .map(|i| decoder.advance(&code[i * 2..], addr + i as u64 * 2))
             .collect()
     }
 
@@ -423,12 +422,50 @@ mod tests {
 
     #[test]
     fn frames() {
+        let decoder = Decoder::default();
         // subi r0, 8; stw r15, (r0, 0)
-        assert!(starts_frame(&[0x70, 0x24, 0x00, 0x9f]));
-        assert!(!starts_frame(&[0x00, 0x12, 0xcf, 0x00]));
+        assert!(decoder.starts_frame(&[0x70, 0x24, 0x00, 0x9f]));
+        assert!(!decoder.starts_frame(&[0x00, 0x12, 0xcf, 0x00]));
         // A far branch.
-        assert!(!starts_frame(&[
-            0x70, 0x24, 0x00, 0x9f, 0x00, 0xf8, 0x03, 0x71
-        ]));
+        assert!(!decoder.starts_frame(&[0x70, 0x24, 0x00, 0x9f, 0x00, 0xf8, 0x03, 0x71]));
+    }
+
+    /// `movi r2, 5` is an integer; `jmp r2` then goes to it, and `rts`
+    /// returns.
+    #[test]
+    fn immediates_are_values() {
+        let insns = run(&[0x6052, 0x00c2], 0x1000);
+        assert_eq!(insns[0].note, Note::Value { reg: 2, value: 5 });
+        assert_eq!(insns[1].flow, Flow::Jump(5));
+        assert_eq!(run(&[0x00cf], 0x1000)[0].flow, Flow::Return);
+    }
+
+    /// A `jmpi` or `jsri` whose pool word is not in the bytes goes through
+    /// the slot; the sweep steps over the word either way.
+    #[test]
+    fn pool_slots() {
+        // jmpi [1 word on], at 0x1000: the slot at 0x1004.
+        assert_eq!(run(&[0x7001], 0x1000)[0].flow, Flow::JumpSlot(0x1004));
+        // jsri, the same slot.
+        assert_eq!(run(&[0x7f01], 0x1000)[0].flow, Flow::CallSlot(0x1004));
+        let decoder = Decoder::default();
+        assert_eq!(
+            decoder.literal(&0x7f01_u16.to_le_bytes(), 0x1000),
+            Some(0x1004)
+        );
+        assert_eq!(decoder.literal(&0x00cf_u16.to_le_bytes(), 0x1000), None);
+    }
+
+    /// A call forgets the registers it may change (`r2`), not the others
+    /// (`r8`).
+    #[test]
+    fn calls_forget_volatile_registers() {
+        // movi r2, 5; movi r8, 6; jsr r12; jmp r2
+        let insns = run(&[0x6052, 0x6068, 0x00dc, 0x00c2], 0x1000);
+        assert_eq!(insns[2].flow, Flow::CallRegister(12));
+        assert_eq!(insns[3].flow, Flow::JumpRegister(2));
+        // movi r2, 5; movi r8, 6; jsr r12; jmp r8
+        let insns = run(&[0x6052, 0x6068, 0x00dc, 0x00c8], 0x1000);
+        assert_eq!(insns[3].flow, Flow::Jump(6));
     }
 }

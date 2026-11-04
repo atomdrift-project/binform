@@ -7,7 +7,7 @@
 //! lg %r2, 0(%r2,%r4); b 0(%r2,%r4)`); every other instruction is taken to
 //! write every register.
 
-use crate::isa::{Extend, Flow, Insn, Mem, Note};
+use crate::isa::{Extend, Flow, Insn, Mem, Note, relative, sext, uint};
 
 /// What earlier instructions left that a later one needs.
 #[derive(Clone, Copy, Debug, Default)]
@@ -19,6 +19,8 @@ pub(crate) struct State {
 
 /// The register a call leaves its return address in by convention.
 const R14: u32 = 14;
+/// The registers a call may change: `r0`-`r5` and `r14`.
+const VOLATILE: u32 = 0x403f;
 
 pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
     let Some(&first) = bytes.first() else {
@@ -34,15 +36,12 @@ pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
     };
     let byte = |i: usize| insn.get(i).copied().unwrap_or(0);
     let (high, low) = (u32::from(byte(1) >> 4), u32::from(byte(1) & 0xf));
-    // A signed halfword offset in bytes `at..at + width`.
-    let relative = |at: usize, width: usize| {
-        let raw = insn
-            .get(at..at + width)
-            .unwrap_or_default()
-            .iter()
-            .fold(0_i64, |value, &b| value << 8 | i64::from(b));
-        let sign = 1_i64 << (8 * width - 1);
-        addr.wrapping_add_signed(((raw ^ sign) - sign) * 2)
+    // A signed `bits`-bit halfword offset, from byte `at`.
+    let target = |at: usize, bits: u32| {
+        let field = insn
+            .get(at..)
+            .and_then(|rest| uint(rest.get(..(bits >> 3) as usize)?, true));
+        relative(addr, field.unwrap_or(0), bits, 2)
     };
     // A branch on condition mask `mask`: never, always, or sometimes.
     let on = |mask: u32, target: u64| match mask {
@@ -86,24 +85,24 @@ pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
         0x45 | 0x4d => Flow::CallIndirect,
         // BRC, BRAS, BRCT, BRCTG
         0xa7 => match low {
-            4 => on(high, relative(2, 2)),
-            5 => Flow::Call(relative(2, 2)),
-            6 | 7 => Flow::Branch(relative(2, 2)),
+            4 => on(high, target(2, 16)),
+            5 => Flow::Call(target(2, 16)),
+            6 | 7 => Flow::Branch(target(2, 16)),
             _ => Flow::Next,
         },
         // BRXH, BRXLE
-        0x84 | 0x85 => Flow::Branch(relative(2, 2)),
+        0x84 | 0x85 => Flow::Branch(target(2, 16)),
         // BRCL, BRASL
         0xc0 => match low {
-            4 => on(high, relative(2, 4)),
-            5 => Flow::Call(relative(2, 4)),
+            4 => on(high, target(2, 32)),
+            5 => Flow::Call(target(2, 32)),
             _ => Flow::Next,
         },
         // BRCTH
-        0xcc if low == 6 => Flow::Branch(relative(2, 4)),
+        0xcc if low == 6 => Flow::Branch(target(2, 32)),
         // BRXHG, BRXLG, and the compare-and-branch-relative family.
         0xec => match byte(5) {
-            0x44 | 0x45 | 0x64 | 0x65 | 0x76 | 0x77 | 0x7c..=0x7f => Flow::Branch(relative(2, 2)),
+            0x44 | 0x45 | 0x64 | 0x65 | 0x76 | 0x77 | 0x7c..=0x7f => Flow::Branch(target(2, 16)),
             _ => Flow::Next,
         },
         _ => Flow::Next,
@@ -144,11 +143,10 @@ fn note(state: &mut State, insn: &[u8], addr: u64) -> Note {
     match (byte(0), byte(5), r2) {
         // LARL
         (0xc0, _, 0) => {
-            let offset = i64::from(imm32().cast_signed()) * 2;
             state.scaled = scaled;
             Note::Address {
                 reg: r1,
-                addr: addr.wrapping_add_signed(offset),
+                addr: relative(addr, imm32(), 32, 2),
             }
         }
         // CLFI, CLGFI: `jh` past them takes the cases above `imm`.
@@ -181,7 +179,7 @@ fn note(state: &mut State, insn: &[u8], addr: u64) -> Note {
         (0xe3, 0x04 | 0x14 | 0x16, index) => {
             let base = byte(2) >> 4;
             let disp = (byte(2) & 0xf) << 8 | byte(3) | byte(4) << 12;
-            let disp = (i64::from(disp) ^ 0x8_0000) - 0x8_0000;
+            let disp = sext(disp, 20);
             let shift = match scaled {
                 Some((reg, shift)) if reg == index => shift,
                 _ => 0,
@@ -227,8 +225,8 @@ fn writes(insn: &[u8]) -> u32 {
     let one = 1 << r1;
     // R1 through R3, wrapping past r15.
     let range = || {
-        let count = (r3 + 16 - r1) % 16 + 1;
-        (0..count).fold(0, |mask, i| mask | 1 << ((r1 + i) % 16))
+        let count = (r3.wrapping_sub(r1) & 15).wrapping_add(1);
+        (0..count).fold(0, |mask, i| mask | 1 << (r1.wrapping_add(i) & 15))
     };
     match byte(0) {
         // CLR, CR; BALR, BASR, BCR (branches say what they do).
@@ -289,9 +287,54 @@ pub(crate) fn starts_frame(bytes: &[u8]) -> bool {
     }
 }
 
+/// The z/Architecture decoder.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Decoder {
+    state: State,
+}
+
+impl crate::isa::Decode for Decoder {
+    fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
+        decode(&mut self.state, bytes, addr)
+    }
+
+    fn reset(&mut self) {
+        self.state = State::default();
+    }
+
+    fn call(&mut self) {
+        let scaled = self.state.scaled.take();
+        self.state.scaled = scaled.filter(|&(reg, _)| VOLATILE >> reg & 1 == 0);
+    }
+
+    fn starts_frame(&self, bytes: &[u8]) -> bool {
+        starts_frame(bytes)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A call forgets a scaled index in a caller-saved register, and keeps
+    /// one in a callee-saved register.
+    #[test]
+    fn calls_forget_caller_saved_registers() {
+        use crate::isa::Decode as _;
+        // sllg %rN, %rN, 3
+        let sllg = |reg: u8| [0xeb, reg << 4 | reg, 0, 3, 0, 0x0d];
+        // lg %r1, 0(%rN, %r4)
+        let lg = |index: u8| [0xe3, 0x10 | index, 0x40, 0, 0, 0x04];
+        for (reg, scale) in [(2, 1), (7, 8)] {
+            let mut decoder = Decoder::default();
+            decoder.decode(&sllg(reg), 0);
+            decoder.call();
+            match decoder.decode(&lg(reg), 6).note {
+                Note::Load { mem, .. } => assert_eq!(mem.scale, scale, "%r{reg}"),
+                note => panic!("{note:?}"),
+            }
+        }
+    }
 
     #[test]
     fn frames() {

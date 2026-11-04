@@ -10,4 +10,4 @@ The code is ordinary little-endian MIPS, decoded as `MipsEl`; PE's MIPS machines
 - **Malware:** this file is hostile. It is kept compressed and only ever parsed; never run it.
 
 `wince-mips.exe.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`wince-mips.exe.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`wince-mips.exe.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

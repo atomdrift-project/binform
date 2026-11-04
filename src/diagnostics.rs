@@ -1,27 +1,30 @@
-//! What binform's own tools (`binform`, `binform-ab`) print beside the
-//! functions: how each was found, the import a stub jumps to, its edges.
-//! No consumer reads these, so they are not part of the API and change
-//! without notice.
+//! What recovery knows about each function beyond [`Function`]: how it was
+//! found, the import a stub jumps to, its edges. For inspecting recovery
+//! (binform's own tools print these); behind the `diagnostics` feature, and
+//! outside the stable API: they change without a major version.
+//!
+//! [`Function`]: crate::Function
 
 use crate::functions::Detail;
-use crate::{Binary, Functions, Limits, Origin};
+use crate::{Binary, Limits, Origin, Recovery};
 
-/// One function's diagnostics, in [`Functions::functions`] order.
+/// One function's diagnostics, in [`Recovery::functions`] order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Diagnostic {
     /// Control-flow edges between the function's blocks.
     pub edges: u32,
     /// For a stub that only jumps through an import slot, the slot.
     pub thunk: Option<u64>,
-    /// The ways the entry was found (`"symbol"`, `"call"`, `"sweep"`, ...).
+    /// The ways the entry was found (`"SYMBOL"`, `"CALL"`, `"SWEEP"`, ...).
     pub found: Vec<&'static str>,
-    /// Whether the function has landing pads, which rizin does not walk.
+    /// Whether the function has landing pads (exception handlers), which
+    /// its blocks include.
     pub padded: bool,
 }
 
-/// [`crate::functions`](fn@crate::functions), with each function's diagnostics.
+/// [`crate::recover`], with each function's diagnostics.
 #[must_use]
-pub fn functions(bin: &Binary<'_>, limits: &Limits) -> (Functions, Vec<Diagnostic>) {
+pub fn recover(bin: &Binary<'_>, limits: &Limits) -> (Recovery, Vec<Diagnostic>) {
     let (functions, details) = crate::functions::recover(bin, limits);
     let diagnostics = functions
         .functions
@@ -49,22 +52,14 @@ pub fn functions(bin: &Binary<'_>, limits: &Limits) -> (Functions, Vec<Diagnosti
 /// Whether `addr` lies in an executable segment.
 #[must_use]
 pub fn is_code(bin: &Binary<'_>, addr: u64) -> bool {
-    bin.segments.iter().any(|segment| {
-        segment.executable
-            && addr
-                .checked_sub(segment.addr)
-                .is_some_and(|offset| offset < segment.bytes.len() as u64)
-    })
+    bin.is_code(addr)
 }
 
 /// Whether the binary names functions: some start came from a symbol, an
 /// export or function starts, not only the entry point and loader tables.
 #[must_use]
 pub fn named(bin: &Binary<'_>) -> bool {
-    bin.seeds.iter().any(|seed| {
-        !matches!(
-            seed.origin,
-            Origin::Entry | Origin::Init(_) | Origin::Fini(_) | Origin::Tls(_)
-        )
-    })
+    bin.seeds
+        .iter()
+        .any(|seed| !matches!(seed.origin, Origin::Entry | Origin::Loader))
 }

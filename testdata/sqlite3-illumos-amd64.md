@@ -9,4 +9,4 @@ illumos (SmartOS) on x86-64: the `sqlite3` shell, `ELFOSABI_SOLARIS`, linked by 
 - License: SQLite is public domain
 
 `sqlite3-illumos-amd64.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`sqlite3-illumos-amd64.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`sqlite3-illumos-amd64.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

@@ -24,7 +24,16 @@ fn table(arch: Arch) -> Option<&'static [(u16, &'static str)]> {
         Arch::LoongArch64 => &LOONGARCH64,
         Arch::M68k => &M68K,
         Arch::CSky => &CSKY,
-        _ => return None,
+        Arch::SuperH
+        | Arch::OpenRisc
+        | Arch::MicroBlaze
+        | Arch::MicroBlazeEl
+        | Arch::Arc
+        | Arch::ArcV2
+        | Arch::Xtensa
+        | Arch::MCore
+        | Arch::Bpf
+        | Arch::Nios2 => return None,
     })
 }
 
@@ -40,7 +49,10 @@ pub(crate) fn name(arch: Arch, number: u64) -> Option<&'static str> {
 /// [`name`], for resolving a libc wrapper such as `connect` to the call
 /// it issues. The tables are keyed by number, so this scans.
 pub(crate) fn number(arch: Arch, name: &str) -> Option<u64> {
-    table(arch)?.iter().find(|&&(_, n)| n == name).map(|&(number, _)| u64::from(number))
+    table(arch)?
+        .iter()
+        .find(|&&(_, n)| n == name)
+        .map(|&(number, _)| u64::from(number))
 }
 
 /// `src/unix/linux_like/linux/gnu/b64/x86_64/not_x32.rs`

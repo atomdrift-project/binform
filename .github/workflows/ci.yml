@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  RUSTDOCFLAGS: -D warnings
+
+jobs:
+  test:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo test --workspace --all-features
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets --all-features
+      - run: cargo doc --no-deps --all-features
+
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.94
+      - run: cargo build --lib
+
+  fuzz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - run: cargo install cargo-fuzz --locked
+      # The fixtures, decompressed, seed both targets. They are hostile
+      # binaries: they are only ever parsed, never run.
+      - name: Seed corpus
+        run: |
+          mkdir -p fuzz/corpus/parse
+          for f in testdata/*.zst; do
+            case "$f" in *.rizin.json.zst) continue ;; esac
+            zstd -dq "$f" -o "fuzz/corpus/parse/$(basename "$f" .zst)"
+          done
+          cp -r fuzz/corpus/parse fuzz/corpus/recover
+      - run: cargo fuzz run parse -- -max_total_time=120 -rss_limit_mb=2048
+      - run: cargo fuzz run recover -- -max_total_time=180 -rss_limit_mb=2048 -timeout=30

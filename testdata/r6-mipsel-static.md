@@ -36,4 +36,4 @@ int main(int argc, char **argv) {
 ```
 
 `r6-mipsel-static.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`r6-mipsel-static.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`r6-mipsel-static.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

@@ -15,7 +15,7 @@ only rizin 0x406bfe fcn.00406bfe: inside 0x406bf0
 only rizin 0x4071be fcn.004071be: inside 0x406e88
 only rizin 0x4071c0 fcn.004071c0: inside 0x406e88
 only rizin 0x40787e fcn.0040787e: inside 0x407878
-only rizin 0x4078a0 fcn.004078a0: missed
+only rizin 0x4078a0 fcn.004078a0: inside 0x4075b4
 only rizin 0x4086fe fcn.004086fe: inside 0x4086e8
 only rizin 0x40871e fcn.0040871e: inside 0x408718
 only rizin 0x408760 fcn.00408760: inside 0x40874c
@@ -262,7 +262,7 @@ only rizin 0x40b288 fcn.0040b288: not code
 0x409b44 size=34 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | POINTER rizin=1/1
 0x409b6c size=50 blocks=4 edges=5 cc=3 cases=0 found=CALL | SWEEP | POINTER rizin=4/4
 0x409ba8 size=26 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | POINTER rizin=1/1
-0x409bc8 size=156 blocks=12 edges=17 cc=7 cases=0 found=SWEEP | POINTER rizin=13/7
+0x409bc8 size=156 blocks=12 edges=17 cc=7 cases=0 found=CALL | SWEEP | POINTER rizin=13/7
 0x409c80 size=44 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | POINTER rizin=1/1
 0x409cac size=40 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | POINTER rizin=1/1
 0x409d00 size=222 blocks=15 edges=23 cc=10 cases=0 found=CALL | SWEEP | TAIL_CALL | POINTER rizin=16/10

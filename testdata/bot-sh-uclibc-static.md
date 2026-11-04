@@ -10,4 +10,4 @@ Calls load the callee from a literal pool after the function (`mov.l @(disp, pc)
 - **Malware:** this file is hostile. It is kept compressed and only ever parsed; never run it.
 
 `bot-sh-uclibc-static.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`bot-sh-uclibc-static.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`bot-sh-uclibc-static.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

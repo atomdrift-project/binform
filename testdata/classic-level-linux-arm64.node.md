@@ -9,4 +9,4 @@ The same C++ for A64: landing pads, the PLT (a 32-byte header), and A64 jump tab
 - License: MIT (classic-level); it links LevelDB and Snappy, both BSD-3-Clause
 
 `classic-level-linux-arm64.node.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`classic-level-linux-arm64.node.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`classic-level-linux-arm64.node.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

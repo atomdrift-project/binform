@@ -13,224 +13,336 @@
 //! runs before its target, so its note is the transfer's, except an
 //! annulled branch's, which runs on one path only.
 
-use crate::isa::{Extend, Flow, Insn, Mem, Note};
+use crate::isa::{Decode, Extend, Flow, Insn, Mem, Note, relative, sext, u32_at};
 
 /// `%o7`, where `call` and `jmpl` leave the caller's address.
 const O7: u32 = 15;
 /// `%i7`: the caller's `%o7`, after a `save`.
 const I7: u32 = 31;
 
-/// What earlier instructions left that a later one needs.
-#[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct State {
+/// The registers a call leaves as they were: the locals and ins, which
+/// live in the caller's own register window.
+pub(crate) const CALL_PRESERVED: u32 = 0xffff_0000;
+
+/// The SPARC decoder, of V9 when `wide`.
+#[derive(Clone, Debug)]
+pub(crate) struct Decoder {
+    wide: bool,
     /// A register holding another shifted left, and by how much: the index
     /// of the load after it, scaled.
     scaled: Option<(u32, u8)>,
 }
 
-/// The registers a call leaves as they were: the locals and ins, which
-/// live in the caller's own register window.
-pub(crate) const CALL_PRESERVED: u32 = 0xffff_0000;
+impl Decoder {
+    pub(crate) const fn new(wide: bool) -> Self {
+        Self { wide, scaled: None }
+    }
 
-pub(crate) fn decode(state: &mut State, wide: bool, bytes: &[u8], addr: u64) -> Insn {
-    let Some(word) = read_word(bytes) else {
-        return Insn::new(4, Flow::Invalid);
-    };
-    let wrap = |target: u64| if wide { target } else { target & 0xffff_ffff };
-    let Some(flow) = flow(word, addr, wrap) else {
-        let mut insn = Insn::new(4, Flow::Next);
-        // `nop` is `sethi 0, %g0`.
-        insn.pad = word == 0x0100_0000;
-        if !insn.pad {
-            insn.note = note(state, word, wide, addr);
-        }
-        return insn;
-    };
-    if matches!(flow, Flow::Stop | Flow::Invalid) {
-        return Insn::new(4, flow);
-    }
-    // A transfer with no slot after it is cut short: the slot is not code.
-    let Some(slot) = bytes.get(4..8).and_then(read_word) else {
-        return Insn::new(4, Flow::Invalid);
-    };
-    let flow = match flow {
-        Flow::Call(target) if returns_elsewhere(slot) => Flow::Jump(target),
-        Flow::CallIndirect if returns_elsewhere(slot) => Flow::JumpIndirect,
-        flow => flow,
-    };
-    let mut insn = Insn::new(8, flow);
-    // The 32-bit ABI's struct return: the caller follows the call's slot with
-    // `unimp size`, and the callee returns past it, to `%o7 + 12`
-    // (`jmp %i7 + 12`). The word is the call's, not code.
-    if !wide
-        && matches!(flow, Flow::Call(_) | Flow::CallIndirect)
-        && bytes.get(8..12).and_then(read_word).is_some_and(struct_size)
-    {
-        insn.len = 12;
-    }
-    // An annulled branch (bit 29) runs its slot only when taken.
-    let annulled = word >> 30 == 0 && word & 0x2000_0000 != 0;
-    if !annulled {
-        insn.note = note(state, slot, wide, addr.wrapping_add(4));
-    }
-    if matches!(flow, Flow::Call(_) | Flow::CallIndirect) {
-        *state = State::default();
-    }
-    insn
-}
-
-/// The register a PC thunk at the start of `bytes` adds `%o7` to: GCC's
-/// `__sparc_get_pc_thunk.l7` is `retl; add %o7, %l7, %l7`.
-pub(crate) fn pc_thunk(bytes: &[u8]) -> Option<u32> {
-    let (ret, add) = (read_word(bytes)?, read_word(bytes.get(4..)?)?);
-    let rd = (add >> 25) & 0x1f;
-    let (rs1, rs2) = ((add >> 14) & 0x1f, add & 0x1f);
-    let sources = (rs1 == O7 && rs2 == rd) || (rs2 == O7 && rs1 == rd);
-    (ret == 0x81c3_e008 && add & 0xc1f8_3fe0 == 0x8000_0000 && sources && rd != 0).then_some(rd)
-}
-
-/// What `word`, which transfers nowhere, tells a jump-table tracker.
-fn note(state: &mut State, word: u32, wide: bool, addr: u64) -> Note {
-    let rd = (word >> 25) & 0x1f;
-    let op3 = (word >> 19) & 0x3f;
-    let (rs1, rs2) = ((word >> 14) & 0x1f, word & 0x1f);
-    let immediate = word & 0x2000 != 0;
-    let simm = (i64::from(word & 0x1fff) ^ 0x1000) - 0x1000;
-    let wrap = |value: u64| if wide { value } else { value & 0xffff_ffff };
-    let clobber = |reg: u32| {
-        if reg == 0 {
-            Note::None
+    const fn wrap(&self, value: u64) -> u64 {
+        if self.wide {
+            value
         } else {
-            Note::Clobber(1 << reg)
+            value & 0xffff_ffff
         }
-    };
-    let scaled = state.scaled;
-    let note = match word >> 30 {
-        // SETHI
-        0 if (word >> 22) & 7 == 4 && rd != 0 => Note::Address {
+    }
+}
+
+impl Decode for Decoder {
+    fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
+        let Some(word) = be_word(bytes, 0) else {
+            return Insn::new(4, Flow::Invalid);
+        };
+        let Some(flow) = self.flow(word, addr) else {
+            let mut insn = Insn::new(4, Flow::Next);
+            insn.pad = word == NOP;
+            if !insn.pad {
+                insn.note = self.note(word, addr);
+            }
+            return insn;
+        };
+        if flow == Flow::Invalid {
+            return Insn::new(4, flow);
+        }
+        let flow = match (flow, be_word(bytes, 4)) {
+            (Flow::Call(target), Some(slot)) if returns_elsewhere(slot) => Flow::Jump(target),
+            (Flow::CallIndirect, Some(slot)) if returns_elsewhere(slot) => Flow::JumpIndirect,
+            (flow, _) => flow,
+        };
+        // An annulled branch (bit 29) runs its slot only when taken: its
+        // note is no one path's.
+        let annulled = word >> 30 == 0 && word & 0x2000_0000 != 0;
+        let at = addr.wrapping_add(4);
+        let slot = be_word(bytes, 4).map(|slot| match self.flow(slot, at) {
+            Some(_) => Insn::new(4, Flow::Invalid),
+            None if annulled => Insn::new(4, Flow::Next),
+            None => Insn::note(4, self.note(slot, at)),
+        });
+        let mut insn = Insn::new(4, flow).with_slot(slot);
+        // The 32-bit ABI's struct return: the caller follows the call's slot
+        // with `unimp size`, and the callee returns past it, to `%o7 + 12`
+        // (`jmp %i7 + 12`). The word is the call's, not code.
+        if !self.wide && insn.flow.is_call() && be_word(bytes, 8).is_some_and(struct_size) {
+            insn.len = 12;
+        }
+        insn
+    }
+
+    fn reset(&mut self) {
+        self.scaled = None;
+    }
+
+    fn call(&mut self) {
+        self.reset();
+    }
+
+    fn starts_frame(&self, bytes: &[u8]) -> bool {
+        starts_frame(bytes)
+    }
+
+    /// GCC's `__sparc_get_pc_thunk.l7` is `retl; add %o7, %l7, %l7`: it
+    /// adds the call's address to the register.
+    fn pc_thunk(&self, bytes: &[u8], call: u64, _next: u64) -> Option<Note> {
+        let (ret, add) = (be_word(bytes, 0)?, be_word(bytes, 4)?);
+        let rd = (add >> 25) & 0x1f;
+        let (rs1, rs2) = ((add >> 14) & 0x1f, add & 0x1f);
+        let sources = (rs1 == O7 && rs2 == rd) || (rs2 == O7 && rs1 == rd);
+        let thunk = ret == 0x81c3_e008 && add & 0xc1f8_3fe0 == 0x8000_0000 && sources && rd != 0;
+        thunk.then_some(Note::Offset {
             reg: rd,
-            addr: u64::from(word & 0x3f_ffff) << 10,
-        },
-        0 => Note::None,
-        // CMP (SUBcc into %g0) with a positive constant.
-        2 if rd == 0 && op3 == 0x14 && immediate && simm > 0 => Note::Compare {
-            reg: rs1,
-            imm: simm.cast_unsigned(),
-        },
-        // Others into %g0 write only the condition codes.
-        2 if rd == 0 => Note::None,
-        // RD %pc: Sun Studio's position-independent code finding itself.
-        2 if op3 == 0x28 && rs1 == 5 => Note::Address {
-            reg: rd,
-            addr: wrap(addr),
-        },
-        2 => match op3 {
-            // ADD, OR with a constant (OR fills in the bits SETHI left
-            // clear, so it adds).
-            0x00 | 0x02 if immediate && rs1 == 0 => Note::Address {
+            src: rd,
+            imm: call,
+        })
+    }
+}
+
+/// `nop`: `sethi 0, %g0`.
+const NOP: u32 = 0x0100_0000;
+
+/// The big-endian word at `bytes[at..]`.
+fn be_word(bytes: &[u8], at: usize) -> Option<u32> {
+    u32_at(bytes, at, true)
+}
+
+impl Decoder {
+    /// What `word`, which transfers nowhere, tells a jump-table tracker.
+    fn note(&mut self, word: u32, addr: u64) -> Note {
+        let rd = (word >> 25) & 0x1f;
+        let op3 = (word >> 19) & 0x3f;
+        let (rs1, rs2) = ((word >> 14) & 0x1f, word & 0x1f);
+        let immediate = word & 0x2000 != 0;
+        let simm = sext(word, 13);
+        let clobber = |reg: u32| {
+            if reg == 0 {
+                Note::None
+            } else {
+                Note::Clobber(1 << reg)
+            }
+        };
+        let scaled = self.scaled;
+        let note = match word >> 30 {
+            // SETHI
+            // SETHI: the high bits of an address, no address by itself.
+            0 if (word >> 22) & 7 == 4 && rd != 0 => Note::Value {
                 reg: rd,
-                addr: wrap(simm.cast_unsigned()),
+                value: u64::from(word & 0x3f_ffff) << 10,
             },
-            0x00 | 0x02 if immediate => Note::Offset {
-                reg: rd,
-                src: rs1,
+            0 => Note::None,
+            // CMP (SUBcc into %g0) with a positive constant.
+            2 if rd == 0 && op3 == 0x14 && immediate && simm > 0 => Note::Compare {
+                reg: rs1,
                 imm: simm.cast_unsigned(),
             },
-            0x04 if immediate => Note::Offset {
+            // Others into %g0 write only the condition codes.
+            2 if rd == 0 => Note::None,
+            // RD %pc: Sun Studio's position-independent code finding itself.
+            2 if op3 == 0x28 && rs1 == 5 => Note::Value {
                 reg: rd,
-                src: rs1,
-                imm: simm.wrapping_neg().cast_unsigned(),
+                value: self.wrap(addr),
             },
-            0x00 | 0x02 if rs2 == 0 => Note::Copy { reg: rd, src: rs1 },
-            0x00 | 0x02 if rs1 == 0 => Note::Copy { reg: rd, src: rs2 },
-            0x00 => Note::Add {
-                reg: rd,
-                base: rs1,
-                index: rs2,
-                shift: 0,
-                extend: Extend::None,
+            2 => match op3 {
+                // ADD, OR with a constant (OR fills in the bits SETHI left
+                // clear, so it adds).
+                0x00 | 0x02 if immediate && rs1 == 0 => Note::Value {
+                    reg: rd,
+                    value: self.wrap(simm.cast_unsigned()),
+                },
+                0x00 | 0x02 if immediate => Note::Offset {
+                    reg: rd,
+                    src: rs1,
+                    imm: simm.cast_unsigned(),
+                },
+                0x04 if immediate => Note::Offset {
+                    reg: rd,
+                    src: rs1,
+                    imm: simm.wrapping_neg().cast_unsigned(),
+                },
+                0x00 | 0x02 if rs2 == 0 => Note::Copy { reg: rd, src: rs1 },
+                0x00 | 0x02 if rs1 == 0 => Note::Copy { reg: rd, src: rs2 },
+                0x00 => Note::Add {
+                    reg: rd,
+                    base: rs1,
+                    index: rs2,
+                    shift: 0,
+                    extend: Extend::None,
+                },
+                0x04 => Note::Sub {
+                    reg: rd,
+                    base: rs1,
+                    index: rs2,
+                },
+                // AND with a byte mask: a case value narrowed, still below
+                // any bound it had.
+                0x01 if immediate && word & 0x1fff == 0xff => Note::Copy { reg: rd, src: rs1 },
+                // SLL, SLLX by 1-3: a scaled copy.
+                0x25 if immediate && (1..=3).contains(&(word & 0x3f)) => {
+                    self.scaled = Some((rd, u8::try_from(word & 3).unwrap_or(0)));
+                    return Note::Copy { reg: rd, src: rs1 };
+                }
+                // SAVE, RESTORE: a new register window.
+                0x3c | 0x3d => Note::Clobber(u32::MAX),
+                // WR, floating-point operations, Tcc, FLUSH, DONE/RETRY.
+                0x30 | 0x34..=0x37 | 0x3a | 0x3b | 0x3e => Note::None,
+                _ => clobber(rd),
             },
-            0x04 => Note::Sub {
-                reg: rd,
-                base: rs1,
-                index: rs2,
-            },
-            // AND with a byte mask: a case value narrowed, still below
-            // any bound it had.
-            0x01 if immediate && word & 0x1fff == 0xff => Note::Copy { reg: rd, src: rs1 },
-            // SLL, SLLX by 1-3: a scaled copy.
-            0x25 if immediate && (1..=3).contains(&(word & 0x3f)) => {
-                state.scaled = Some((rd, u8::try_from(word & 3).unwrap_or(0)));
-                return Note::Copy { reg: rd, src: rs1 };
-            }
-            // SAVE, RESTORE: a new register window.
-            0x3c | 0x3d => Note::Clobber(u32::MAX),
-            // WR, floating-point operations, Tcc, FLUSH, DONE/RETRY.
-            0x30 | 0x34..=0x37 | 0x3a | 0x3b | 0x3e => Note::None,
-            _ => clobber(rd),
-        },
-        // Loads and stores.
-        3 => match op3 {
-            0x00..=0x02 | 0x08..=0x0b => {
-                let (size, signed) = match op3 {
-                    0x00 => (4, false),
-                    0x01 => (1, false),
-                    0x02 => (2, false),
-                    0x08 => (4, true),
-                    0x09 => (1, true),
-                    0x0a => (2, true),
-                    _ => (8, false),
-                };
-                let reg = |r: u32| (r != 0).then_some(r);
-                let mem = if immediate {
-                    Mem {
-                        base: reg(rs1),
-                        index: None,
-                        scale: 1,
-                        disp: simm.cast_unsigned(),
-                    }
-                } else {
-                    // The scaled register is the index.
-                    let (base, index, shift) = match scaled {
-                        Some((r, shift)) if r == rs2 => (rs1, rs2, shift),
-                        Some((r, shift)) if r == rs1 => (rs2, rs1, shift),
-                        _ => (rs1, rs2, 0),
+            // Loads and stores.
+            3 => match op3 {
+                0x00..=0x02 | 0x08..=0x0b => {
+                    let (size, signed) = match op3 {
+                        0x00 => (4, false),
+                        0x01 => (1, false),
+                        0x02 => (2, false),
+                        0x08 => (4, true),
+                        0x09 => (1, true),
+                        0x0a => (2, true),
+                        _ => (8, false),
                     };
-                    Mem {
-                        base: reg(base),
-                        index: reg(index),
-                        scale: 1 << shift,
-                        disp: 0,
-                    }
-                };
-                if rd == 0 {
-                    Note::None
-                } else {
-                    Note::Load {
-                        reg: rd,
-                        mem,
-                        size,
-                        signed: signed && (wide || size < 4),
+                    let reg = |r: u32| (r != 0).then_some(r);
+                    let mem = if immediate {
+                        Mem {
+                            base: reg(rs1),
+                            index: None,
+                            scale: 1,
+                            disp: simm.cast_unsigned(),
+                        }
+                    } else {
+                        // The scaled register is the index.
+                        let (base, index, shift) = match scaled {
+                            Some((r, shift)) if r == rs2 => (rs1, rs2, shift),
+                            Some((r, shift)) if r == rs1 => (rs2, rs1, shift),
+                            _ => (rs1, rs2, 0),
+                        };
+                        Mem {
+                            base: reg(base),
+                            index: reg(index),
+                            scale: 1 << shift,
+                            disp: 0,
+                        }
+                    };
+                    if rd == 0 {
+                        Note::None
+                    } else {
+                        Note::Load {
+                            reg: rd,
+                            mem,
+                            size,
+                            signed: signed && (self.wide || size < 4),
+                        }
                     }
                 }
-            }
-            // LDD: a pair.
-            0x03 | 0x13 => Note::Clobber((3 << rd) & !1),
-            // Stores.
-            0x04..=0x07 | 0x0e | 0x14..=0x17 | 0x1e => Note::None,
-            // LDSTUB, SWAP and the alternate-space loads; CASA, CASXA.
-            0x00..=0x1f | 0x3c | 0x3e => clobber(rd),
-            // Floating-point loads and stores, prefetches.
+                // LDD: a pair.
+                0x03 | 0x13 => Note::Clobber((3 << rd) & !1),
+                // Stores.
+                0x04..=0x07 | 0x0e | 0x14..=0x17 | 0x1e => Note::None,
+                // LDSTUB, SWAP and the alternate-space loads; CASA, CASXA.
+                0x00..=0x1f | 0x3c | 0x3e => clobber(rd),
+                // Floating-point loads and stores, prefetches.
+                _ => Note::None,
+            },
             _ => Note::None,
-        },
-        _ => Note::None,
-    };
-    if let Some((reg, _)) = state.scaled
-        && note.writes() >> reg & 1 != 0
-    {
-        state.scaled = None;
+        };
+        if let Some((reg, _)) = self.scaled
+            && note.writes() >> reg & 1 != 0
+        {
+            self.scaled = None;
+        }
+        note
     }
-    note
+
+    /// Where control goes after the transfer at `addr` and its slot; `None`
+    /// for an instruction that is no transfer.
+    fn flow(&self, word: u32, addr: u64) -> Option<Flow> {
+        let wrap = |target| self.wrap(target);
+        let rd = (word >> 25) & 0x1f;
+        let cond = (word >> 25) & 0xf;
+        match word >> 30 {
+            // CALL disp30; a call past its own delay slot only reads the PC
+            // (position-independent code finding its GOT).
+            1 => {
+                let target = wrap(relative(addr, word, 30, 4));
+                Some(if target == wrap(addr.wrapping_add(8)) {
+                    Flow::Next
+                } else {
+                    Flow::Call(target)
+                })
+            }
+            0 => {
+                let target = match (word >> 22) & 7 {
+                    // UNIMP / ILLTRAP: zeros, or a struct-return size word.
+                    0 => return Some(Flow::Invalid),
+                    // BPcc, FBPfcc: 19-bit displacement.
+                    1 | 5 => relative(addr, word, 19, 4),
+                    // Bicc, FBfcc: 22-bit displacement.
+                    2 | 6 => relative(addr, word, 22, 4),
+                    // BPr: 16 bits split in two fields; no "always" condition.
+                    3 => {
+                        let field = (word >> 6) & 0xc000 | word & 0x3fff;
+                        return Some(Flow::Branch(wrap(relative(addr, field, 16, 4))));
+                    }
+                    _ => return None,
+                };
+                Some(match cond {
+                    // BN: never taken, but a prefetch of its slot.
+                    0 => Flow::Next,
+                    // BA: always.
+                    8 => Flow::Jump(wrap(target)),
+                    _ => Flow::Branch(wrap(target)),
+                })
+            }
+            2 => {
+                let rs1 = (word >> 14) & 0x1f;
+                let immediate = word & 0x2000 != 0;
+                match (word >> 19) & 0x3f {
+                    // JMPL: `ret` and `retl` jump past the call's slot; a function
+                    // returning a structure, past the `unimp` after it too.
+                    0x38 if rd == 0
+                        && immediate
+                        && matches!(word & 0x1fff, 8 | 12)
+                        && (rs1 == I7 || rs1 == O7) =>
+                    {
+                        Some(Flow::Return)
+                    }
+                    0x38 if rd == O7 => Some(Flow::CallIndirect),
+                    // JMP %rA+%rB: a table's base and its entry.
+                    0x38 if rd == 0 && !immediate && word & 0x1f != 0 => Some(Flow::JumpAdd {
+                        base: rs1,
+                        index: word & 0x1f,
+                    }),
+                    // JMP %rA, JMP %rA+0
+                    0x38 if rd == 0 && (!immediate || word & 0x1fff == 0) => {
+                        Some(Flow::JumpRegister(rs1))
+                    }
+                    // JMP %rA+n: not the register's address.
+                    0x38 if rd == 0 => Some(Flow::JumpIndirect),
+                    // A link into another register: a call by another name.
+                    0x38 => Some(Flow::CallIndirect),
+                    // RETURN (V9)
+                    0x39 => Some(Flow::Return),
+                    _ => None,
+                }
+            }
+            _ => None,
+        }
+    }
 }
 
 /// Whether `word` is the `unimp size` a 32-bit caller places after a call
@@ -251,91 +363,7 @@ fn returns_elsewhere(word: u32) -> bool {
 /// past `simm13`'s reach, `save %sp, %g1, %sp` after `sethi; or` builds the
 /// size in `%g1`.
 pub(crate) fn starts_frame(bytes: &[u8]) -> bool {
-    read_word(bytes).is_some_and(|w| {
-        (w & 0xffff_f000 == 0x9de3_b000) || w == 0x9de3_8001
-    })
-}
-
-fn read_word(bytes: &[u8]) -> Option<u32> {
-    Some(u32::from_be_bytes(bytes.get(..4)?.try_into().ok()?))
-}
-
-/// A signed `bits`-bit word displacement from `addr`.
-fn displaced(addr: u64, word: u32, bits: u32) -> u64 {
-    let field = i64::from(word & ((1 << bits) - 1));
-    let sign = 1_i64 << (bits - 1);
-    addr.wrapping_add_signed(((field ^ sign) - sign) * 4)
-}
-
-/// Where control goes after the transfer at `addr` and its slot; `None`
-/// for an instruction that is no transfer.
-fn flow(word: u32, addr: u64, wrap: impl Fn(u64) -> u64) -> Option<Flow> {
-    let rd = (word >> 25) & 0x1f;
-    let cond = (word >> 25) & 0xf;
-    match word >> 30 {
-        // CALL disp30; a call past its own delay slot only reads the PC
-        // (position-independent code finding its GOT).
-        1 => {
-            let target = wrap(displaced(addr, word, 30));
-            Some(if target == wrap(addr.wrapping_add(8)) {
-                Flow::Next
-            } else {
-                Flow::Call(target)
-            })
-        }
-        0 => {
-            let target = match (word >> 22) & 7 {
-                // UNIMP / ILLTRAP: zeros, or a struct-return size word.
-                0 => return Some(Flow::Invalid),
-                // BPcc, FBPfcc: 19-bit displacement.
-                1 | 5 => displaced(addr, word, 19),
-                // Bicc, FBfcc: 22-bit displacement.
-                2 | 6 => displaced(addr, word, 22),
-                // BPr: 16 bits split in two fields; no "always" condition.
-                3 => {
-                    let field = (word >> 6) & 0xc000 | word & 0x3fff;
-                    return Some(Flow::Branch(wrap(displaced(addr, field, 16))));
-                }
-                _ => return None,
-            };
-            Some(match cond {
-                // BN: never taken, but a prefetch of its slot.
-                0 => Flow::Next,
-                // BA: always.
-                8 => Flow::Jump(wrap(target)),
-                _ => Flow::Branch(wrap(target)),
-            })
-        }
-        2 => {
-            let rs1 = (word >> 14) & 0x1f;
-            let immediate = word & 0x2000 != 0;
-            match (word >> 19) & 0x3f {
-                // JMPL: `ret` and `retl` jump past the call's slot; a function
-                // returning a structure, past the `unimp` after it too.
-                0x38 if rd == 0
-                    && immediate
-                    && matches!(word & 0x1fff, 8 | 12)
-                    && (rs1 == I7 || rs1 == O7) =>
-                {
-                    Some(Flow::Return)
-                }
-                0x38 if rd == O7 => Some(Flow::CallIndirect),
-                // JMP %rA+%rB: a table's base and its entry.
-                0x38 if rd == 0 && !immediate && word & 0x1f != 0 => Some(Flow::JumpAdd {
-                    base: rs1,
-                    index: word & 0x1f,
-                }),
-                0x38 if rd == 0 && !immediate => Some(Flow::JumpRegister(rs1)),
-                0x38 if rd == 0 => Some(Flow::JumpRegister(rs1)),
-                // A link into another register: a call by another name.
-                0x38 => Some(Flow::CallIndirect),
-                // RETURN (V9)
-                0x39 => Some(Flow::Return),
-                _ => None,
-            }
-        }
-        _ => None,
-    }
+    be_word(bytes, 0).is_some_and(|w| (w & 0xffff_f000 == 0x9de3_b000) || w == 0x9de3_8001)
 }
 
 #[cfg(test)]
@@ -344,7 +372,7 @@ mod tests {
 
     fn one(words: &[u32], addr: u64) -> Insn {
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
-        decode(&mut State::default(), false, &bytes, addr)
+        Decoder::new(false).decode(&bytes, addr)
     }
 
     #[test]
@@ -362,11 +390,11 @@ mod tests {
     /// Each instruction of `words` at `addr` on, in order.
     fn run(words: &[u32], addr: u64) -> Vec<Insn> {
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
-        let mut state = State::default();
+        let mut decoder = Decoder::new(true);
         let mut out = Vec::new();
         let mut at = 0;
         while at < bytes.len() {
-            let insn = decode(&mut state, true, &bytes[at..], addr + at as u64);
+            let insn = decoder.decode(&bytes[at..], addr + at as u64);
             out.push(insn);
             at += insn.len as usize;
         }
@@ -393,9 +421,9 @@ mod tests {
         assert_eq!(notes[0], Note::Compare { reg: 26, imm: 10 });
         assert_eq!(
             notes[1],
-            Note::Address {
+            Note::Value {
                 reg: 1,
-                addr: 0x2b_1400
+                value: 0x2b_1400
             }
         );
         assert_eq!(
@@ -433,9 +461,9 @@ mod tests {
         // rd %pc, %o7
         assert_eq!(
             run(&[0x9f41_4000], 0x1000)[0].note,
-            Note::Address {
+            Note::Value {
                 reg: 15,
-                addr: 0x1000
+                value: 0x1000
             }
         );
         // An annulled branch's slot: no note.
@@ -445,7 +473,14 @@ mod tests {
             .iter()
             .flat_map(|w| w.to_be_bytes())
             .collect();
-        assert_eq!(pc_thunk(&thunk), Some(23));
+        assert_eq!(
+            Decoder::new(false).pc_thunk(&thunk, 0x1000, 0x1008),
+            Some(Note::Offset {
+                reg: 23,
+                src: 23,
+                imm: 0x1000
+            })
+        );
     }
 
     const NOP: u32 = 0x0100_0000;
@@ -479,6 +514,11 @@ mod tests {
         assert_eq!(one(&[0x9fc0_4000, NOP], 0x1000).flow, Flow::CallIndirect);
         // jmp %g1
         assert_eq!(one(&[0x81c0_6000, NOP], 0x1000).flow, Flow::JumpRegister(1));
+        // jmp %g1 + %g0; jmp %g1 + 0
+        assert_eq!(one(&[0x81c0_4000, NOP], 0x1000).flow, Flow::JumpRegister(1));
+        assert_eq!(one(&[0x81c0_6000, NOP], 0x1000).flow, Flow::JumpRegister(1));
+        // jmp %g1 + 4: somewhere past the register's address.
+        assert_eq!(one(&[0x81c0_6004, NOP], 0x1000).flow, Flow::JumpIndirect);
         // brz %o0, +8 (BPr)
         assert_eq!(one(&[0x02c2_0002, NOP], 0x1000).flow, Flow::Branch(0x1008));
     }
@@ -496,7 +536,7 @@ mod tests {
             .iter()
             .flat_map(|w| w.to_be_bytes())
             .collect();
-        assert_eq!(decode(&mut State::default(), true, &bytes, 0x1_0000).len, 8);
+        assert_eq!(Decoder::new(true).decode(&bytes, 0x1_0000).len, 8);
         // jmp %i7 + 12; restore
         assert_eq!(one(&[0x81c7_e00c, 0x81e8_0000], 0x1000).flow, Flow::Return);
     }
@@ -509,5 +549,8 @@ mod tests {
         assert_eq!(one(&[0x9de3_bfa0], 0x1000).flow, Flow::Next);
         assert_eq!(one(&[0], 0x1000).flow, Flow::Invalid);
         assert_eq!(one(&[0x4000_0010], 0x1000).flow, Flow::Invalid);
+        // A transfer in a delay slot, or a slot that is no instruction.
+        assert_eq!(one(&[0x4000_0010, 0x1080_0002], 0x1000).flow, Flow::Invalid);
+        assert_eq!(one(&[0x81c3_e008, 0], 0x1000).flow, Flow::Invalid);
     }
 }

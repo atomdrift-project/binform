@@ -6,7 +6,7 @@
 #![allow(clippy::panic, clippy::indexing_slicing)]
 
 use super::Recovered as Function;
-use crate::{Arch, Binary, Found, Handler, Origin, RefKind, Seed, Segment, Slot};
+use crate::{Arch, Binary, Found, Handler, Origin, Ref, RefKind, Seed, Segment, Slot};
 
 fn segment(addr: u64, bytes: &[u8], executable: bool) -> Segment<'_> {
     Segment {
@@ -53,7 +53,7 @@ fn cases(function: &Function) -> Vec<u64> {
         .refs
         .iter()
         .filter(|r| r.kind == RefKind::Case)
-        .map(|r| r.to)
+        .map(Ref::addr)
         .collect()
 }
 
@@ -217,6 +217,36 @@ fn a64_absolute_table() {
     );
 }
 
+/// A table without a bound whose entry names the jump itself: hostile, and
+/// no reason to stop.
+#[test]
+fn unbounded_table_naming_its_own_jump() {
+    let code = words(&[
+        0x9000_0081, // 0x10000 adrp x1, 0x20000
+        0x9100_0021, // 0x10004 add x1, x1, #0
+        0xf860_7821, // 0x10008 ldr x1, [x1, x0, lsl #3]
+        0xd61f_0020, // 0x1000c br x1
+        0xd65f_03c0, // 0x10010 ret
+    ]);
+    let table: Vec<u8> = [0x1_000c_u64, 0x1_0010]
+        .iter()
+        .flat_map(|target| target.to_le_bytes())
+        .collect();
+    let image = image(
+        Arch::Arm64,
+        vec![
+            segment(0x1_0000, &code, true),
+            segment(0x2_0000, &table, false),
+        ],
+        vec![entry(0x1_0000)],
+    );
+    let recovery = super::recover(&image);
+    assert_eq!(
+        cases(function(&recovery.functions, 0x1_0000)),
+        [0x1_000c, 0x1_0010]
+    );
+}
+
 /// `_start` passes `main` to the C runtime, which calls it: nothing in the
 /// binary does, so only the argument finds it once symbols are stripped.
 #[test]
@@ -260,6 +290,7 @@ fn main_from_libc_start_main() {
         image.slots.push(Slot {
             slot: 0x3000,
             name: "__libc_start_main".into(),
+            import: None,
         });
         if arch == Arch::Arm64 {
             // Called directly, by name.
@@ -307,7 +338,7 @@ fn landing_pads_are_explored() {
     assert_eq!(function(&without.functions, 0x1000).blocks, 1);
     let thrower = function(&with.functions, 0x1000);
     assert_eq!(thrower.blocks, 2);
-    assert!(thrower.refs.iter().any(|r| r.to == 0x1110));
+    assert!(thrower.refs.iter().any(|r| r.addr() == 0x1110));
     // The pad's callee is found, and the pad is no function of its own.
     assert!(with.functions.iter().any(|f| f.entry == 0x1110));
     assert!(!with.functions.iter().any(|f| f.entry == 0x1010));
@@ -561,7 +592,7 @@ fn sparc_delay_slots() {
     assert!(
         main.refs
             .iter()
-            .any(|r| r.kind == RefKind::Call && r.to == 0x1024)
+            .any(|r| r.kind == RefKind::Call && r.addr() == 0x1024)
     );
     assert_eq!(function(&recovery.functions, 0x1024).size, 8);
 }
@@ -596,8 +627,7 @@ fn superh_delay_slots() {
 
 /// A start routine calls one that never returns (it calls an exit loop),
 /// and a word of data follows the call: the call ends the function. A
-/// call to the same routine that code follows runs on into that code, as
-/// rizin has it.
+/// call to the same routine that code follows runs on into that code.
 #[test]
 fn x86_64_inferred_noreturn() {
     let mut code = Vec::new();

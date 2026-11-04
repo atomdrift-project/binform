@@ -9,4 +9,4 @@
 - License: Apache-2.0 (SQLitePCLRaw); SQLite itself is public domain
 
 `libe_sqlite3-android-x86.so.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`libe_sqlite3-android-x86.so.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`libe_sqlite3-android-x86.so.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

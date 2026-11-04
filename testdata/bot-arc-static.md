@@ -10,4 +10,4 @@ Instructions are 16 or 32 bits, stored as halfwords high half first, and a regis
 - **Malware:** this file is hostile. It is kept compressed and only ever parsed; never run it.
 
 `bot-arc-static.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`bot-arc-static.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`bot-arc-static.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

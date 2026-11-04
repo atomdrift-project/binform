@@ -305,7 +305,7 @@ only rizin 0x24231 fcn.00024231: inside 0x24018
 0x1b374 size=142 blocks=8 edges=10 cc=4 cases=0 found=CALL | SWEEP | POINTER rizin=-
 0x1b420 size=62 blocks=5 edges=6 cc=3 cases=0 found=CALL | SWEEP | POINTER rizin=-
 0x1b460 size=72 blocks=6 edges=7 cc=3 cases=0 found=CALL | SWEEP | POINTER rizin=-
-0x1b4a8 size=830 blocks=69 edges=101 cc=34 cases=0 found=SWEEP rizin=-
+0x1b4a8 size=830 blocks=69 edges=101 cc=34 cases=0 found=CALL | SWEEP | POINTER rizin=-
 0x1b7e8 size=58 blocks=3 edges=3 cc=2 cases=0 found=CALL | SWEEP | POINTER rizin=-
 0x1b830 size=32 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | POINTER rizin=-
 0x1b85c size=160 blocks=21 edges=30 cc=11 cases=0 found=CALL | SWEEP | POINTER rizin=-

@@ -9,4 +9,4 @@ An x86-64 ELF relocatable object: the same layout question, on x86-64.
 - License: BSD-3-Clause (the Go license)
 
 `cycle.elf.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`cycle.elf.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`cycle.elf.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

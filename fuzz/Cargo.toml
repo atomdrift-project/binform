@@ -1,0 +1,30 @@
+[package]
+name = "binform-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+binform = { path = ".." }
+libfuzzer-sys = "0.4"
+
+# Not a member of binform's workspace: it builds only with `cargo fuzz`,
+# on nightly.
+[workspace]
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "recover"
+path = "fuzz_targets/recover.rs"
+test = false
+doc = false
+bench = false

@@ -10,4 +10,4 @@ It uses the 68020's additions throughout: `bsr.l` and `jsr` with 32-bit displace
 - **Malware:** this file is hostile. It is kept compressed and only ever parsed; never run it.
 
 `bot-m68k-static.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`bot-m68k-static.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`bot-m68k-static.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

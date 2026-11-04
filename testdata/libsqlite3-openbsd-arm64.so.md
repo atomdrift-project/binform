@@ -9,4 +9,4 @@ OpenBSD 7.8 on A64: every function starts with `bti c` and guards its return add
 - License: SQLite is public domain
 
 `libsqlite3-openbsd-arm64.so.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`libsqlite3-openbsd-arm64.so.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`libsqlite3-openbsd-arm64.so.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

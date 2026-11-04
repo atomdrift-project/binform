@@ -10,4 +10,4 @@ Instructions are 16 bits, with no delay slots. Constants come from literal pools
 - **Malware:** this file is hostile. It is kept compressed and only ever parsed; never run it.
 
 `bot-csky-static.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`bot-csky-static.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`bot-csky-static.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

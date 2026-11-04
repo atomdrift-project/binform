@@ -4,18 +4,17 @@
 //! not the file. The CLR (COR20) directory is never read: recovery does not
 //! need it, and a malformed one is common in obfuscated .NET binaries.
 
-use super::read::Reader;
+use std::collections::{BTreeSet, HashMap};
 
-/// The most entries read from any one table.
-const MOST: u64 = 1 << 20;
-/// The most imports read across both import tables. Descriptors may share
-/// one lookup table, so a few kilobytes can claim billions; real binaries
-/// import thousands at most.
-const MOST_IMPORTS: usize = 1 << 18;
-/// The most name bytes copied out of the import or export table. Every
-/// entry may point at the same long string; real tables hold well under a
-/// megabyte of names.
-const NAME_BYTES: usize = 32 << 20;
+use super::read::{self, Reader};
+use super::{Error, limits};
+
+/// `PE\0\0`.
+const PE_SIGNATURE: u32 = 0x0000_4550;
+const PE32: u16 = 0x10b;
+const PE32_PLUS: u16 = 0x20b;
+/// The data directories an optional header can hold.
+const DIRECTORIES: u64 = 16;
 
 const DIRECTORY_EXPORT: usize = 0;
 const DIRECTORY_IMPORT: usize = 1;
@@ -38,10 +37,11 @@ pub(super) struct Pe<'a> {
     pub(super) image_base: u64,
     /// The entry point's RVA; zero for none.
     pub(super) entry: u32,
-    pub(super) file_alignment: u32,
     pub(super) sections: Vec<Section>,
     /// Each data directory's (RVA, size).
     directories: Vec<(u32, u32)>,
+    /// What the file backs, as [`spans`] gives it.
+    spans: Vec<Span>,
 }
 
 /// One exported function: by name, or `Ordinal_n`; a forwarder names
@@ -74,57 +74,61 @@ pub(super) struct Section {
     pub(super) characteristics: u32,
 }
 
+/// RVAs from `start` to `end` that the file backs from `offset` on.
+#[derive(Clone, Copy)]
+struct Span {
+    start: u64,
+    end: u64,
+    offset: u64,
+}
+
 /// The PE file in `bytes`, or why it is none: only a missing signature or
 /// an unknown optional header fails.
-pub(super) fn parse(bytes: &[u8]) -> Result<Pe<'_>, String> {
+pub(super) fn parse(bytes: &[u8]) -> Result<Pe<'_>, Error> {
     let r = Reader::new(bytes, false);
-    let nt = u64::from(r.u32(0x3c).ok_or("DOS header truncated")?);
-    if r.u32(nt) != Some(0x0000_4550) {
-        return Err("no PE signature".into());
+    let nt = r.u32(0x3c).ok_or(Error::Truncated("DOS header"))?;
+    let nt = r.at(u64::from(nt));
+    if nt.u32(0) != Some(PE_SIGNATURE) {
+        return Err(Error::BadMagic);
     }
-    let coff = nt + 4;
-    let (machine, count, optional_size) =
-        (|| Some((r.u16(coff)?, r.u16(coff + 2)?, r.u16(coff + 16)?)))()
-            .ok_or("COFF header truncated")?;
-    let optional = coff + 20;
-    let is_64 = match r.u16(optional) {
-        Some(0x10b) => false,
-        Some(0x20b) => true,
-        Some(magic) => return Err(format!("unknown optional header magic {magic:#x}")),
-        None => return Err("optional header truncated".into()),
+    let coff = nt.at(4);
+    let (machine, count, optional_size) = (|| Some((coff.u16(0)?, coff.u16(2)?, coff.u16(16)?)))()
+        .ok_or(Error::Truncated("COFF header"))?;
+    let optional = coff.at(20);
+    let is_64 = match optional.u16(0) {
+        Some(PE32) => false,
+        Some(PE32_PLUS) => true,
+        Some(_) => return Err(Error::Unsupported("PE optional header magic")),
+        None => return Err(Error::Truncated("PE optional header")),
     };
-    let entry = r.u32(optional + 16).unwrap_or(0);
+    let entry = optional.u32(16).unwrap_or(0);
     let image_base = if is_64 {
-        r.u64(optional + 24)
+        optional.u64(24)
     } else {
-        r.u32(optional + 28).map(u64::from)
+        optional.u32(28).map(u64::from)
     }
     .unwrap_or(0);
-    let file_alignment = r.u32(optional + 36).unwrap_or(0);
+    let file_alignment = optional.u32(36).unwrap_or(0);
     let (count_at, first) = if is_64 { (108, 112) } else { (92, 96) };
     // The directories that fit in the optional header the COFF header sizes.
     let fit = u64::from(optional_size).saturating_sub(first) / 8;
-    let directories = (0..r
-        .u32(optional + count_at)
-        .map_or(0, u64::from)
-        .min(fit)
-        .min(16))
-        .map_while(|i| {
-            let at = optional + first + 8 * i;
-            Some((r.u32(at)?, r.u32(at + 4)?))
-        })
+    let claimed = optional.u32(count_at).map_or(0, u64::from);
+    let directories = read::table(first, 8, claimed.min(fit).min(DIRECTORIES))
+        .map_while(|at| Some((optional.u32(at)?, optional.at(at).u32(4)?)))
         .collect();
-    let table = optional + u64::from(optional_size);
     // Long section names (`/4`) are offsets into the COFF string table,
     // which follows the symbol table and starts with its own size. A strip
     // can leave the pointer behind with other bytes where the table was
     // (MinGW images whose resources were rewritten): a table whose size
     // does not fit the file, or a name that runs past it or is no text,
     // leaves the section with the name its header holds.
-    let strings = r
-        .u32(coff + 8)
+    let strings = coff
+        .u32(8)
         .filter(|&symbols| symbols != 0)
-        .map(|symbols| u64::from(symbols) + 18 * u64::from(r.u32(coff + 12).unwrap_or(0)))
+        .map(|symbols| {
+            let count = u64::from(coff.u32(12).unwrap_or(0));
+            u64::from(symbols).saturating_add(count.saturating_mul(18))
+        })
         .and_then(|start| {
             let size = u64::from(r.u32(start)?);
             let table = r
@@ -138,10 +142,11 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Pe<'_>, String> {
         let name = std::str::from_utf8(rest.get(..rest.iter().position(|&b| b == 0)?)?).ok()?;
         (!name.is_empty() && !name.chars().any(char::is_control)).then(|| name.to_owned())
     };
-    let sections = (0..u64::from(count))
-        .map_while(|i| {
-            let at = table + 40 * i;
-            let raw = r.array::<8>(at)?;
+    let headers = optional.at(u64::from(optional_size));
+    let sections: Vec<Section> = read::table(0, 40, u64::from(count))
+        .map_while(|at| {
+            let header = headers.at(at);
+            let raw = header.array::<8>(0)?;
             let raw = raw.split(|&b| b == 0).next().unwrap_or_default();
             let long = raw
                 .strip_prefix(b"/")
@@ -149,23 +154,29 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Pe<'_>, String> {
                 .and_then(long_name);
             Some(Section {
                 name: long.unwrap_or_else(|| String::from_utf8_lossy(raw).into_owned()),
-                virtual_size: r.u32(at + 8)?,
-                virtual_address: r.u32(at + 12)?,
-                size_of_raw_data: r.u32(at + 16)?,
-                pointer_to_raw_data: r.u32(at + 20)?,
-                characteristics: r.u32(at + 36)?,
+                virtual_size: header.u32(8)?,
+                virtual_address: header.u32(12)?,
+                size_of_raw_data: header.u32(16)?,
+                pointer_to_raw_data: header.u32(20)?,
+                characteristics: header.u32(36)?,
             })
         })
         .collect();
+    // An alignment that is no power of two is the loader's default.
+    let alignment = match u64::from(file_alignment) {
+        a if a.is_power_of_two() => a,
+        _ => 0x200,
+    };
+    let spans = spans(&sections, alignment);
     Ok(Pe {
         r,
         machine,
         is_64,
         image_base,
         entry,
-        file_alignment,
         sections,
         directories,
+        spans,
     })
 }
 
@@ -182,8 +193,8 @@ impl Section {
         let pointer = u64::from(self.pointer_to_raw_data);
         let end = pointer
             .saturating_add(raw)
-            .saturating_add(file_alignment - 1)
-            & !(file_alignment - 1);
+            .checked_next_multiple_of(file_alignment)
+            .unwrap_or(u64::MAX);
         let size = end.saturating_sub(pointer & !0x1ff).min(page(raw));
         match u64::from(self.virtual_size) {
             0 => size,
@@ -192,24 +203,82 @@ impl Section {
     }
 }
 
+/// The RVAs the file backs, as sorted spans that do not overlap: each RVA
+/// by the first section, in header order, that backs it, as the loader
+/// would map it. Built once, so finding an RVA's offset is a binary search
+/// however many sections there are.
+fn spans(sections: &[Section], alignment: u64) -> Vec<Span> {
+    let backed: Vec<Span> = sections
+        .iter()
+        .filter_map(|section| {
+            let start = u64::from(section.virtual_address);
+            let end = start.checked_add(section.read_size(alignment))?;
+            let offset = u64::from(section.pointer_to_raw_data);
+            (end > start).then_some(Span { start, end, offset })
+        })
+        .collect();
+    // Sweep the sections' starts and ends; between two, the first section
+    // open owns the RVAs.
+    let mut edges: Vec<(u64, usize)> = backed
+        .iter()
+        .enumerate()
+        .flat_map(|(i, span)| [(span.start, i), (span.end, i)])
+        .collect();
+    edges.sort_unstable();
+    let mut open = BTreeSet::new();
+    let mut spans = Vec::new();
+    let mut groups = edges.chunk_by(|a, b| a.0 == b.0).peekable();
+    while let Some(group) = groups.next() {
+        let Some(&(at, _)) = group.first() else {
+            continue;
+        };
+        for &(_, i) in group {
+            if backed.get(i).is_some_and(|span| span.start == at) {
+                open.insert(i);
+            } else {
+                open.remove(&i);
+            }
+        }
+        let next = groups.peek().and_then(|group| group.first());
+        let owner = open.first().and_then(|&i| backed.get(i));
+        if let (Some(&(end, _)), Some(owner)) = (next, owner)
+            && let Some(offset) = owner.offset.checked_add(at.saturating_sub(owner.start))
+        {
+            spans.push(Span {
+                start: at,
+                end,
+                offset,
+            });
+        }
+    }
+    spans
+}
+
+/// One import descriptor: the DLL's name and its lookup and address
+/// tables, as RVAs.
+struct Descriptor {
+    name: u32,
+    lookup: u32,
+    address: u32,
+    /// Subtracted from name addresses that are no RVAs.
+    base: u64,
+    /// From the delay-load table.
+    delayed: bool,
+}
+
+/// The imports read so far, and the name bytes they may still spend.
+struct ImportWalk {
+    imports: Vec<Import>,
+    budget: usize,
+}
+
 impl Pe<'_> {
     /// The file offset of `rva`, by the first section that backs it.
     pub(super) fn offset(&self, rva: u32) -> Option<u64> {
-        // An alignment that is no power of two is the loader's default.
-        let alignment = match u64::from(self.file_alignment) {
-            a if a.is_power_of_two() => a,
-            _ => 0x200,
-        };
         let rva = u64::from(rva);
-        self.sections
-            .iter()
-            .find(|section| {
-                let start = u64::from(section.virtual_address);
-                rva >= start && rva - start < section.read_size(alignment)
-            })
-            .map(|section| {
-                u64::from(section.pointer_to_raw_data) + (rva - u64::from(section.virtual_address))
-            })
+        let i = self.spans.partition_point(|span| span.end <= rva);
+        let span = self.spans.get(i).filter(|span| span.start <= rva)?;
+        span.offset.checked_add(rva.checked_sub(span.start)?)
     }
 
     /// The RVA of the resource directory, which old linkers put in a
@@ -225,35 +294,40 @@ impl Pe<'_> {
             .filter(|&(rva, _)| rva != 0)
     }
 
+    /// The bytes from `rva` on, if the file backs it.
+    fn at(&self, rva: u32) -> Option<Reader<'_>> {
+        Some(self.r.at(self.offset(rva)?))
+    }
+
     /// The NUL-terminated name at `rva`.
     fn name_at(&self, rva: u32) -> Option<String> {
         Some(self.r.name(self.offset(rva)?).into_owned())
     }
 
-    /// The named exports: each one's RVA and name. A forwarder, whose RVA
-    /// lies inside the export directory and names another DLL's export,
-    /// is left out.
+    /// The exports, by function index: each one's RVA, and its name or
+    /// `Ordinal_n` for one exported by ordinal only. A forwarder, whose RVA
+    /// lies inside the export directory, names another DLL's export in
+    /// `forward`.
     pub(super) fn exports(&self) -> Vec<Export> {
         let Some((dir, size)) = self.directory(DIRECTORY_EXPORT) else {
             return Vec::new();
         };
-        let Some(at) = self.offset(dir) else {
+        let Some(header) = self.at(dir) else {
             return Vec::new();
         };
-        let r = &self.r;
         let fields = (|| {
             Some((
-                r.u32(at + 20)?,
-                r.u32(at + 24)?,
-                r.u32(at + 28)?,
-                r.u32(at + 32)?,
-                r.u32(at + 36)?,
+                header.u32(20)?,
+                header.u32(24)?,
+                header.u32(28)?,
+                header.u32(32)?,
+                header.u32(36)?,
             ))
         })();
         let Some((functions, names, function_table, name_table, ordinal_table)) = fields else {
             return Vec::new();
         };
-        let ordinal_base = r.u32(at + 16).unwrap_or(1);
+        let ordinal_base = header.u32(16).unwrap_or(1);
         let (Some(function_table), Some(name_table), Some(ordinal_table)) = (
             self.offset(function_table),
             self.offset(name_table),
@@ -261,40 +335,44 @@ impl Pe<'_> {
         ) else {
             return Vec::new();
         };
-        // Each function by its index: the names table names some of them;
-        // the rest are exported by ordinal only.
-        let mut budget = NAME_BYTES;
-        let mut named: Vec<Option<String>> =
-            vec![None; usize::try_from(u64::from(functions).min(MOST)).unwrap_or(0)];
-        for i in 0..u64::from(names).min(MOST) {
-            let Some(index) = r.u16(ordinal_table + 2 * i) else {
+        let r = &self.r;
+        let functions = u64::from(functions);
+        // The names table names some functions, by index; the rest are
+        // exported by ordinal only.
+        let mut budget = limits::NAME_BYTES;
+        let mut named: HashMap<u16, String> = HashMap::new();
+        let count = u64::from(names);
+        for (index_at, name_at) in
+            read::table(ordinal_table, 2, count).zip(read::table(name_table, 4, count))
+        {
+            let Some(index) = r.u16(index_at) else {
                 break;
             };
-            if let Some(slot) = named.get_mut(usize::from(index))
-                && slot.is_none()
-            {
-                *slot = r
-                    .u32(name_table + 4 * i)
-                    .and_then(|name| self.name_at(name));
-                budget = budget.saturating_sub(slot.as_ref().map_or(0, String::len));
-                if budget == 0 {
-                    break;
-                }
+            if u64::from(index) >= functions.min(limits::TABLE) || named.contains_key(&index) {
+                continue;
+            }
+            if let Some(name) = r.u32(name_at).and_then(|name| self.name_at(name)) {
+                budget = budget.saturating_sub(name.len());
+                named.insert(index, name);
+            }
+            if budget == 0 {
+                break;
             }
         }
         (0_u32..)
-            .zip(named)
-            .filter_map(|(index, name)| {
-                let rva = r.u32(function_table + 4 * u64::from(index))?;
+            .zip(read::table(function_table, 4, functions))
+            .filter_map(|(index, at)| {
+                let rva = r.u32(at)?;
                 if rva == 0 {
                     return None;
                 }
-                // A forwarder's RVA lies inside the export directory and
-                // names another DLL's export.
-                let forward = (rva >= dir && rva - dir < size && budget > 0)
+                let forward = (rva.checked_sub(dir).is_some_and(|d| d < size) && budget > 0)
                     .then(|| self.name_at(rva))
                     .flatten();
                 budget = budget.saturating_sub(forward.as_ref().map_or(0, String::len));
+                let name = u16::try_from(index)
+                    .ok()
+                    .and_then(|index| named.remove(&index));
                 Some(Export {
                     rva,
                     name: name
@@ -307,40 +385,49 @@ impl Pe<'_> {
 
     /// The import address table's slots, then the delay-load table's, with
     /// the DLL each imports from and the name it imports (`Ordinal_n` for
-    /// one imported by ordinal only).
+    /// one imported by ordinal only). Stops at [`limits::IMPORTS`], or once
+    /// the names spend [`limits::NAME_BYTES`].
     pub(super) fn imports(&self) -> Vec<Import> {
-        let r = &self.r;
-        let mut imports = Vec::new();
-        let mut budget = NAME_BYTES;
-        if let Some(mut at) = self
+        let mut walk = ImportWalk {
+            imports: Vec::new(),
+            budget: limits::NAME_BYTES,
+        };
+        if let Some(table) = self
             .directory(DIRECTORY_IMPORT)
-            .and_then(|(rva, _)| self.offset(rva))
+            .and_then(|(rva, _)| self.at(rva))
         {
-            for _ in 0..1 << 12 {
-                let descriptor = (|| Some([r.u32(at)?, r.u32(at + 12)?, r.u32(at + 16)?]))();
-                let Some([lookup, name, address]) = descriptor else {
+            for at in read::table(0, 20, limits::DESCRIPTORS) {
+                let d = table.at(at);
+                let Some([lookup, name, address]) =
+                    (|| Some([d.u32(0)?, d.u32(12)?, d.u32(16)?]))()
+                else {
                     break;
                 };
-                at += 20;
                 // The table ends at an empty descriptor, or one naming no
                 // DLL or slots.
                 if name == 0 || address == 0 {
                     break;
                 }
-                self.thunks(lookup, name, address, 0, false, &mut imports, &mut budget);
+                let descriptor = Descriptor {
+                    name,
+                    lookup,
+                    address,
+                    base: 0,
+                    delayed: false,
+                };
+                self.thunks(&descriptor, &mut walk);
             }
         }
-        if let Some(mut at) = self
+        let delayed = self
             .directory(DIRECTORY_DELAY_IMPORT)
-            .and_then(|(rva, _)| self.offset(rva))
-        {
-            for _ in 0..1 << 12 {
-                let descriptor =
-                    (|| Some([r.u32(at)?, r.u32(at + 4)?, r.u32(at + 12)?, r.u32(at + 16)?]))();
-                let Some([attributes, name, address, lookup]) = descriptor else {
+            .and_then(|(rva, _)| self.at(rva));
+        if let Some(table) = delayed {
+            for at in read::table(0, 32, limits::DESCRIPTORS) {
+                let d = table.at(at);
+                let fields = (|| Some([d.u32(0)?, d.u32(4)?, d.u32(12)?, d.u32(16)?]))();
+                let Some([attributes, name, address, lookup]) = fields else {
                     break;
                 };
-                at += 32;
                 if name == 0 || address == 0 {
                     break;
                 }
@@ -351,73 +438,60 @@ impl Pe<'_> {
                     0
                 };
                 let rva = |va: u32| u32::try_from(u64::from(va).wrapping_sub(base)).unwrap_or(0);
-                self.thunks(
-                    rva(lookup),
-                    rva(name),
-                    rva(address),
+                let descriptor = Descriptor {
+                    name: rva(name),
+                    lookup: rva(lookup),
+                    address: rva(address),
                     base,
-                    true,
-                    &mut imports,
-                    &mut budget,
-                );
+                    delayed: true,
+                };
+                self.thunks(&descriptor, &mut walk);
             }
         }
-        imports
+        walk.imports
     }
 
-    /// The imports of one descriptor: DLL `name`, its lookup and address
-    /// tables. `base` is subtracted from name addresses that are no RVAs;
-    /// `delayed` marks the delay-load table's. Stops at [`MOST_IMPORTS`],
-    /// or once the names spend `budget`.
-    #[allow(clippy::too_many_arguments)]
-    fn thunks(
-        &self,
-        lookup: u32,
-        name: u32,
-        address: u32,
-        base: u64,
-        delayed: bool,
-        out: &mut Vec<Import>,
-        budget: &mut usize,
-    ) {
+    /// The imports of one descriptor.
+    fn thunks(&self, d: &Descriptor, walk: &mut ImportWalk) {
         let r = &self.r;
         let width: u32 = if self.is_64 { 8 } else { 4 };
         let ordinal_flag = if self.is_64 { 1 << 63 } else { 1 << 31 };
         // The lookup table names the imports; the address table holds the
         // same until the loader binds it.
-        let Some(table) = self.offset(lookup).or_else(|| self.offset(address)) else {
+        let Some(table) = self.offset(d.lookup).or_else(|| self.offset(d.address)) else {
             return;
         };
-        let library = self.name_at(name).unwrap_or_default();
-        for i in 0..1_u32 << 16 {
-            if out.len() >= MOST_IMPORTS || *budget == 0 {
+        let library = self.name_at(d.name).unwrap_or_default();
+        for (i, at) in (0_u32..).zip(read::table(table, u64::from(width), limits::THUNKS)) {
+            if walk.imports.len() >= limits::IMPORTS || walk.budget == 0 {
                 return;
             }
-            let Some(entry) = r.word(table + u64::from(width * i), self.is_64) else {
+            let Some(entry) = r.word(at, self.is_64) else {
                 break;
             };
             if entry == 0 {
                 break;
             }
-            let slot = address.wrapping_add(width * i);
             let (name, ordinal) = if entry & ordinal_flag != 0 {
                 let ordinal = (entry & 0xffff) as u16;
                 (format!("Ordinal_{ordinal}"), Some(ordinal))
             } else {
                 // The hint, then the name.
-                let rva = u32::try_from(entry.wrapping_sub(base) & 0x7fff_ffff).unwrap_or(0);
-                match self.offset(rva) {
-                    Some(hint) if r.u16(hint).is_some() => (r.name(hint + 2).into_owned(), None),
+                let rva = u32::try_from(entry.wrapping_sub(d.base) & 0x7fff_ffff).unwrap_or(0);
+                match self.at(rva) {
+                    Some(hint) if hint.u16(0).is_some() => (hint.name(2).into_owned(), None),
                     _ => continue,
                 }
             };
-            *budget = budget.saturating_sub(name.len() + library.len());
-            out.push(Import {
-                slot,
+            walk.budget = walk
+                .budget
+                .saturating_sub(name.len().saturating_add(library.len()));
+            walk.imports.push(Import {
+                slot: d.address.wrapping_add(width.wrapping_mul(i)),
                 library: library.clone(),
                 name,
                 ordinal,
-                delayed,
+                delayed: d.delayed,
             });
         }
     }
@@ -425,44 +499,37 @@ impl Pe<'_> {
     /// The TLS callbacks' addresses, which the loader runs before the entry
     /// point: the null-terminated array at `AddressOfCallBacks`.
     pub(super) fn tls_callbacks(&self) -> Vec<u64> {
-        let Some(at) = self
+        let Some(tls) = self
             .directory(DIRECTORY_TLS)
-            .and_then(|(rva, _)| self.offset(rva))
+            .and_then(|(rva, _)| self.at(rva))
         else {
             return Vec::new();
         };
-        let array = self
-            .r
-            .word(at + if self.is_64 { 24 } else { 12 }, self.is_64)
-            .and_then(|va| va.checked_sub(self.image_base))
-            .and_then(|rva| u32::try_from(rva).ok())
+        let to_rva = |va: u64| u32::try_from(va.checked_sub(self.image_base)?).ok();
+        let array = tls
+            .word(if self.is_64 { 24 } else { 12 }, self.is_64)
+            .and_then(to_rva)
             .and_then(|rva| self.offset(rva));
         let Some(array) = array else {
             return Vec::new();
         };
         let width = if self.is_64 { 8 } else { 4 };
-        (0..1 << 12)
-            .map_while(|i| self.r.word(array + width * i, self.is_64))
+        read::table(array, width, limits::TLS_CALLBACKS)
+            .map_while(|at| self.r.word(at, self.is_64))
             .take_while(|&callback| callback != 0)
             // A callback outside the image's mapped bytes is no code.
-            .filter(|&callback| {
-                callback
-                    .checked_sub(self.image_base)
-                    .and_then(|rva| u32::try_from(rva).ok())
-                    .and_then(|rva| self.offset(rva))
-                    .is_some()
-            })
+            .filter(|&callback| to_rva(callback).and_then(|rva| self.offset(rva)).is_some())
             .collect()
     }
 
-    /// The exception directory's entries: the file offset of the first and
-    /// how many there are of `size` bytes.
+    /// The file offsets of the exception directory's entries of `size`
+    /// bytes.
     fn runtime_functions(&self, size: u64) -> impl Iterator<Item = u64> + '_ {
-        let (at, count) = self
+        let (at, bytes) = self
             .directory(DIRECTORY_EXCEPTION)
-            .and_then(|(rva, bytes)| Some((self.offset(rva)?, u64::from(bytes) / size)))
+            .and_then(|(rva, bytes)| Some((self.offset(rva)?, u64::from(bytes))))
             .unwrap_or((0, 0));
-        (0..count.min(MOST)).map(move |i| at + size * i)
+        read::entries(at, bytes, size)
     }
 
     /// The x64 `.pdata` entries that start functions, as (begin, end) RVAs.
@@ -470,7 +537,10 @@ impl Pe<'_> {
     pub(super) fn x64_functions(&self) -> Vec<(u32, u32)> {
         let r = &self.r;
         self.runtime_functions(12)
-            .map_while(|at| Some((r.u32(at)?, r.u32(at + 4)?, r.u32(at + 8)?)))
+            .map_while(|at| {
+                let entry = r.at(at);
+                Some((entry.u32(0)?, entry.u32(4)?, entry.u32(8)?))
+            })
             .filter(|&(_, _, unwind)| !self.x64_chained(unwind))
             .map(|(begin, end, _)| (begin, end))
             .collect()
@@ -479,29 +549,29 @@ impl Pe<'_> {
     /// Whether the `UNWIND_INFO` at `unwind` has `UNW_FLAG_CHAININFO`. An
     /// odd RVA names another entry, whose unwind data this shares.
     fn x64_chained(&self, mut unwind: u32) -> bool {
-        let r = &self.r;
-        for _ in 0..32 {
+        for _ in 0..limits::UNWIND_CHAIN {
             if unwind & 1 == 0 {
                 break;
             }
-            match self.offset(unwind & !1).and_then(|at| r.u32(at + 8)) {
+            match self.at(unwind & !1).and_then(|entry| entry.u32(8)) {
                 Some(next) => unwind = next,
                 None => return false,
             }
         }
-        let Some(at) = self.offset(unwind) else {
+        let Some(info) = self.at(unwind) else {
             return false;
         };
-        let (Some(header), Some(codes)) = (r.u8(at), r.u8(at + 2)) else {
+        let (Some(header), Some(codes)) = (info.u8(0), info.u8(2)) else {
             return false;
         };
         let (version, flags) = (header & 7, header >> 3);
         if !(1..=2).contains(&version) || flags & UNW_FLAG_CHAININFO == 0 {
             return false;
         }
-        // The chained entry follows the codes, padded to an even count.
-        let codes = u64::from(codes).next_multiple_of(2);
-        r.u32(at + 4 + 2 * codes + 8).is_some()
+        // The chained entry (begin, end, unwind) follows the codes, padded
+        // to an even count.
+        let chained = u64::from(codes).next_multiple_of(2).saturating_mul(2);
+        info.at(chained).u32(12).is_some()
     }
 
     /// The A64 `.pdata` entries that start functions, as RVAs: all but
@@ -509,7 +579,7 @@ impl Pe<'_> {
     pub(super) fn arm64_functions(&self) -> Vec<u32> {
         let r = &self.r;
         self.runtime_functions(8)
-            .map_while(|at| Some((r.u32(at)?, r.u32(at + 4)?)))
+            .map_while(|at| Some((r.u32(at)?, r.at(at).u32(4)?)))
             .filter(|&(_, unwind)| !self.arm64_fragment(unwind))
             .map(|(begin, _)| begin)
             .collect()
@@ -523,12 +593,12 @@ impl Pe<'_> {
     pub(super) fn wince_functions(&self) -> Vec<(u64, u64)> {
         let r = &self.r;
         self.runtime_functions(8)
-            .map_while(|at| Some((r.u32(at)?, r.u32(at + 4)?)))
+            .map_while(|at| Some((r.u32(at)?, r.at(at).u32(4)?)))
             .map(|(begin, packed)| {
                 let arm = packed >> 30 & 1 != 0;
-                let size = u64::from(packed >> 8 & 0x3f_ffff) * if arm { 4 } else { 2 };
+                let size = u64::from(packed >> 8 & 0x3f_ffff) << if arm { 2 } else { 1 };
                 let begin = u64::from(begin);
-                (begin | u64::from(!arm), begin + size)
+                (begin | u64::from(!arm), begin.saturating_add(size))
             })
             .collect()
     }
@@ -539,11 +609,11 @@ impl Pe<'_> {
     pub(super) fn arm_functions(&self) -> Vec<u32> {
         let r = &self.r;
         self.runtime_functions(8)
-            .map_while(|at| Some((r.u32(at)?, r.u32(at + 4)?)))
+            .map_while(|at| Some((r.u32(at)?, r.at(at).u32(4)?)))
             .filter(|&(_, unwind)| match unwind & 3 {
                 0 => self
-                    .offset(unwind)
-                    .and_then(|at| r.u32(at))
+                    .at(unwind)
+                    .and_then(|xdata| xdata.u32(0))
                     .is_some_and(|header| header >> 22 & 1 == 0),
                 flag => flag == 1,
             })
@@ -556,42 +626,38 @@ impl Pe<'_> {
     /// which stands for the prologue a fragment does not have.
     fn arm64_fragment(&self, unwind: u32) -> bool {
         match unwind & 3 {
-            0 => {}
-            flag => return flag == ARM64_PACKED_FRAGMENT,
+            0 => self.arm64_xdata_fragment(unwind).unwrap_or(false),
+            flag => flag == ARM64_PACKED_FRAGMENT,
         }
-        let r = &self.r;
-        let Some(at) = self.offset(unwind) else {
-            return false;
-        };
-        let Some(header) = r.u32(at) else {
-            return false;
-        };
+    }
+
+    fn arm64_xdata_fragment(&self, unwind: u32) -> Option<bool> {
+        let xdata = self.at(unwind)?;
+        let header = xdata.u32(0)?;
         if header >> 18 & 3 != 0 {
-            return false;
+            return Some(false);
         }
         let exception_data = header >> 20 & 1 != 0;
         let epilog_in_header = header >> 21 & 1 != 0;
         let (mut epilogs, mut words) = (header >> 22 & 0x1f, header >> 27 & 0x1f);
-        let mut codes = at + 4;
+        let mut codes: u64 = 4;
         if epilogs == 0 && words == 0 {
-            let Some(extension) = r.u32(codes) else {
-                return false;
-            };
+            let extension = xdata.u32(codes)?;
             (epilogs, words) = (extension & 0xffff, extension >> 16 & 0xff);
-            codes += 4;
+            codes = 8;
         }
         if !epilog_in_header {
-            codes += 4 * u64::from(epilogs);
+            codes = codes.saturating_add(u64::from(epilogs) << 2);
         }
-        let end = codes + 4 * u64::from(words);
+        let end = codes.saturating_add(u64::from(words) << 2);
         // The codes, and the handler's RVA after them, must be there.
-        if words == 0 || r.u8(end - 1).is_none() {
-            return false;
+        if words == 0 || xdata.u8(end.checked_sub(1)?).is_none() {
+            return Some(false);
         }
-        if exception_data && r.u32(end).is_none() {
-            return false;
+        if exception_data && xdata.u32(end).is_none() {
+            return Some(false);
         }
-        r.u8(codes) == Some(ARM64_END_C)
+        Some(xdata.u8(codes) == Some(ARM64_END_C))
     }
 }
 
@@ -824,7 +890,7 @@ mod tests {
         let imports = parsed(&bytes).imports();
         assert!(!imports.is_empty());
         let names: usize = imports.iter().map(|i| i.name.len() + i.library.len()).sum();
-        assert!(names <= NAME_BYTES + 2 * 0x1000, "{names}");
+        assert!(names <= limits::NAME_BYTES + 2 * 0x1000, "{names}");
     }
 
     #[test]
@@ -849,5 +915,106 @@ mod tests {
         assert!(!pe.arm64_fragment(0x0004_0001));
         // Unwind data past the end of the file is no fragment.
         assert!(!pe.arm64_fragment(0x0fff_0000));
+    }
+
+    /// Overlapping sections: each RVA is the first section's, in header
+    /// order, that backs it.
+    #[test]
+    fn overlapping_sections_back_rvas_in_header_order() {
+        let section = |va: u32, size: u32, pointer: u32| Section {
+            name: String::new(),
+            virtual_size: size,
+            virtual_address: va,
+            size_of_raw_data: size,
+            pointer_to_raw_data: pointer,
+            characteristics: 0,
+        };
+        let sections = [
+            section(0x2000, 0x1000, 0x400),
+            section(0x1000, 0x3000, 0x1400),
+            section(0x2800, 0x1000, 0x9000),
+        ];
+        let pe = Pe {
+            r: Reader::new(&[], false),
+            machine: 0,
+            is_64: true,
+            image_base: 0,
+            entry: 0,
+            directories: Vec::new(),
+            spans: spans(&sections, 0x200),
+            sections: Vec::new(),
+        };
+        assert_eq!(pe.offset(0x1004), Some(0x1404));
+        assert_eq!(pe.offset(0x2004), Some(0x404));
+        assert_eq!(pe.offset(0x2804), Some(0xc04));
+        assert_eq!(pe.offset(0x3004), Some(0x3404));
+        assert_eq!(pe.offset(0x3804), Some(0x3c04));
+        assert_eq!(pe.offset(0x3fff), Some(0x43ff));
+        assert_eq!(pe.offset(0x0fff), None);
+        assert_eq!(pe.offset(0x4000), None);
+    }
+
+    /// 65,535 section headers, the one that backs the export directory
+    /// last, and 200,000 named exports: each name's offset is a binary
+    /// search, not a walk of the section table.
+    #[test]
+    fn many_sections_and_exports_read_fast() {
+        let count = 200_000_u32;
+        let (functions, names, ordinals, name) =
+            (0x2000_u32, 0xd_0000_u32, 0x1a_0000_u32, 0x20_8000_u32);
+        let mut body = vec![0_u8; 0x20_9000];
+        let mut put = |at: u32, value: &[u8]| {
+            let at = at as usize - 0x1000;
+            body[at..at + value.len()].copy_from_slice(value);
+        };
+        for (at, word) in [(0x1014, count), (0x1018, count), (0x101c, functions)] {
+            put(at, &word.to_le_bytes());
+        }
+        put(0x1020, &names.to_le_bytes());
+        put(0x1024, &ordinals.to_le_bytes());
+        put(name, b"a\0");
+        for i in 0..count {
+            put(functions + 4 * i, &0x1100_u32.to_le_bytes());
+            put(names + 4 * i, &name.to_le_bytes());
+            put(
+                ordinals + 2 * i,
+                &u16::try_from(i % 0x1_0000).unwrap_or(0).to_le_bytes(),
+            );
+        }
+        let mut bytes = image(&[(0x1000, 0x28)], &[]);
+        bytes.truncate(0x148);
+        let sections = u16::MAX;
+        bytes[0x46..0x48].copy_from_slice(&sections.to_le_bytes());
+        let data = 0x148 + 40 * usize::from(sections);
+        let data = data.next_multiple_of(0x200);
+        for i in 1..u32::from(sections) {
+            bytes.extend(b".junk\0\0\0");
+            for word in [
+                0x200,
+                0x4000_0000 + 0x1000 * i,
+                0x200,
+                0x200,
+                0,
+                0,
+                0,
+                0x4000_0040,
+            ] {
+                bytes.extend(u32::to_le_bytes(word));
+            }
+        }
+        bytes.extend(b".text\0\0\0");
+        let size = u32::try_from(body.len()).unwrap_or(0);
+        let pointer = u32::try_from(data).unwrap_or(0);
+        for word in [size, 0x1000, size, pointer, 0, 0, 0, 0x6000_0020] {
+            bytes.extend(u32::to_le_bytes(word));
+        }
+        bytes.resize(data, 0);
+        bytes.extend(&body);
+        let start = std::time::Instant::now();
+        let pe = parsed(&bytes);
+        let exports = pe.exports();
+        assert_eq!(exports.len(), count as usize);
+        assert_eq!(exports.first().map(|e| e.name.as_str()), Some("a"));
+        assert!(start.elapsed().as_secs() < 5);
     }
 }

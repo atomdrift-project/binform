@@ -20,14 +20,16 @@
 //! section's name is read with any magic whose header is a Go 1.18 one: its
 //! offsets in order and inside the table.
 
-/// The most functions read from one table.
-const MOST: usize = 1 << 21;
+use super::limits;
+use super::read::Reader;
 
-/// The longest function name read.
-const LONGEST: usize = 1 << 12;
+const GO_1_2: u32 = 0xffff_fffb;
+const GO_1_16: u32 = 0xffff_fffa;
+const GO_1_18: u32 = 0xffff_fff0;
+const GO_1_20: u32 = 0xffff_fff1;
 
 /// The magic numbers of the layouts, oldest first.
-pub(super) const MAGICS: [u32; 4] = [0xffff_fffb, 0xffff_fffa, 0xffff_fff0, 0xffff_fff1];
+pub(super) const MAGICS: [u32; 4] = [GO_1_2, GO_1_16, GO_1_18, GO_1_20];
 
 /// Every function in `table` as (entry, name), in entry order, up to the
 /// first entry out of order. `text` is the start of the code, which entries
@@ -42,100 +44,107 @@ pub(super) fn functions(
     named: bool,
     big: bool,
 ) -> Vec<(u64, String)> {
-    let big = match (u32_at(table, 0, false), u32_at(table, 0, true)) {
-        (Some(magic), _) if MAGICS.contains(&magic) => false,
-        (_, Some(magic)) if MAGICS.contains(&magic) => true,
-        _ => big,
-    };
-    functions_of(table, text, named, big).unwrap_or_default()
+    Table::new(table, text, named, big)
+        .map(|table| table.functions())
+        .unwrap_or_default()
 }
 
-fn functions_of(
-    table: &[u8],
-    text: Option<u64>,
-    named: bool,
-    big: bool,
-) -> Option<Vec<(u64, String)>> {
-    let u32_at = |bytes: &[u8], at: usize| u32_at(bytes, at, big);
-    let uint_at = |bytes: &[u8], at: usize, size: usize| uint_at(bytes, at, size, big);
-    let magic = u32_at(table, 0)?;
-    let (pad, quantum, ptr) = (table.get(4..6)?, *table.get(6)?, *table.get(7)?);
-    if pad != [0, 0] || !matches!(quantum, 1 | 2 | 4) || !matches!(ptr, 4 | 8) {
-        return None;
-    }
-    let ptr = usize::from(ptr);
-    let word = |i: usize| uint_at(table, 8 + i * ptr, ptr);
-    let count = usize::try_from(word(0)?).ok()?.min(MOST);
-    // Go 1.18's offsets: function names, compilation units, files, pc
-    // tables, functions.
-    let ordered = || {
-        let offsets: Option<Vec<u64>> = (3..8).map(word).collect();
-        offsets.is_some_and(|offsets| {
-            offsets.is_sorted()
-                && offsets
-                    .last()
-                    .is_some_and(|&last| last < table.len() as u64)
-        })
-    };
-    let (names, functab, entry_size, base) = match magic {
-        0xffff_fffb => (0, u64::try_from(8 + ptr).ok()?, ptr, 0),
-        0xffff_fffa => (word(2)?, word(6)?, ptr, 0),
-        _ if MAGICS.contains(&magic) || (named && ordered()) => {
-            let start = match word(2)? {
-                0 => text?,
-                start => start,
-            };
-            (word(3)?, word(7)?, 4, start)
+/// A function table whose header has been read: where its parts are.
+pub(super) struct Table<'a> {
+    r: Reader<'a>,
+    count: u64,
+    /// The offset of the function names.
+    names: u64,
+    /// The offset of the (entry, record) pairs.
+    functab: u64,
+    /// The offset the records' offsets count from.
+    records: u64,
+    /// Bytes in an entry and in a record offset.
+    entry_size: u8,
+    /// What entries count from.
+    base: u64,
+}
+
+impl<'a> Table<'a> {
+    /// The table in `table`, or `None` when its header is no function
+    /// table's. The arguments are as [`functions`]'.
+    pub(super) fn new(table: &'a [u8], text: Option<u64>, named: bool, big: bool) -> Option<Self> {
+        let magic_in = |big| {
+            Reader::new(table, big)
+                .u32(0)
+                .filter(|magic| MAGICS.contains(magic))
+        };
+        let big = match (magic_in(false), magic_in(true)) {
+            (Some(_), _) => false,
+            (_, Some(_)) => true,
+            _ => big,
+        };
+        let r = Reader::new(table, big);
+        let magic = r.u32(0)?;
+        let (pad, quantum, ptr) = (r.u16(4)?, r.u8(6)?, r.u8(7)?);
+        if pad != 0 || !matches!(quantum, 1 | 2 | 4) || !matches!(ptr, 4 | 8) {
+            return None;
         }
-        _ => return None,
-    };
-    let names = usize::try_from(names).ok()?;
-    let functab = usize::try_from(functab).ok()?;
-    // The function table's offsets count from its own start, except in the
-    // oldest layout, where they count from the table's.
-    let records = if magic == 0xffff_fffb { 0 } else { functab };
-    // A table cut short yields the functions before the cut.
-    let function = |i: usize| {
-        let at = functab.checked_add(i.checked_mul(2 * entry_size)?)?;
-        let entry = uint_at(table, at, entry_size)?;
-        let record = usize::try_from(uint_at(table, at + entry_size, entry_size)?).ok()?;
-        let name_at = u32_at(table, records.checked_add(record)?.checked_add(entry_size)?)?;
-        let name = table
-            .get(names.checked_add(usize::try_from(name_at).ok()?)?..)
-            .map(|rest| {
-                let rest = rest.get(..LONGEST).unwrap_or(rest);
-                let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
-                String::from_utf8_lossy(rest.get(..end).unwrap_or_default()).into_owned()
+        let word = |i: u64| r.uint(u64::from(ptr).checked_mul(i)?.checked_add(8)?, ptr);
+        let count = word(0)?.min(limits::GO_FUNCTIONS as u64);
+        // Go 1.18's offsets: function names, compilation units, files, pc
+        // tables, functions.
+        let ordered = || {
+            let offsets: Option<Vec<u64>> = (3..8).map(word).collect();
+            offsets.is_some_and(|offsets| {
+                offsets.is_sorted()
+                    && offsets
+                        .last()
+                        .is_some_and(|&last| last < table.len() as u64)
             })
-            .unwrap_or_default();
-        Some((base.wrapping_add(entry), name))
-    };
-    let mut last = 0;
-    Some(
-        (0..count)
-            .map_while(function)
-            .take_while(|&(entry, _)| std::mem::replace(&mut last, entry) <= entry)
-            .collect(),
-    )
-}
-
-fn u32_at(bytes: &[u8], at: usize, big: bool) -> Option<u32> {
-    uint_at(bytes, at, 4, big).and_then(|value| u32::try_from(value).ok())
-}
-
-/// The `size`-byte (4 or 8) unsigned integer at `at`, big-endian when
-/// `big`.
-fn uint_at(bytes: &[u8], at: usize, size: usize, big: bool) -> Option<u64> {
-    let bytes = bytes.get(at..at.checked_add(size)?)?;
-    if size != 4 && size != 8 {
-        return None;
+        };
+        let (names, functab, entry_size, base) = match magic {
+            GO_1_2 => (0, u64::from(ptr).checked_add(8)?, ptr, 0),
+            GO_1_16 => (word(2)?, word(6)?, ptr, 0),
+            _ if MAGICS.contains(&magic) || (named && ordered()) => {
+                let start = match word(2)? {
+                    0 => text?,
+                    start => start,
+                };
+                (word(3)?, word(7)?, 4, start)
+            }
+            _ => return None,
+        };
+        Some(Self {
+            r,
+            count,
+            names,
+            functab,
+            // The function table's offsets count from its own start, except
+            // in the oldest layout, where they count from the table's.
+            records: if magic == GO_1_2 { 0 } else { functab },
+            entry_size,
+            base,
+        })
     }
-    let word = |value: u64, &byte: &u8| value << 8 | u64::from(byte);
-    Some(if big {
-        bytes.iter().fold(0, word)
-    } else {
-        bytes.iter().rev().fold(0, word)
-    })
+
+    /// Function `i`'s entry and name; `None` past the end of the table.
+    pub(super) fn function(&self, i: u64) -> Option<(u64, String)> {
+        let (r, size) = (&self.r, u64::from(self.entry_size));
+        let at = self
+            .functab
+            .checked_add(i.checked_mul(size)?.checked_mul(2)?)?;
+        let entry = r.uint(at, self.entry_size)?;
+        let record = r.uint(at.checked_add(size)?, self.entry_size)?;
+        let name_at = r.u32(self.records.checked_add(record)?.checked_add(size)?)?;
+        let name = r.name(self.names.checked_add(u64::from(name_at))?);
+        Some((self.base.wrapping_add(entry), name.into_owned()))
+    }
+
+    /// Every function, in entry order, up to the first out of order. A
+    /// table cut short yields the functions before the cut.
+    pub(super) fn functions(&self) -> Vec<(u64, String)> {
+        let mut last = 0;
+        (0..self.count)
+            .map_while(|i| self.function(i))
+            .take_while(|&(entry, _)| std::mem::replace(&mut last, entry) <= entry)
+            .collect()
+    }
 }
 
 #[cfg(test)]

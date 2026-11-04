@@ -10,4 +10,4 @@ Instructions are 32 bits, without delay slots. Calls into the PLT are `call` (a 
 - **Malware:** this file is hostile. It is kept compressed and only ever parsed; never run it.
 
 `bot-nios2-dynamic.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`bot-nios2-dynamic.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`bot-nios2-dynamic.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

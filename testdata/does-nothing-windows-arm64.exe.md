@@ -8,4 +8,4 @@ Go on Windows A64: no `.pdata`, so nothing but the entry point and calls names a
 - License: Apache-2.0 (traits-dev, klog, logr); the Go runtime is BSD-3-Clause
 
 `does-nothing-windows-arm64.exe.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`does-nothing-windows-arm64.exe.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`does-nothing-windows-arm64.exe.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

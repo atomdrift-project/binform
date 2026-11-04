@@ -18,4 +18,4 @@ int other(int x) { return entry(x) - check(x); }
 ```
 
 `calls-mips.so.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`calls-mips.so.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`calls-mips.so.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

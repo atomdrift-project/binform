@@ -1,8 +1,11 @@
 //! Bounds-checked reads of a file's integers and names. Every read returns
-//! `None` past the end of the bytes, so a header that points nowhere costs
-//! the table it names, not the file.
+//! `None` past the end of the bytes, and every offset is added with a
+//! check, so a header that points nowhere costs the table it names, not the
+//! file.
 
 use std::borrow::Cow;
+
+use super::limits;
 
 /// A file's bytes, read in its byte order.
 #[derive(Clone, Copy)]
@@ -15,6 +18,19 @@ pub(super) struct Reader<'a> {
 impl<'a> Reader<'a> {
     pub(super) fn new(bytes: &'a [u8], big: bool) -> Self {
         Self { bytes, big }
+    }
+
+    /// The bytes from `at` on, read the same way: a header's fields, at
+    /// offsets from its start. Empty past the end.
+    pub(super) fn at(&self, at: u64) -> Self {
+        let bytes = usize::try_from(at)
+            .ok()
+            .and_then(|at| self.bytes.get(at..))
+            .unwrap_or_default();
+        Self {
+            bytes,
+            big: self.big,
+        }
     }
 
     pub(super) fn array<const N: usize>(&self, at: u64) -> Option<[u8; N]> {
@@ -62,15 +78,76 @@ impl<'a> Reader<'a> {
         }
     }
 
-    /// The NUL-terminated name at `at`, at most 4 KiB, with any bytes that
-    /// are not UTF-8 replaced. Empty past the end.
+    /// The unsigned integer of `size` bytes (1, 2, 4 or 8) at `at`.
+    pub(super) fn uint(&self, at: u64, size: u8) -> Option<u64> {
+        match size {
+            1 => self.u8(at).map(u64::from),
+            2 => self.u16(at).map(u64::from),
+            4 => self.u32(at).map(u64::from),
+            8 => self.u64(at),
+            _ => None,
+        }
+    }
+
+    /// The bytes of the NUL-terminated string at `at`, at most
+    /// [`limits::NAME_LEN`] of them. Empty past the end.
+    pub(super) fn cstr(&self, at: u64) -> &'a [u8] {
+        let rest = self.at(at).bytes;
+        let rest = rest.get(..limits::NAME_LEN).unwrap_or(rest);
+        rest.split(|&b| b == 0).next().unwrap_or_default()
+    }
+
+    /// The NUL-terminated name at `at`, with any bytes that are not UTF-8
+    /// replaced. Empty past the end.
     pub(super) fn name(&self, at: u64) -> Cow<'a, str> {
-        let Some(rest) = usize::try_from(at).ok().and_then(|at| self.bytes.get(at..)) else {
-            return Cow::Borrowed("");
-        };
-        let rest = rest.get(..1 << 12).unwrap_or(rest);
-        let end = rest.iter().position(|&b| b == 0).unwrap_or(rest.len());
-        String::from_utf8_lossy(rest.get(..end).unwrap_or_default())
+        String::from_utf8_lossy(self.cstr(at))
+    }
+}
+
+/// The offsets of a table's entries: `count` of `size` bytes from
+/// `offset`, at most [`limits::TABLE`], ending where an offset overflows.
+pub(super) fn table(offset: u64, size: u64, count: u64) -> impl Iterator<Item = u64> {
+    (0..count.min(limits::TABLE)).map_while(move |i| offset.checked_add(i.checked_mul(size)?))
+}
+
+/// The offsets of the entries of `size` bytes that fit in the `bytes` from
+/// `offset`, as [`table`]'s.
+pub(super) fn entries(offset: u64, bytes: u64, size: u64) -> impl Iterator<Item = u64> {
+    table(offset, size, bytes.checked_div(size).unwrap_or(0))
+}
+
+/// The unsigned LEB128 number at `*at`, advancing past it; bits past the
+/// 64th are dropped. `None` when it runs past the end.
+pub(super) fn uleb128(bytes: &[u8], at: &mut usize) -> Option<u64> {
+    leb128(bytes, at).map(|(value, _)| value)
+}
+
+/// The signed LEB128 number at `*at`, advancing past it, as two's
+/// complement.
+pub(super) fn sleb128(bytes: &[u8], at: &mut usize) -> Option<u64> {
+    let (value, shift) = leb128(bytes, at)?;
+    // The last byte's bit 6 is the sign.
+    let sign = shift
+        .checked_sub(1)
+        .and_then(|bit| value.checked_shr(bit))
+        .is_some_and(|top| top & 1 != 0);
+    Some(match u64::MAX.checked_shl(shift) {
+        Some(high) if sign => value | high,
+        _ => value,
+    })
+}
+
+/// A LEB128 number's bits and how many it has.
+fn leb128(bytes: &[u8], at: &mut usize) -> Option<(u64, u32)> {
+    let (mut value, mut shift) = (0_u64, 0_u32);
+    loop {
+        let byte = *bytes.get(*at)?;
+        *at = at.checked_add(1)?;
+        value |= u64::from(byte & 0x7f).checked_shl(shift).unwrap_or(0);
+        shift = shift.saturating_add(7);
+        if byte & 0x80 == 0 {
+            return Some((value, shift));
+        }
     }
 }
 
@@ -86,11 +163,39 @@ mod tests {
         assert_eq!(little.u32(0), Some(0x0403_0201));
         assert_eq!(big.u32(0), Some(0x0102_0304));
         assert_eq!(big.u16(2), Some(0x0304));
+        assert_eq!(big.at(2).u16(0), Some(0x0304));
         assert_eq!(little.word(0, false), Some(0x0403_0201));
+        assert_eq!(little.uint(0, 2), Some(0x0201));
+        assert_eq!(little.uint(0, 3), None);
         assert_eq!(little.u64(1), None);
         assert_eq!(little.u32(u64::MAX), None);
+        assert_eq!(little.at(u64::MAX).u8(0), None);
         assert_eq!(little.name(4), "ab");
         assert_eq!(little.name(7), "c");
         assert_eq!(little.name(99), "");
+    }
+
+    #[test]
+    fn leb128s() {
+        let bytes = [0x02, 0xe5, 0x8e, 0x26, 0x7f, 0x80, 0x7f, 0x80];
+        let mut at = 0;
+        assert_eq!(uleb128(&bytes, &mut at), Some(2));
+        assert_eq!(uleb128(&bytes, &mut at), Some(624_485));
+        assert_eq!(sleb128(&bytes, &mut at), Some(u64::MAX));
+        assert_eq!(sleb128(&bytes, &mut at), Some((-128_i64).cast_unsigned()));
+        assert_eq!(uleb128(&bytes, &mut at), None, "runs past the end");
+        // Bits past the 64th are dropped, not wrapped.
+        let long = [0xff; 20];
+        let mut at = 0;
+        assert_eq!(
+            uleb128(&[long.as_slice(), &[1]].concat(), &mut at),
+            Some(u64::MAX)
+        );
+    }
+
+    #[test]
+    fn tables_end_where_offsets_overflow() {
+        assert_eq!(table(u64::MAX - 8, 4, 10).count(), 3);
+        assert_eq!(table(0, 1, u64::MAX).count() as u64, limits::TABLE);
     }
 }

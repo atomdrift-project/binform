@@ -14,20 +14,29 @@
 //! the table's address and load the absolute entry (`l.lwz r3, 0(r3);
 //! l.jr r3`).
 
-use crate::isa::{Extend, Flow, Insn, Mem, Note};
+use crate::isa::{Decode, Extend, Flow, Insn, Mem, Note, Regs, relative, sext, u32_at};
 
-/// What earlier instructions left that a later one needs.
+/// The OpenRISC decoder, and what earlier instructions left that a later
+/// one needs.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct State {
+pub(crate) struct Decoder {
     /// The constant in each register.
-    regs: [Option<u64>; 32],
+    regs: Regs<u64, 32>,
     /// A register holding another shifted left, and by how much.
     scaled: Option<(u32, u8)>,
-    /// A register holding a base plus a scaled register: the sum, base,
-    /// index and shift.
-    indexed: Option<(u32, u32, u32, u8)>,
+    /// A register holding a base plus a scaled register.
+    indexed: Option<Indexed>,
     /// The last register loaded from a fixed address, and that address.
     loaded: Option<(u32, u64)>,
+}
+
+/// `sum = base + (index << shift)`.
+#[derive(Clone, Copy, Debug)]
+struct Indexed {
+    sum: u32,
+    base: u32,
+    index: u32,
+    shift: u8,
 }
 
 /// The link register.
@@ -36,90 +45,73 @@ const LR: u32 = 9;
 /// (`r3`-`r8`), the return values (`r11`, `r12`) and the odd temporaries.
 const VOLATILE: u32 = 0xaaaa_bbf8;
 
-fn word_at(bytes: &[u8]) -> Option<u32> {
-    Some(u32::from_be_bytes(bytes.get(..4)?.try_into().ok()?))
+fn word_at(bytes: &[u8], at: usize) -> Option<u32> {
+    u32_at(bytes, at, true)
 }
 
-/// `value`'s low `bits` bits, sign-extended.
-fn sign(value: u32, bits: u32) -> i64 {
-    let shift = 64 - bits;
-    (i64::from(value) << shift) >> shift
-}
+impl Decode for Decoder {
+    fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
+        let Some(word) = word_at(bytes, 0) else {
+            return Insn::new(4, Flow::Invalid);
+        };
+        let mut cx = Cx { state: self, addr };
+        let insn = cx.single(word);
+        // Only transfers have a delay slot, and L.TRAP and L.RFE none.
+        if matches!(insn.flow, Flow::Next | Flow::Invalid | Flow::Stop)
+            || (insn.flow == Flow::Return && word >> 26 == 0x09)
+        {
+            return insn;
+        }
+        let slot = word_at(bytes, 4);
+        // A call to just past its slot, which only reads the PC, or over
+        // one word of data, whose address the code reads from the link
+        // register: a jump, leaving that address in the link register.
+        if let Flow::Call(to) = insn.flow
+            && word >> 26 == 0x01
+            && matches!(to.wrapping_sub(addr) & 0xffff_ffff, 8 | 12)
+        {
+            let Some(slot) = slot else {
+                return Insn::new(4, Flow::Invalid);
+            };
+            cx.step(slot);
+            let link = addr.wrapping_add(8) & 0xffff_ffff;
+            return Insn {
+                note: Note::Value {
+                    reg: LR,
+                    value: link,
+                },
+                ..Insn::new(8, Flow::Jump(to))
+            };
+        }
+        insn.with_slot(slot.map(|slot| cx.single(slot)))
+    }
 
-pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
-    let Some(word) = word_at(bytes) else {
-        return Insn::new(4, Flow::Invalid);
-    };
-    let mut cx = Cx { state, addr };
-    let Some(flow) = cx.transfer(word) else {
-        let note = cx.step(word);
-        let mut insn = Insn::new(
-            4,
-            if note.is_some() {
-                Flow::Next
-            } else {
-                Flow::Invalid
-            },
-        );
-        insn.note = note.unwrap_or(Note::None);
-        insn.pad = word >> 24 == 0x15;
-        if note.is_none() {
-            *cx.state = State::default();
-        }
-        return insn;
-    };
-    if flow == Flow::Stop || (flow == Flow::Return && word >> 26 == 0x09) {
-        *cx.state = State::default();
-        return Insn::new(4, flow);
+    fn reset(&mut self) {
+        *self = Self::default();
     }
-    // A transfer with no slot after it is cut short.
-    let Some(slot) = bytes.get(4..8).and_then(word_at) else {
-        return Insn::new(4, Flow::Invalid);
-    };
-    // A call to just past its slot, which only reads the PC, or over one
-    // word of data, whose address the code reads from the link register.
-    let past = match flow {
-        Flow::Call(to) if word >> 26 == 0x01 => Some(to.wrapping_sub(addr) & 0xffff_ffff),
-        _ => None,
-    };
-    let over_data = matches!(past, Some(8 | 12));
-    let (flow, note) = if let (true, Flow::Call(to)) = (over_data, flow) {
-        cx.step(slot);
-        let link = addr.wrapping_add(8) & 0xffff_ffff;
-        cx.set(LR, Some(link));
-        (
-            Flow::Jump(to),
-            Note::Pc {
-                reg: LR,
-                addr: link,
-            },
-        )
-    } else {
-        (flow, cx.step(slot).unwrap_or(Note::None))
-    };
-    let state = cx.state;
-    match flow {
-        Flow::Next | Flow::Branch(_) | Flow::Jump(_) if over_data => {}
-        Flow::Next | Flow::Branch(_) => {}
-        Flow::Call(_) | Flow::CallIndirect | Flow::CallRegister(_) | Flow::CallSlot(_) => {
-            state.loaded = None;
-            state.scaled = None;
-            state.indexed = None;
-            for (reg, value) in state.regs.iter_mut().enumerate() {
-                if VOLATILE >> reg & 1 != 0 {
-                    *value = None;
-                }
-            }
-        }
-        _ => *state = State::default(),
+
+    fn call(&mut self) {
+        self.loaded = None;
+        self.scaled = None;
+        self.indexed = None;
+        self.regs.forget(u64::from(VOLATILE));
     }
-    let mut insn = Insn::new(8, flow);
-    insn.note = note;
-    insn
+
+    /// The stack pointer lowered (`l.addi r1, r1, -n`) or a register saved
+    /// below it (`l.sw -n(r1), rX`) among the first three instructions.
+    fn starts_frame(&self, bytes: &[u8]) -> bool {
+        (0..12).step_by(4).any(|at| {
+            word_at(bytes, at).is_some_and(|word| {
+                // L.SW's immediate is split, its sign in bit 25.
+                (word >> 16 == 0x9c21 && word & 0x8000 != 0)
+                    || (word >> 26 == 0x35 && (word >> 16) & 0x1f == 1 && (word >> 25) & 1 == 1)
+            })
+        })
+    }
 }
 
 struct Cx<'a> {
-    state: &'a mut State,
+    state: &'a mut Decoder,
     addr: u64,
 }
 
@@ -128,14 +120,29 @@ impl Cx<'_> {
         if reg == 0 {
             return Some(0);
         }
-        self.state.regs.get(reg as usize).copied().flatten()
+        self.state.regs.get(reg)
     }
 
     fn set(&mut self, reg: u32, value: Option<u64>) {
-        if reg != 0
-            && let Some(slot) = self.state.regs.get_mut(reg as usize)
-        {
-            *slot = value.map(|value| value & 0xffff_ffff);
+        if reg != 0 {
+            self.state
+                .regs
+                .set(reg, value.map(|value| value & 0xffff_ffff));
+        }
+    }
+
+    /// `word` alone: a transfer without its slot, or what any other
+    /// instruction does to registers.
+    fn single(&mut self, word: u32) -> Insn {
+        if let Some(flow) = self.transfer(word) {
+            return Insn::new(4, flow);
+        }
+        match self.step(word) {
+            Some(note) => Insn {
+                pad: word >> 24 == 0x15,
+                ..Insn::note(4, note)
+            },
+            None => Insn::new(4, Flow::Invalid),
         }
     }
 
@@ -156,11 +163,12 @@ impl Cx<'_> {
         Note::Address { reg, addr: value }
     }
 
-    /// The high half of an address the next instruction completes: no
-    /// pointer of its own.
-    fn partial(&mut self, reg: u32, value: u64) -> Note {
-        match self.constant(reg, value) {
-            Note::Address { reg, addr } => Note::Pc { reg, addr },
+    /// `rd = value`, an integer that is no pointer by itself: an
+    /// immediate, the high part of an address a later instruction
+    /// completes, or the PC.
+    fn value(&mut self, rd: u32, value: u64) -> Note {
+        match self.constant(rd, value) {
+            Note::Address { reg, addr } => Note::Value { reg, value: addr },
             note => note,
         }
     }
@@ -168,11 +176,7 @@ impl Cx<'_> {
     /// Where control goes after `word`, if it is a transfer.
     fn transfer(&self, word: u32) -> Option<Flow> {
         let rb = (word >> 11) & 0x1f;
-        let disp = || {
-            self.addr
-                .wrapping_add_signed(sign(word & 0x03ff_ffff, 26) << 2)
-                & 0xffff_ffff
-        };
+        let disp = || relative(self.addr, word & 0x03ff_ffff, 26, 4) & 0xffff_ffff;
         Some(match word >> 26 {
             0x00 => Flow::Jump(disp()),
             0x01 => Flow::Call(disp()),
@@ -203,7 +207,7 @@ impl Cx<'_> {
         let rd = (word >> 21) & 0x1f;
         let ra = (word >> 16) & 0x1f;
         let rb = (word >> 11) & 0x1f;
-        let simm = sign(word & 0xffff, 16);
+        let simm = sext(word & 0xffff, 16);
         let uimm = u64::from(word & 0xffff);
         let scaled = self.state.scaled.take();
         let indexed = self.state.indexed.take();
@@ -211,14 +215,13 @@ impl Cx<'_> {
         let note = match word >> 26 {
             // L.ADRP: a page, PC-relative.
             0x02 => {
-                let page =
-                    (self.addr & !0x1fff).wrapping_add_signed(sign(word & 0x1f_ffff, 21) << 13);
-                self.partial(rd, page)
+                let page = relative(self.addr & !0x1fff, word & 0x1f_ffff, 21, 0x2000);
+                self.value(rd, page)
             }
             // L.NOP
             0x05 => Note::None,
             // L.MOVHI, L.MACRC
-            0x06 if word & 0x1_0000 == 0 => self.partial(rd, uimm << 16),
+            0x06 if word & 0x1_0000 == 0 => self.value(rd, uimm << 16),
             0x06 => self.clobber(rd),
             // L.SYS, L.MSYNC, L.PSYNC, L.CSYNC
             0x08 if word >> 16 == 0x2000
@@ -298,7 +301,7 @@ impl Cx<'_> {
             0
         } else {
             note.writes()
-        } | self.state.indexed.map_or(0, |(sum, ..)| 1 << sum);
+        } | self.state.indexed.map_or(0, |indexed| 1 << indexed.sum);
         if self.state.scaled.is_none()
             && let Some((reg, _)) = scaled
             && written >> reg & 1 == 0
@@ -306,7 +309,9 @@ impl Cx<'_> {
             self.state.scaled = scaled;
         }
         if self.state.indexed.is_none()
-            && let Some((sum, base, index, _)) = indexed
+            && let Some(Indexed {
+                sum, base, index, ..
+            }) = indexed
             && written & (1 << sum | 1 << base | 1 << index) == 0
         {
             self.state.indexed = indexed;
@@ -325,7 +330,7 @@ impl Cx<'_> {
             return Note::None;
         }
         if src == 0 {
-            return self.constant(rd, 0);
+            return self.value(rd, 0);
         }
         let value = self.get(src);
         self.set(rd, value);
@@ -335,7 +340,7 @@ impl Cx<'_> {
     /// An immediate from `r0` is an integer: addresses are `l.movhi`'s.
     fn derive(&mut self, rd: u32, ra: u32, f: impl Fn(u64) -> u64) -> Note {
         match self.get(ra) {
-            Some(value) if ra == 0 => self.partial(rd, f(value)),
+            Some(value) if ra == 0 => self.value(rd, f(value)),
             Some(value) => self.constant(rd, f(value)),
             None => self.clobber(rd),
         }
@@ -349,7 +354,7 @@ impl Cx<'_> {
             return self.copy(rd, ra);
         }
         match self.get(ra) {
-            Some(base) if ra == 0 => self.partial(rd, base.wrapping_add_signed(imm)),
+            Some(base) if ra == 0 => self.value(rd, base.wrapping_add_signed(imm)),
             Some(base) => self.constant(rd, base.wrapping_add_signed(imm)),
             None => {
                 self.set(rd, None);
@@ -371,7 +376,12 @@ impl Cx<'_> {
         {
             let base = if reg == ra { rb } else { ra };
             self.set(rd, None);
-            self.state.indexed = Some((rd, base, reg, shift));
+            self.state.indexed = Some(Indexed {
+                sum: rd,
+                base,
+                index: reg,
+                shift,
+            });
             return Note::None;
         }
         if let Some((a, b)) = self.get(ra).zip(self.get(rb)) {
@@ -393,14 +403,19 @@ impl Cx<'_> {
         ra: u32,
         imm: i64,
         (size, signed): (u8, bool),
-        indexed: Option<(u32, u32, u32, u8)>,
+        indexed: Option<Indexed>,
     ) -> Note {
         if rd == 0 {
             return Note::None;
         }
         let base_value = self.get(ra);
         self.set(rd, None);
-        if let Some((sum, base, index, shift)) = indexed
+        if let Some(Indexed {
+            sum,
+            base,
+            index,
+            shift,
+        }) = indexed
             && sum == ra
         {
             return Note::Load {
@@ -456,22 +471,12 @@ impl Cx<'_> {
         match (inclusive, n) {
             (true, n) => Note::Compare { reg, imm: n },
             (false, 0) => Note::None,
-            (false, n) => Note::Compare { reg, imm: n - 1 },
+            (false, n) => Note::Compare {
+                reg,
+                imm: n.wrapping_sub(1),
+            },
         }
     }
-}
-
-/// Whether `bytes` begin a frame: the stack pointer lowered (`l.addi r1,
-/// r1, -n`) or a register saved below it (`l.sw -n(r1), rX`) among the
-/// first three instructions.
-pub(crate) fn starts_frame(bytes: &[u8]) -> bool {
-    (0..3).any(|i| {
-        bytes.get(i * 4..).and_then(word_at).is_some_and(|word| {
-            // L.SW's immediate is split, its sign in bit 25.
-            (word >> 16 == 0x9c21 && word & 0x8000 != 0)
-                || (word >> 26 == 0x35 && (word >> 16) & 0x1f == 1 && (word >> 25) & 1 == 1)
-        })
-    })
 }
 
 #[cfg(test)]
@@ -480,11 +485,11 @@ mod tests {
 
     fn run(words: &[u32], addr: u64) -> Vec<Insn> {
         let code: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
-        let mut state = State::default();
+        let mut decoder = Decoder::default();
         let mut at = 0;
         let mut insns = Vec::new();
         while at < code.len() {
-            let insn = decode(&mut state, &code[at..], addr + at as u64);
+            let insn = decoder.decode(&code[at..], addr + at as u64);
             at += insn.len as usize;
             insns.push(insn);
         }
@@ -532,6 +537,15 @@ mod tests {
         );
     }
 
+    /// A transfer in a delay slot, or a slot that does not decode, makes
+    /// the pair no instruction.
+    #[test]
+    fn slots_hold_no_transfer() {
+        assert_eq!(run(&[0x0000_0004, 0x0000_0004], 0)[0].flow, Flow::Invalid);
+        assert_eq!(run(&[0x0000_0004, 0xffff_da68], 0)[0].flow, Flow::Invalid);
+        assert_eq!(run(&[0x0000_0004], 0)[0].flow, Flow::Invalid);
+    }
+
     /// uClibc's `_start`: `l.jal 1f; l.ori r3, r1, 0; .word x; 1: l.lwz
     /// r4, 0(r9)`.
     #[test]
@@ -540,9 +554,9 @@ mod tests {
         assert_eq!(insns[0].flow, Flow::Jump(0x259c));
         assert_eq!(
             insns[0].note,
-            Note::Pc {
+            Note::Value {
                 reg: 9,
-                addr: 0x2598
+                value: 0x2598
             }
         );
         // `l.jal 1f; l.movhi r2, 0; 1:`, for the PC alone.
@@ -607,7 +621,8 @@ mod tests {
 
     #[test]
     fn frames() {
-        assert!(starts_frame(&0x9c21_fff0_u32.to_be_bytes()));
-        assert!(!starts_frame(&0x9c21_0010_u32.to_be_bytes()));
+        let decoder = Decoder::default();
+        assert!(decoder.starts_frame(&0x9c21_fff0_u32.to_be_bytes()));
+        assert!(!decoder.starts_frame(&0x9c21_0010_u32.to_be_bytes()));
     }
 }

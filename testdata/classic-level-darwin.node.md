@@ -9,4 +9,4 @@ A universal Mach-O (x86-64 and A64). binform reads the first slice it decodes, x
 - License: MIT (classic-level); it links LevelDB and Snappy, both BSD-3-Clause
 
 `classic-level-darwin.node.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`classic-level-darwin.node.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`classic-level-darwin.node.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

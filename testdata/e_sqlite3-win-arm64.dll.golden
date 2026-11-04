@@ -1,5 +1,5 @@
-# binform: 3120 functions, 1410060 bytes of code covered, 0 landing pads, 1019 cases
-# rizin: 3097 functions; 2964 shared, 2738 with the same blocks (2733 of 2912 without landing pads)
+# binform: 3118 functions, 1410760 bytes of code covered, 0 landing pads, 1033 cases
+# rizin: 3097 functions; 2962 shared, 2738 with the same blocks (2733 of 2910 without landing pads)
 only rizin 0x180001a3c fcn.180001a3c: inside 0x180001a30
 only rizin 0x1800020ec fcn.1800020ec: inside 0x1800020e0
 only rizin 0x180012f10 fcn.180012f10: inside 0x180012f00
@@ -8,7 +8,9 @@ only rizin 0x180013ff0 fcn.180013ff0: inside 0x180013fe0
 only rizin 0x180015e6c fcn.180015e6c: inside 0x180015e60
 only rizin 0x180018533 case.0x180017e1c.9: inside 0x180018510
 only rizin 0x18001a3b4 fcn.18001a3b4: inside 0x180018730
-only rizin 0x18001afe4 fcn.18001afe4: inside 0x18001acbc
+only rizin 0x18001ab84 fcn.18001ab84: inside 0x18001a9e0
+only rizin 0x18001acbc fcn.18001acbc: inside 0x18001a9e0
+only rizin 0x18001afe4 fcn.18001afe4: inside 0x18001a9e0
 only rizin 0x18001d740 fcn.18001d740: inside 0x18001d720
 only rizin 0x18001e4fc fcn.18001e4fc: inside 0x18001e4e0
 only rizin 0x18001ec3c fcn.18001ec3c: inside 0x18001ec20
@@ -534,9 +536,7 @@ only rizin 0x180158304 fcn.180158304: missed
 0x18001a770 size=264 blocks=10 edges=13 cc=5 cases=0 found=EXPORT | UNWIND rizin=10/5
 0x18001a880 size=272 blocks=9 edges=11 cc=6 cases=0 found=EXPORT | UNWIND rizin=9/6
 0x18001a990 size=76 blocks=3 edges=3 cc=2 cases=0 found=EXPORT | UNWIND rizin=3/2
-0x18001a9e0 size=1600 blocks=7 edges=8 cc=5 cases=0 found=EXPORT | UNWIND | CALL | SWEEP rizin=12/14
-0x18001ab84 size=1180 blocks=14 edges=18 cc=8 cases=0 found=UNWIND rizin=11/6
-0x18001acbc size=868 blocks=31 edges=45 cc=16 cases=0 found=UNWIND rizin=28/14
+0x18001a9e0 size=1600 blocks=97 edges=161 cc=70 cases=14 found=EXPORT | UNWIND | CALL | SWEEP rizin=12/14
 0x18001b060 size=196 blocks=9 edges=11 cc=6 cases=0 found=EXPORT | UNWIND rizin=9/6
 0x18001b130 size=456 blocks=22 edges=31 cc=11 cases=0 found=EXPORT | UNWIND rizin=22/11
 0x18001b300 size=2540 blocks=155 edges=238 cc=99 cases=0 found=EXPORT | UNWIND | CALL | SWEEP rizin=155/99

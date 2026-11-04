@@ -1,33 +1,20 @@
 //! x86 and x86-64, through `iced-x86`.
 
 use crate::isa::{Extend, Flow, Insn, Mem, Note};
-use iced_x86::{
-    Code, Decoder, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind, Register,
-};
+use iced_x86::{Code, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind, Register};
 
 pub(crate) fn decode(bitness: u32, got: Option<u64>, bytes: &[u8], addr: u64) -> Insn {
-    let instruction = Decoder::with_ip(bitness, bytes, addr, DecoderOptions::NONE).decode();
+    let instruction =
+        iced_x86::Decoder::with_ip(bitness, bytes, addr, DecoderOptions::NONE).decode();
     if instruction.is_invalid() {
-        return Insn {
-            len: 1,
-            flow: Flow::Invalid,
-            note: Note::None,
-            pad: false,
-            falls: false,
-        };
+        return Insn::new(1, Flow::Invalid);
     }
     let len = u32::try_from(instruction.len()).unwrap_or(1).max(1);
     let next = addr.wrapping_add(u64::from(len));
     // A call to the next instruction only pushes its address: 32-bit
     // position-independent code reads the address back with a `pop`.
     if instruction.flow_control() == FlowControl::Call && near(&instruction) == Some(next) {
-        return Insn {
-            len,
-            flow: Flow::Next,
-            note: Note::Push(next),
-            pad: false,
-            falls: false,
-        };
+        return Insn::note(len, Note::Push(next));
     }
     let flow = match instruction.flow_control() {
         FlowControl::Next if instruction.mnemonic() == Mnemonic::Hlt => Flow::Stop,
@@ -66,16 +53,13 @@ pub(crate) fn decode(bitness: u32, got: Option<u64>, bytes: &[u8], addr: u64) ->
     } else {
         Note::None
     };
-    let pad = matches!(
-        instruction.mnemonic(),
-        Mnemonic::Endbr32 | Mnemonic::Endbr64 | Mnemonic::Nop
-    );
     Insn {
-        len,
-        flow,
         note,
-        pad,
-        falls: false,
+        pad: matches!(
+            instruction.mnemonic(),
+            Mnemonic::Endbr32 | Mnemonic::Endbr64 | Mnemonic::Nop
+        ),
+        ..Insn::new(len, flow)
     }
 }
 
@@ -146,6 +130,11 @@ fn note(instruction: &Instruction, bitness: u32) -> Note {
         return Note::None;
     }
     let reg = register_id(instruction.op0_register());
+    // Writing a vector, segment or control register changes no register
+    // a jump table depends on.
+    if reg == OTHER {
+        return Note::None;
+    }
     let source = instruction.op1_kind();
     // A 32-bit write in 64-bit code truncates an address.
     let whole = bitness == 32 || instruction.op0_register().size() == 8;
@@ -277,10 +266,53 @@ fn displacement(instruction: &Instruction, bitness: u32) -> u64 {
     }
 }
 
-/// One id per architectural register, whatever width names it: `eax` and
-/// `rax` are the same register.
+/// The id of every register but the 16 general ones, whose values no
+/// jump table depends on.
+const OTHER: u32 = 16;
+
+/// One id per general register, whatever width names it, numbered as the
+/// encoding numbers them: `al`, `ax`, `eax` and `rax` are register 0, `r15`
+/// is 15. Any other register is [`OTHER`].
 fn register_id(register: Register) -> u32 {
-    register.full_register() as u32
+    let index = (register.full_register() as u32).wrapping_sub(Register::RAX as u32);
+    if index < 16 { index } else { OTHER }
+}
+
+/// The x86 decoder: 32- or 64-bit, and the GOT address 32-bit PIC stubs
+/// jump through, when known. It keeps nothing between instructions.
+#[derive(Clone, Debug)]
+pub(crate) struct Decoder {
+    bitness: u32,
+    got: Option<u64>,
+}
+
+impl Decoder {
+    pub(crate) const fn new(bitness: u32, got: Option<u64>) -> Self {
+        Self { bitness, got }
+    }
+}
+
+impl crate::isa::Decode for Decoder {
+    fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
+        decode(self.bitness, self.got, bytes, addr)
+    }
+
+    fn reset(&mut self) {}
+
+    fn call(&mut self) {}
+
+    fn starts_frame(&self, bytes: &[u8]) -> bool {
+        starts_frame(self.bitness, bytes)
+    }
+
+    fn pc_thunk(&self, bytes: &[u8], _call: u64, next: u64) -> Option<Note> {
+        let reg = pc_thunk(bytes).filter(|_| self.bitness == 32)?;
+        Some(Note::Address { reg, addr: next })
+    }
+
+    fn argument(&self, n: usize) -> Option<u32> {
+        argument(n).filter(|_| self.bitness == 64)
+    }
 }
 
 #[cfg(test)]
@@ -360,7 +392,7 @@ mod tests {
                 signed: false
             }
         );
-        // The MSVC x64 sequence, from 0x180042726 of a SQLite DLL.
+        // MSVC's x64 table jump: offsets from the image base, at 0x180042726.
         let at = 0x1_8004_2726;
         // lea r10, [rip - 0x42727d] = the image base
         assert_eq!(
@@ -448,6 +480,24 @@ mod tests {
         assert!(!starts_frame(64, &[0x55, 0x8b, 0xec]));
         assert!(!starts_frame(32, &[0x8b, 0xff, 0xc3]));
         assert!(!starts_frame(32, &[]));
+    }
+
+    /// Every general register has its own bit in a note's mask, below 64.
+    #[test]
+    fn registers_are_numbered_by_encoding() {
+        // mov r8d..r15d, 1
+        let mut seen = 0_u64;
+        for (n, opcode) in (8..16).zip(0xb8_u8..) {
+            let note = one(64, &[0x41, opcode, 1, 0, 0, 0], 0).note;
+            assert_eq!(note, Note::Address { reg: n, addr: 1 });
+            seen |= note.writes();
+        }
+        assert_eq!(seen, 0xff00);
+        assert_eq!(register_id(Register::AH), 0);
+        assert_eq!(register_id(Register::R15W), 15);
+        // movaps xmm0, xmm1 writes no general register.
+        assert_eq!(one(64, &[0x0f, 0x28, 0xc1], 0).note, Note::None);
+        assert_eq!(register_id(Register::XMM31), OTHER);
     }
 
     #[test]

@@ -9,4 +9,4 @@ FreeBSD 14 on x86-64: SQLite 3.53.4 as the ports tree builds it (Clang, `ELFOSAB
 - License: SQLite is public domain
 
 `libsqlite3-freebsd-amd64.so.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`libsqlite3-freebsd-amd64.so.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`libsqlite3-freebsd-amd64.so.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

@@ -10,4 +10,4 @@ Functions find the GOT from the PC (`mfs r20, rpc; imm 1; addik r20, r20, n`) an
 - **Malware:** this file is hostile. It is kept compressed and only ever parsed; never run it.
 
 `bot-microblaze-pic.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`bot-microblaze-pic.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`bot-microblaze-pic.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

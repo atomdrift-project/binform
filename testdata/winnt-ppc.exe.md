@@ -10,4 +10,4 @@ Decoded by the PowerPC decoder in little-endian mode (`PowerPcEl`). rizin 0.8.2 
 - **Malware:** this file is hostile. It is kept compressed and only ever parsed; never run it.
 
 `winnt-ppc.exe.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`winnt-ppc.exe.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`winnt-ppc.exe.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

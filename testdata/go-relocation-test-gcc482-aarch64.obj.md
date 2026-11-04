@@ -9,4 +9,4 @@ An A64 ELF relocatable object from GCC 4.8.2. Its sections all claim address zer
 - License: BSD-3-Clause (the Go license)
 
 `go-relocation-test-gcc482-aarch64.obj.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`go-relocation-test-gcc482-aarch64.obj.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`go-relocation-test-gcc482-aarch64.obj.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

@@ -4,10 +4,42 @@
 //! The loader reads only the ELF header and program headers, so a file can
 //! run with a section table that no strict parser accepts.
 
-use super::read::Reader;
+use std::collections::{HashMap, HashSet};
+
+use super::Error;
+use super::limits;
+use super::read::{self, Reader};
 
 pub(super) const ET_REL: u16 = 1;
-const EM_MIPS: u16 = 8;
+
+pub(super) const EM_SPARC: u16 = 2;
+pub(super) const EM_386: u16 = 3;
+pub(super) const EM_68K: u16 = 4;
+pub(super) const EM_MIPS: u16 = 8;
+pub(super) const EM_MIPS_RS3_LE: u16 = 10;
+pub(super) const EM_SPARC32PLUS: u16 = 18;
+pub(super) const EM_PPC: u16 = 20;
+pub(super) const EM_PPC64: u16 = 21;
+pub(super) const EM_S390: u16 = 22;
+pub(super) const EM_MCORE: u16 = 39;
+pub(super) const EM_ARM: u16 = 40;
+pub(super) const EM_SH: u16 = 42;
+pub(super) const EM_SPARCV9: u16 = 43;
+pub(super) const EM_X86_64: u16 = 62;
+pub(super) const EM_OPENRISC: u16 = 92;
+pub(super) const EM_ARC_COMPACT: u16 = 93;
+pub(super) const EM_XTENSA: u16 = 94;
+pub(super) const EM_ALTERA_NIOS2: u16 = 113;
+pub(super) const EM_AARCH64: u16 = 183;
+pub(super) const EM_MICROBLAZE: u16 = 189;
+pub(super) const EM_ARC_COMPACT2: u16 = 195;
+pub(super) const EM_RISCV: u16 = 243;
+pub(super) const EM_BPF: u16 = 247;
+pub(super) const EM_CSKY: u16 = 252;
+pub(super) const EM_LOONGARCH: u16 = 258;
+/// MicroBlaze's number before it had one.
+pub(super) const EM_MICROBLAZE_OLD: u16 = 0xbaab;
+
 pub(super) const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 pub(super) const PF_X: u32 = 1;
@@ -28,6 +60,9 @@ pub(super) const STT_SECTION: u8 = 3;
 pub(super) const STT_FILE: u8 = 4;
 pub(super) const STB_GLOBAL: u8 = 1;
 pub(super) const STB_WEAK: u8 = 2;
+/// A global symbol the dynamic linker keeps one definition of
+/// process-wide.
+pub(super) const STB_GNU_UNIQUE: u8 = 10;
 pub(super) const SHN_UNDEF: u16 = 0;
 pub(super) const SHN_ABS: u16 = 0xfff1;
 
@@ -40,10 +75,18 @@ const DT_SYMTAB: u64 = 6;
 const DT_RELA: u64 = 7;
 const DT_RELASZ: u64 = 8;
 const DT_STRSZ: u64 = 10;
+pub(super) const DT_INIT: u64 = 12;
+pub(super) const DT_FINI: u64 = 13;
 const DT_REL: u64 = 17;
 const DT_RELSZ: u64 = 18;
 const DT_PLTREL: u64 = 20;
 const DT_JMPREL: u64 = 23;
+pub(super) const DT_INIT_ARRAY: u64 = 25;
+pub(super) const DT_FINI_ARRAY: u64 = 26;
+pub(super) const DT_INIT_ARRAYSZ: u64 = 27;
+pub(super) const DT_FINI_ARRAYSZ: u64 = 28;
+pub(super) const DT_PREINIT_ARRAY: u64 = 32;
+pub(super) const DT_PREINIT_ARRAYSZ: u64 = 33;
 const DT_GNU_HASH: u64 = 0x6fff_fef5;
 const DT_VERSYM: u64 = 0x6fff_fff0;
 const DT_VERNEED: u64 = 0x6fff_fffe;
@@ -54,9 +97,6 @@ const FIRST_VERSION: u16 = 2;
 /// dynamic symbol with a GOT entry (each after it has one, in order).
 pub(super) const DT_MIPS_LOCAL_GOTNO: u64 = 0x7000_000a;
 pub(super) const DT_MIPS_GOTSYM: u64 = 0x7000_0013;
-
-/// The most entries read from any one table.
-const MOST: u64 = 1 << 20;
 
 pub(super) struct Elf {
     pub(super) is_64: bool,
@@ -125,60 +165,87 @@ pub(super) struct Reloc {
     pub(super) addend: Option<i64>,
 }
 
+/// The ELF header's fields past the identification bytes.
+struct Header {
+    kind: u16,
+    machine: u16,
+    entry: u64,
+    phoff: u64,
+    shoff: u64,
+    flags: u32,
+    phentsize: u16,
+    phnum: u16,
+    shentsize: u16,
+    shnum: u16,
+    shstrndx: u16,
+}
+
+impl Header {
+    fn read(r: &Reader<'_>, is_64: bool) -> Option<Self> {
+        let (kind, machine) = (r.u16(16)?, r.u16(18)?);
+        Some(if is_64 {
+            Self {
+                kind,
+                machine,
+                entry: r.u64(24)?,
+                phoff: r.u64(32)?,
+                shoff: r.u64(40)?,
+                flags: r.u32(48)?,
+                phentsize: r.u16(54)?,
+                phnum: r.u16(56)?,
+                shentsize: r.u16(58)?,
+                shnum: r.u16(60)?,
+                shstrndx: r.u16(62)?,
+            }
+        } else {
+            Self {
+                kind,
+                machine,
+                entry: u64::from(r.u32(24)?),
+                phoff: u64::from(r.u32(28)?),
+                shoff: u64::from(r.u32(32)?),
+                flags: r.u32(36)?,
+                phentsize: r.u16(42)?,
+                phnum: r.u16(44)?,
+                shentsize: r.u16(46)?,
+                shnum: r.u16(48)?,
+                shstrndx: r.u16(50)?,
+            }
+        })
+    }
+}
+
 /// The ELF file in `bytes`, or why it is none: only an ELF header too short
 /// or of no known class fails.
-pub(super) fn parse(bytes: &[u8]) -> Result<Elf, String> {
+pub(super) fn parse(bytes: &[u8]) -> Result<Elf, Error> {
     let (is_64, big) = match (bytes.get(4), bytes.get(5)) {
         (Some(1), Some(1)) => (false, false),
         (Some(1), Some(2)) => (false, true),
         (Some(2), Some(1)) => (true, false),
         (Some(2), Some(2)) => (true, true),
-        _ => return Err("unknown ELF class or byte order".into()),
+        _ => return Err(Error::Unsupported("ELF class or byte order")),
     };
     let r = Reader::new(bytes, big);
-    let header = (|| {
-        let word = |at32: u64, at64: u64| r.word(if is_64 { at64 } else { at32 }, is_64);
-        let half = |at32: u64, at64: u64| r.u16(if is_64 { at64 } else { at32 }).map(u64::from);
-        Some([
-            u64::from(r.u16(16)?),
-            u64::from(r.u16(18)?),
-            word(24, 24)?,
-            word(28, 32)?,
-            word(32, 40)?,
-            half(42, 54)?,
-            half(44, 56)?,
-            half(46, 58)?,
-            half(48, 60)?,
-            half(50, 62)?,
-        ])
-    })()
-    .ok_or("ELF header truncated")?;
-    let [
-        kind,
-        machine,
-        entry,
-        phoff,
-        shoff,
-        phentsize,
-        phnum,
-        shentsize,
-        shnum,
-        shstrndx,
-    ] = header;
+    let header = Header::read(&r, is_64).ok_or(Error::Truncated("ELF header"))?;
 
-    let programs = table(phoff, phentsize, phnum, if is_64 { 56 } else { 32 })
-        .map_while(|at| program(&r, is_64, at))
-        .collect();
-    let mut names = Vec::new();
-    let mut sections: Vec<Section> = table(shoff, shentsize, shnum, if is_64 { 64 } else { 40 })
-        .map_while(|at| {
-            names.push(r.u32(at)?);
-            section(&r, is_64, at)
-        })
-        .collect();
-    if let Some(strings) = usize::try_from(shstrndx)
-        .ok()
-        .and_then(|i| sections.get(i))
+    let programs = table(
+        header.phoff,
+        header.phentsize,
+        header.phnum,
+        if is_64 { 56 } else { 32 },
+    )
+    .map_while(|at| program(&r.at(at), is_64))
+    .collect();
+    let (names, mut sections): (Vec<u32>, Vec<Section>) = table(
+        header.shoff,
+        header.shentsize,
+        header.shnum,
+        if is_64 { 64 } else { 40 },
+    )
+    .map_while(|at| section(&r.at(at), is_64))
+    .unzip();
+    if let Some(strings) = sections
+        .get(usize::from(header.shstrndx))
         .map(|sh| (sh.offset, sh.size))
     {
         for (sh, &name) in sections.iter_mut().zip(&names) {
@@ -189,10 +256,10 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Elf, String> {
     let mut elf = Elf {
         is_64,
         big,
-        machine: u16::try_from(machine).unwrap_or(u16::MAX),
-        header_flags: r.u32(if is_64 { 48 } else { 36 }).unwrap_or(0),
-        kind: u16::try_from(kind).unwrap_or(u16::MAX),
-        entry,
+        machine: header.machine,
+        header_flags: header.flags,
+        kind: header.kind,
+        entry: header.entry,
         programs,
         sections,
         symbols: Vec::new(),
@@ -208,43 +275,52 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Elf, String> {
     Ok(elf)
 }
 
-/// The offsets of a table's entries: `count` entries of `size` bytes from
-/// `offset`, none when the entry size is smaller than `least`.
-fn table(offset: u64, size: u64, count: u64, least: u64) -> impl Iterator<Item = u64> {
+/// The offsets of a header table's entries: `count` entries of `size`
+/// bytes from `offset`, none when the entry size is smaller than `least`.
+fn table(offset: u64, size: u16, count: u16, least: u16) -> impl Iterator<Item = u64> {
     let count = if offset == 0 || size < least {
         0
     } else {
-        count.min(MOST)
+        count
     };
-    (0..count).map_while(move |i| offset.checked_add(i.checked_mul(size)?))
+    read::table(offset, u64::from(size), u64::from(count))
 }
 
-fn program(r: &Reader<'_>, is_64: bool, at: u64) -> Option<Program> {
+/// The offsets of a table's entries of `size` bytes in the `bytes` from
+/// `offset`; none at offset zero, where the ELF header is.
+fn entries(offset: u64, bytes: u64, size: u64) -> impl Iterator<Item = u64> {
+    read::entries(offset, if offset == 0 { 0 } else { bytes }, size)
+}
+
+/// The program header `r` starts at.
+fn program(r: &Reader<'_>, is_64: bool) -> Option<Program> {
     Some(if is_64 {
         Program {
-            kind: r.u32(at)?,
-            flags: r.u32(at + 4)?,
-            offset: r.u64(at + 8)?,
-            vaddr: r.u64(at + 16)?,
-            filesz: r.u64(at + 32)?,
+            kind: r.u32(0)?,
+            flags: r.u32(4)?,
+            offset: r.u64(8)?,
+            vaddr: r.u64(16)?,
+            filesz: r.u64(32)?,
         }
     } else {
         Program {
-            kind: r.u32(at)?,
-            offset: u64::from(r.u32(at + 4)?),
-            vaddr: u64::from(r.u32(at + 8)?),
-            filesz: u64::from(r.u32(at + 16)?),
-            flags: r.u32(at + 24)?,
+            kind: r.u32(0)?,
+            offset: u64::from(r.u32(4)?),
+            vaddr: u64::from(r.u32(8)?),
+            filesz: u64::from(r.u32(16)?),
+            flags: r.u32(24)?,
         }
     })
 }
 
-fn section(r: &Reader<'_>, is_64: bool, at: u64) -> Option<Section> {
-    let word = |at32: u64, at64: u64| r.word(at + if is_64 { at64 } else { at32 }, is_64);
-    let half = |at32: u64, at64: u64| r.u32(at + if is_64 { at64 } else { at32 });
-    Some(Section {
+/// The section header `r` starts at, and its name's offset in the section
+/// name table.
+fn section(r: &Reader<'_>, is_64: bool) -> Option<(u32, Section)> {
+    let word = |at32: u64, at64: u64| r.word(if is_64 { at64 } else { at32 }, is_64);
+    let half = |at32: u64, at64: u64| r.u32(if is_64 { at64 } else { at32 });
+    let section = Section {
         name: String::new(),
-        kind: r.u32(at + 4)?,
+        kind: r.u32(4)?,
         flags: word(8, 8)?,
         addr: word(12, 16)?,
         offset: word(16, 24)?,
@@ -253,7 +329,8 @@ fn section(r: &Reader<'_>, is_64: bool, at: u64) -> Option<Section> {
         info: half(28, 44)?,
         addralign: word(32, 48)?,
         entsize: word(36, 56)?,
-    })
+    };
+    Some((r.u32(0)?, section))
 }
 
 /// The string at `offset` in the string table at file range `strings`.
@@ -270,8 +347,10 @@ impl Elf {
         self.programs
             .iter()
             .filter(|ph| ph.kind == PT_LOAD)
-            .find(|ph| addr >= ph.vaddr && addr - ph.vaddr < ph.filesz)
-            .map(|ph| ph.offset + (addr - ph.vaddr))
+            .find_map(|ph| {
+                let delta = addr.checked_sub(ph.vaddr).filter(|&d| d < ph.filesz)?;
+                ph.offset.checked_add(delta)
+            })
     }
 
     /// The value of the first dynamic entry tagged `tag`.
@@ -297,12 +376,12 @@ impl Elf {
         let Some((offset, size)) = range else {
             return Vec::new();
         };
-        let entry = if self.is_64 { 16 } else { 8 };
-        table(offset, entry, size / entry, entry)
+        let (entry, value) = if self.is_64 { (16, 8) } else { (8, 4) };
+        entries(offset, size, entry)
             .map_while(|at| {
-                let tag = r.word(at, self.is_64)?;
-                let value = r.word(at + entry / 2, self.is_64)?;
-                (tag != DT_NULL).then_some((tag, value))
+                let entry = r.at(at);
+                let tag = entry.word(0, self.is_64)?;
+                (tag != DT_NULL).then_some((tag, entry.word(value, self.is_64)?))
             })
             .collect()
     }
@@ -337,26 +416,21 @@ impl Elf {
         strings: (u64, u64),
     ) -> Vec<Symbol> {
         let least = if self.is_64 { 24 } else { 16 };
-        let entsize = if entsize >= least { entsize } else { least };
-        table(offset, entsize, size / entsize, least)
+        entries(offset, size, entsize.max(least))
             .map_while(|at| {
+                let entry = r.at(at);
                 let (info, shndx, value, size) = if self.is_64 {
-                    (
-                        r.u8(at + 4)?,
-                        r.u16(at + 6)?,
-                        r.u64(at + 8)?,
-                        r.u64(at + 16)?,
-                    )
+                    (entry.u8(4)?, entry.u16(6)?, entry.u64(8)?, entry.u64(16)?)
                 } else {
                     (
-                        r.u8(at + 12)?,
-                        r.u16(at + 14)?,
-                        u64::from(r.u32(at + 4)?),
-                        u64::from(r.u32(at + 8)?),
+                        entry.u8(12)?,
+                        entry.u16(14)?,
+                        u64::from(entry.u32(4)?),
+                        u64::from(entry.u32(8)?),
                     )
                 };
                 Some(Symbol {
-                    name: string(r, strings, r.u32(at)?),
+                    name: string(r, strings, entry.u32(0)?),
                     kind: info & 0xf,
                     bind: info >> 4,
                     shndx,
@@ -379,9 +453,9 @@ impl Elf {
             return Vec::new();
         };
         let count = at(DT_HASH)
-            .and_then(|hash| r.u32(hash + 4))
+            .and_then(|hash| r.at(hash).u32(4))
             .map(u64::from)
-            .or_else(|| at(DT_GNU_HASH).and_then(|hash| gnu_hash_count(r, hash, self.is_64)))
+            .or_else(|| at(DT_GNU_HASH).and_then(|hash| gnu_hash_count(&r.at(hash), self.is_64)))
             .unwrap_or(0);
         let entsize = if self.is_64 { 24 } else { 16 };
         let strsz = self.dynamic_value(DT_STRSZ).unwrap_or(u64::MAX);
@@ -416,13 +490,14 @@ impl Elf {
         let Some(versym) = versym else {
             return;
         };
-        for (i, symbol) in (0u64..).zip(self.dynamic_symbols.iter_mut()) {
+        let versions = r.at(versym);
+        for (i, symbol) in (0_u64..).zip(self.dynamic_symbols.iter_mut()) {
             if symbol.shndx != SHN_UNDEF {
                 continue;
             }
-            let Some(version) = versym
-                .checked_add(i * 2)
-                .and_then(|at| r.u16(at))
+            let Some(version) = i
+                .checked_mul(2)
+                .and_then(|at| versions.u16(at))
                 .map(|v| v & 0x7fff)
             else {
                 break;
@@ -434,8 +509,8 @@ impl Elf {
     }
 
     /// Each required version's index, and the file it is required from.
-    fn version_files(&self, r: &Reader<'_>) -> std::collections::HashMap<u16, String> {
-        let mut files = std::collections::HashMap::new();
+    fn version_files(&self, r: &Reader<'_>) -> HashMap<u16, String> {
+        let mut files = HashMap::new();
         let dynamic = (|| {
             let at = self.offset_of(self.dynamic_value(DT_VERNEED)?)?;
             let count = self.dynamic_value(DT_VERNEEDNUM)?;
@@ -456,14 +531,15 @@ impl Elf {
         };
         // Entries chain by relative offsets; every one visited, file or
         // version, counts against one budget, so no chain runs long.
-        let mut budget = MOST;
+        let mut budget = limits::TABLE;
         for _ in 0..count {
+            let need = r.at(at);
             let Some([version_count, file, aux, next]) = (|| {
                 Some([
-                    u32::from(r.u16(at + 2)?),
-                    r.u32(at + 4)?,
-                    r.u32(at + 8)?,
-                    r.u32(at + 12)?,
+                    u32::from(need.u16(2)?),
+                    need.u32(4)?,
+                    need.u32(8)?,
+                    need.u32(12)?,
                 ])
             })() else {
                 break;
@@ -472,8 +548,8 @@ impl Elf {
             let mut version = at.saturating_add(u64::from(aux));
             for _ in 0..version_count {
                 budget = budget.saturating_sub(1);
-                let (Some(index), Some(next_version)) = (r.u16(version + 6), r.u32(version + 12))
-                else {
+                let aux = r.at(version);
+                let (Some(index), Some(next_version)) = (aux.u16(6), aux.u32(12)) else {
                     break;
                 };
                 files.insert(index & 0x7fff, name.clone());
@@ -491,27 +567,12 @@ impl Elf {
         files
     }
 
+    /// The dynamic linker's relocations, by the dynamic section (by the
+    /// section table when it names none), and an object's relocation
+    /// sections. Section headers may point many times at one table: each
+    /// file range is read once, and all within [`limits::RELOCATIONS`].
     fn read_relocations(&mut self, r: &Reader<'_>) {
-        let dynsym = self.sections.iter().position(|sh| sh.kind == SHT_DYNSYM);
-        let mut relocations = Vec::new();
-        let mut from_sections = Vec::new();
-        for sh in &self.sections {
-            let rela = match sh.kind {
-                SHT_RELA => true,
-                SHT_REL => false,
-                _ => continue,
-            };
-            let entries = self.reloc_table(r, sh.offset, sh.size, rela);
-            if usize::try_from(sh.link).ok() == dynsym && dynsym.is_some() {
-                from_sections.extend(entries);
-            } else if let Ok(target) = usize::try_from(sh.info) {
-                relocations.push((target, entries));
-            }
-        }
-        self.relocations = relocations;
-
-        // The dynamic linker's tables, by the dynamic section; by section
-        // when it names none.
+        let mut budget = limits::RELOCATIONS;
         let at = |tag| {
             self.dynamic_value(tag)
                 .and_then(|addr| self.offset_of(addr))
@@ -520,30 +581,64 @@ impl Elf {
         let mut dynamic = Vec::new();
         if let Some(offset) = at(DT_JMPREL) {
             let rela = self.dynamic_value(DT_PLTREL) == Some(DT_RELA);
-            dynamic.extend(self.reloc_table(r, offset, size(DT_PLTRELSZ), rela));
+            dynamic.extend(self.reloc_table(r, offset, size(DT_PLTRELSZ), rela, &mut budget));
         }
         if let Some(offset) = at(DT_RELA) {
-            dynamic.extend(self.reloc_table(r, offset, size(DT_RELASZ), true));
+            dynamic.extend(self.reloc_table(r, offset, size(DT_RELASZ), true, &mut budget));
         }
         if let Some(offset) = at(DT_REL) {
-            dynamic.extend(self.reloc_table(r, offset, size(DT_RELSZ), false));
+            dynamic.extend(self.reloc_table(r, offset, size(DT_RELSZ), false, &mut budget));
         }
-        self.dynamic_relocations = if dynamic.is_empty() {
-            from_sections
-        } else {
-            dynamic
-        };
+
+        let dynsym = self.sections.iter().position(|sh| sh.kind == SHT_DYNSYM);
+        let mut relocations = Vec::new();
+        let mut seen = HashSet::new();
+        for sh in &self.sections {
+            let rela = match sh.kind {
+                SHT_RELA => true,
+                SHT_REL => false,
+                _ => continue,
+            };
+            let for_loader = dynsym.is_some() && usize::try_from(sh.link).ok() == dynsym;
+            // The dynamic section's tables stand in for the loader's.
+            if (for_loader && !dynamic.is_empty()) || !seen.insert((sh.offset, sh.size)) {
+                continue;
+            }
+            let entries = self.reloc_table(r, sh.offset, sh.size, rela, &mut budget);
+            if for_loader {
+                dynamic.extend(entries);
+            } else if let Ok(target) = usize::try_from(sh.info) {
+                relocations.push((target, entries));
+            }
+        }
+        self.relocations = relocations;
+        self.dynamic_relocations = dynamic;
     }
 
-    fn reloc_table(&self, r: &Reader<'_>, offset: u64, size: u64, rela: bool) -> Vec<Reloc> {
-        let word = if self.is_64 { 8 } else { 4 };
-        let entry = if rela { 3 * word } else { 2 * word };
-        table(offset, entry, size / entry, entry)
+    /// The relocation table of `size` bytes at `offset`, spending `budget`.
+    fn reloc_table(
+        &self,
+        r: &Reader<'_>,
+        offset: u64,
+        size: u64,
+        rela: bool,
+        budget: &mut usize,
+    ) -> Vec<Reloc> {
+        // Offset, info and, for RELA, addend: one word each.
+        let (info_at, addend_at): (u64, u64) = if self.is_64 { (8, 16) } else { (4, 8) };
+        let entry = if rela {
+            addend_at.saturating_add(info_at)
+        } else {
+            addend_at
+        };
+        let relocs: Vec<Reloc> = entries(offset, size, entry)
+            .take(*budget)
             .map_while(|at| {
-                let offset = r.word(at, self.is_64)?;
-                let info = r.word(at + word, self.is_64)?;
+                let entry = r.at(at);
+                let offset = entry.word(0, self.is_64)?;
+                let info = entry.word(info_at, self.is_64)?;
                 let addend = if rela {
-                    let raw = r.word(at + 2 * word, self.is_64)?;
+                    let raw = entry.word(addend_at, self.is_64)?;
                     Some(if self.is_64 {
                         raw.cast_signed()
                     } else {
@@ -572,33 +667,38 @@ impl Elf {
                     addend,
                 })
             })
-            .collect()
+            .collect();
+        *budget = budget.saturating_sub(relocs.len());
+        relocs
     }
 }
 
-/// The number of symbols a `DT_GNU_HASH` table covers: one past the last
-/// symbol any bucket's chain reaches.
-fn gnu_hash_count(r: &Reader<'_>, at: u64, is_64: bool) -> Option<u64> {
-    let buckets = u64::from(r.u32(at)?).min(MOST);
-    let offset = u64::from(r.u32(at + 4)?);
-    let blooms = u64::from(r.u32(at + 8)?).min(MOST);
-    let words = at + 16 + blooms * if is_64 { 8 } else { 4 };
-    let last = (0..buckets)
-        .filter_map(|i| r.u32(words + 4 * i))
+/// The number of symbols the `DT_GNU_HASH` table `r` starts at covers: one
+/// past the last symbol any bucket's chain reaches.
+fn gnu_hash_count(r: &Reader<'_>, is_64: bool) -> Option<u64> {
+    let buckets = u64::from(r.u32(0)?).min(limits::TABLE);
+    let offset = u64::from(r.u32(4)?);
+    let blooms = u64::from(r.u32(8)?).min(limits::TABLE);
+    let words = blooms
+        .checked_mul(if is_64 { 8 } else { 4 })?
+        .checked_add(16)?;
+    let last = read::table(words, 4, buckets)
+        .filter_map(|at| r.u32(at))
         .max()
         .map(u64::from)?;
     if last < offset {
         return Some(offset);
     }
-    let chains = words + 4 * buckets;
+    let chains = words.checked_add(buckets.checked_mul(4)?)?;
     // The chain ends at the entry whose low bit is set.
     let mut symbol = last;
-    for _ in 0..MOST {
-        let value = r.u32(chains + 4 * (symbol - offset))?;
+    for _ in 0..limits::TABLE {
+        let index = symbol.checked_sub(offset)?;
+        let value = r.u32(chains.checked_add(index.checked_mul(4)?)?)?;
+        symbol = symbol.checked_add(1)?;
         if value & 1 != 0 {
-            return Some(symbol + 1);
+            break;
         }
-        symbol += 1;
     }
     Some(symbol)
 }
@@ -753,6 +853,33 @@ mod tests {
             .map(|s| (s.name.as_str(), s.library.as_deref()))
             .collect();
         assert_eq!(named, [("puts", Some("libc.so.6")), ("open", None)]);
+    }
+
+    /// 65,535 section headers pointing at one table of 65,536 relocations
+    /// (and as many again at slightly shorter views of it) claim billions:
+    /// the table is read once, the views within one budget.
+    #[test]
+    fn relocation_tables_share_one_budget() {
+        let entries = 1_usize << 16;
+        let shoff = 0x40 + 24 * entries as u64;
+        let mut bytes = header(0, shoff, u16::MAX);
+        bytes.resize(usize::try_from(shoff).unwrap_or(0), 0);
+        for i in 0..u64::from(u16::MAX) {
+            // Even headers repeat the whole table; odd ones each a view
+            // shorter by one entry.
+            let size = if i % 2 == 0 {
+                24 * entries as u64
+            } else {
+                24 * (entries as u64 - i)
+            };
+            bytes.extend(section_header(SHT_RELA, 0x40, size, 0, 1, 24));
+        }
+        let start = std::time::Instant::now();
+        let elf = parse(&bytes).unwrap_or_else(|e| panic!("{e}"));
+        let read: usize = elf.relocations.iter().map(|(_, relocs)| relocs.len()).sum();
+        assert!(read <= limits::RELOCATIONS, "{read}");
+        assert!(read >= entries);
+        assert!(start.elapsed().as_secs() < 10);
     }
 
     #[test]

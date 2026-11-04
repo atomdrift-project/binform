@@ -10,4 +10,4 @@ M*Core is the set C-SKY ABIv1 descends from, and binform decodes it with the C-S
 - **Malware:** this file is hostile. It is kept compressed and only ever parsed; never run it.
 
 `bot-mcore-static.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`bot-mcore-static.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`bot-mcore-static.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

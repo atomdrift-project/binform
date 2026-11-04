@@ -1,6 +1,6 @@
 # race_darwin_arm64.syso
 
-The same runtime as an A64 Mach-O `MH_OBJECT`. Unlinked, its `bl 0` placeholders made thousands of one-instruction "functions"; branch relocations are now applied.
+The same runtime as an A64 Mach-O `MH_OBJECT`. Unlinked, its `bl 0` placeholders would make thousands of one-instruction "functions"; binform applies the branch relocations.
 
 - Source: the Go 1.26.6 distribution (`go1.26.6.windows-386.zip` from go.dev/dl)
 - Path in the source: `go/src/runtime/race/race_darwin_arm64.syso`
@@ -9,4 +9,4 @@ The same runtime as an A64 Mach-O `MH_OBJECT`. Unlinked, its `bl 0` placeholders
 - License: BSD-3-Clause (the Go license)
 
 `race_darwin_arm64.syso.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`race_darwin_arm64.syso.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`race_darwin_arm64.syso.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

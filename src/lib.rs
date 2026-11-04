@@ -1,19 +1,18 @@
-//! binform answers, in-process, the questions filefacts and stng used to send
-//! to rizin: where a binary's functions are, their basic blocks, complexity
-//! and calls, and its imports. It does what rizin does for those two tools,
-//! and nothing rizin does not.
+//! binform recovers functions from machine code: where each one starts and
+//! ends, its basic blocks, its complexity, and the calls and jumps it makes,
+//! in ELF, PE and Mach-O binaries of the instruction sets [`Arch`] lists.
 //!
-//! [`parse`] reads ELF, PE and Mach-O bytes into a [`Binary`]; [`functions`](fn@functions)
-//! recovers its functions. Each is a pure function of its input: no I/O, no
-//! threads, no global state, no panics, and work bounded by [`Limits`],
-//! because the input is assumed hostile. A caller pays only for what it
-//! calls.
+//! [`parse`] reads a binary's headers into a [`Binary`]; [`recover`]
+//! recovers its functions; [`calls`] reads the values each call and syscall
+//! passes. Each is a pure function of its input: no I/O, no threads, no
+//! global state, no panics, and work bounded by [`Limits`], because the
+//! input is assumed hostile. A caller pays only for what it calls.
 //!
 //! ```no_run
-//! # fn main() -> Result<(), binform::Error> {
-//! let bytes = std::fs::read("a.out").unwrap_or_default();
+//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
+//! let bytes = std::fs::read("a.out")?;
 //! let bin = binform::parse(&bytes)?;
-//! for f in binform::functions(&bin, &binform::Limits::DEFAULT).functions {
+//! for f in &binform::recover(&bin, &binform::Limits::DEFAULT).functions {
 //!     println!("{:#x} {} blocks, complexity {}", f.entry, f.blocks, f.complexity);
 //! }
 //! # Ok(())
@@ -32,9 +31,13 @@
 //! inside them. Complexity is McCabe's `E - N + 2P` over that graph, with `P`
 //! the blocks that leave it (returns, traps, indirect jumps).
 
-#[doc(hidden)]
-pub mod diagnostics;
+// Tests build their inputs with plain arithmetic; the library is linted
+// without them.
+#![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
+
 mod calls;
+#[cfg(feature = "diagnostics")]
+pub mod diagnostics;
 mod functions;
 mod isa;
 mod layout;
@@ -43,6 +46,7 @@ mod syscalls;
 mod tests;
 
 use std::borrow::Cow;
+use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
 
 pub use calls::{Call, Target, Value, calls};
@@ -239,12 +243,9 @@ pub(crate) struct Segment<'a> {
 pub(crate) enum Origin {
     /// The program entry point.
     Entry,
-    /// The `n`th initializer the loader runs (ELF `DT_INIT` and init arrays).
-    Init(u32),
-    /// The `n`th finalizer (ELF `DT_FINI` and fini arrays).
-    Fini(u32),
-    /// The `n`th TLS callback (PE).
-    Tls(u32),
+    /// A routine the loader runs: an initializer or finalizer (ELF
+    /// `DT_INIT`, `DT_FINI` and their arrays), a TLS callback (PE).
+    Loader,
     /// A symbol-table entry naming a function, or a Go function-table
     /// (`.gopclntab`) entry.
     Symbol(String),
@@ -285,16 +286,19 @@ pub(crate) struct Seed {
 
 /// A pointer slot the loader fills with an imported function's address: a PE
 /// import-address-table entry, an ELF GOT entry, a Mach-O symbol pointer.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub(crate) struct Slot {
     /// Address of the slot.
     pub(crate) slot: u64,
     /// The imported symbol's name, as the binary spells it.
     pub(crate) name: String,
+    /// Its entry in [`Binary::imports`], once [`Binary::index_slots`] ran.
+    pub(crate) import: Option<usize>,
 }
 
 /// A container format binform reads.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum Format {
     /// ELF: executables, shared objects and relocatable objects.
     Elf,
@@ -307,6 +311,7 @@ pub enum Format {
 /// A section as its header describes it, values as the header holds them:
 /// a PE section's sizes unrounded, a nameless one nameless.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Section {
     /// The header's name; Mach-O's is `__SEGMENT.__section`, a PE long name
     /// (`/4`) the one the COFF string table holds.
@@ -341,8 +346,9 @@ impl Section {
     }
 }
 
-/// An imported symbol: rizin's `ii`.
+/// An imported symbol.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Import {
     /// The symbol's name as the binary spells it; `Ordinal_n` for a PE
     /// import by ordinal only.
@@ -359,45 +365,40 @@ pub struct Import {
     pub delayed: bool,
 }
 
-/// An exported symbol: rizin's `iE`.
+/// An exported symbol.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Export {
     /// The symbol's name as the binary spells it; `Ordinal_n` for a PE
     /// export by ordinal only.
     pub name: String,
-    /// Its address.
-    pub addr: u64,
+    /// Its address; `None` for a Mach-O re-export, which has none of its
+    /// own. A PE forwarder's is that of its forwarder string.
+    pub addr: Option<u64>,
     /// For a forwarder, the export it forwards to: a PE forwarder's string
-    /// (`NTDLL.RtlAllocateHeap`), whose address `addr` then is; a Mach-O
-    /// re-export's library stem and symbol (`libsystem_c._memcpy`), with no
-    /// address of its own (`addr` zero).
+    /// (`NTDLL.RtlAllocateHeap`); a Mach-O re-export's library stem and
+    /// symbol (`libsystem_c._memcpy`).
     pub forward: Option<String>,
 }
 
 /// A parsed binary: what [`parse`] read from its headers, and what
-/// [`functions`](fn@functions) needs to recover its functions.
+/// [`recover`] needs to recover its functions.
 #[derive(Clone, Debug)]
 pub struct Binary<'a> {
-    /// The container format.
-    pub format: Format,
-    /// The instruction set of the code segments; `None` for one binform
-    /// does not decode, whose binary has its layout and no functions.
-    pub arch: Option<Arch>,
-    /// The entry point, when the binary has one.
-    pub entry: Option<u64>,
-    /// Sections in header order.
-    pub sections: Vec<Section>,
-    /// Imported symbols, one per symbol.
-    pub imports: Vec<Import>,
-    /// Exported symbols.
-    pub exports: Vec<Export>,
+    pub(crate) format: Format,
+    pub(crate) arch: Option<Arch>,
+    pub(crate) entry: Option<u64>,
+    pub(crate) sections: Vec<Section>,
+    pub(crate) imports: Vec<Import>,
+    pub(crate) exports: Vec<Export>,
     /// Every mapped segment, code and data.
     pub(crate) segments: Vec<Segment<'a>>,
     /// Addresses known to start functions. Duplicates are harmless.
     pub(crate) seeds: Vec<Seed>,
-    /// Import slots, one per slot. Calls through them, and through stubs that only jump
-    /// through them, are resolved to the import; calls to imports that never
-    /// return end their basic block.
+    /// Import slots, one per slot, in address order once
+    /// [`Binary::index_slots`] ran. Calls through them, and through stubs
+    /// that only jump through them, are resolved to the import; calls to
+    /// imports that never return end their basic block.
     pub(crate) slots: Vec<Slot>,
     /// Landing pads, explored as part of the functions they belong to.
     pub(crate) handlers: Vec<Handler>,
@@ -420,6 +421,44 @@ pub struct Binary<'a> {
 }
 
 impl Binary<'_> {
+    /// The container format.
+    #[must_use]
+    pub const fn format(&self) -> Format {
+        self.format
+    }
+
+    /// The instruction set of the code; `None` for one binform does not
+    /// decode, whose binary has its layout and no functions.
+    #[must_use]
+    pub const fn arch(&self) -> Option<Arch> {
+        self.arch
+    }
+
+    /// The entry point, when the binary has one.
+    #[must_use]
+    pub const fn entry(&self) -> Option<u64> {
+        self.entry
+    }
+
+    /// Sections in header order.
+    #[must_use]
+    pub fn sections(&self) -> &[Section] {
+        &self.sections
+    }
+
+    /// Imported symbols, one per symbol (a PE import, one per
+    /// import-address-table entry).
+    #[must_use]
+    pub fn imports(&self) -> &[Import] {
+        &self.imports
+    }
+
+    /// Exported symbols.
+    #[must_use]
+    pub fn exports(&self) -> &[Export] {
+        &self.exports
+    }
+
     /// The mapped section that holds `addr`.
     #[must_use]
     pub fn section_at(&self, addr: u64) -> Option<&Section> {
@@ -463,19 +502,49 @@ impl Binary<'_> {
         }
     }
 
-    /// The name of the import whose slot is at `slot`: what a [`Ref`] that
-    /// goes through a slot (a [`Ref::to`] that is no function's entry)
-    /// calls.
+    /// The import whose address the loader writes to `slot`, and its index
+    /// in [`imports`](Self::imports).
     #[must_use]
-    pub fn import(&self, slot: u64) -> Option<&str> {
-        self.slots
-            .iter()
-            .find(|s| s.slot == slot)
-            .map(|s| s.name.as_str())
+    pub fn import(&self, slot: u64) -> Option<(usize, &Import)> {
+        let at = self.slots.binary_search_by_key(&slot, |s| s.slot).ok()?;
+        let index = self.slots.get(at)?.import?;
+        Some((index, self.imports.get(index)?))
+    }
+
+    /// Sort the slots by address and point each at its import: the one
+    /// whose own slot it is, else the first of its name.
+    pub(crate) fn index_slots(&mut self) {
+        let mut by_slot = HashMap::new();
+        let mut by_name = HashMap::new();
+        for (i, import) in self.imports.iter().enumerate() {
+            if let Some(slot) = import.slot {
+                by_slot.entry(slot).or_insert(i);
+            }
+            by_name.entry(import.name.as_str()).or_insert(i);
+        }
+        for slot in &mut self.slots {
+            slot.import = by_slot
+                .get(&slot.slot)
+                .or_else(|| by_name.get(slot.name.as_str()))
+                .copied();
+        }
+        self.slots.sort_by_key(|slot| slot.slot);
+        self.slots.dedup_by_key(|slot| slot.slot);
+    }
+
+    /// Whether `addr` lies in an executable segment.
+    #[cfg(any(test, feature = "diagnostics"))]
+    pub(crate) fn is_code(&self, addr: u64) -> bool {
+        self.segments.iter().any(|segment| {
+            segment.executable
+                && addr
+                    .checked_sub(segment.addr)
+                    .is_some_and(|offset| offset < segment.bytes.len() as u64)
+        })
     }
 }
 
-/// Bounds on the work [`functions`](fn@functions) does.
+/// Bounds on the work [`recover`] does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Most functions recovered.
@@ -503,7 +572,7 @@ impl Limits {
     /// Bounds for a caller that scans many files and wants each answer
     /// quickly: a 64th of the default instruction budget (two million,
     /// tens of milliseconds on most binaries), at the cost of
-    /// [`Functions::truncated`] on the largest.
+    /// [`Recovery::truncated`] on the largest.
     pub const QUICK: Self = Self {
         functions: 1 << 18,
         instructions: 1 << 21,
@@ -513,6 +582,7 @@ impl Limits {
 
 /// A recovered function.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Function {
     /// Address of the first instruction.
     pub entry: u64,
@@ -626,7 +696,7 @@ impl From<&Origin> for Found {
     fn from(origin: &Origin) -> Self {
         match origin {
             Origin::Entry => Self::ENTRY,
-            Origin::Init(_) | Origin::Fini(_) | Origin::Tls(_) => Self::LOADER,
+            Origin::Loader => Self::LOADER,
             Origin::Symbol(_) => Self::SYMBOL,
             Origin::Export(_) => Self::EXPORT,
             Origin::Unwind => Self::UNWIND,
@@ -639,18 +709,47 @@ impl From<&Origin> for Found {
 
 /// A call or jump instruction and where it goes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Ref {
     /// Address of the instruction.
     pub from: u64,
-    /// The target, or for a transfer through a fixed memory slot (an import
-    /// table entry) the address of that slot.
-    pub to: u64,
+    /// Where it goes.
+    pub to: Dest,
     /// What kind of transfer it is.
     pub kind: RefKind,
 }
 
+impl Ref {
+    /// The address the transfer reaches: its target, or the slot it goes
+    /// through.
+    #[must_use]
+    pub const fn addr(&self) -> u64 {
+        match self.to {
+            Dest::Code(addr) | Dest::Slot { addr, .. } => addr,
+        }
+    }
+}
+
+/// Where a [`Ref`] goes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum Dest {
+    /// Code at this address: a function's entry ([`Recovery::function`]),
+    /// or a block of the function itself.
+    Code(u64),
+    /// Wherever the pointer in the memory slot at `addr` leads: for an
+    /// import's slot, the import, by its index in [`Binary::imports`].
+    Slot {
+        /// The slot's address.
+        addr: u64,
+        /// The import whose address the loader writes there.
+        import: Option<usize>,
+    },
+}
+
 /// What a [`Ref`] does.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[non_exhaustive]
 pub enum RefKind {
     /// A call.
     Call,
@@ -662,13 +761,14 @@ pub enum RefKind {
     Case,
 }
 
-/// The functions [`functions`](fn@functions) recovered, with the facts that say how far
-/// to trust them: code they mostly do not cover (packed or encrypted code),
+/// The functions [`recover`] recovered, with the facts that say how far to
+/// trust them: code they mostly do not cover (packed or encrypted code),
 /// paths that run into bytes that do not decode (data, or the wrong
 /// instruction set), jumps whose targets are unknown, and whether a
 /// [`Limits`] bound cut the work short.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct Functions {
+#[non_exhaustive]
+pub struct Recovery {
     /// Functions in entry-address order.
     pub functions: Vec<Function>,
     /// Bytes of executable code in the binary.
@@ -681,11 +781,13 @@ pub struct Functions {
     pub unresolved: u64,
     /// Whether a [`Limits`] bound stopped recovery early.
     pub truncated: bool,
+    /// Each stub's entry, and the import slot it only jumps through.
+    pub(crate) stubs: BTreeMap<u64, u64>,
 }
 
-impl Functions {
-    /// The function whose entry is `addr`: what a [`Ref`] to a function
-    /// calls.
+impl Recovery {
+    /// The function whose entry is `addr`: what a [`Dest::Code`] that is a
+    /// call reaches.
     #[must_use]
     pub fn function(&self, addr: u64) -> Option<&Function> {
         self.functions
@@ -694,21 +796,18 @@ impl Functions {
             .and_then(|index| self.functions.get(index))
     }
 
-    /// The name of what `to` (a [`Ref::to`]) reaches: a named function, or
-    /// the import whose slot it is.
+    /// The name of what `to` reaches: a named function, or an import.
     #[must_use]
-    pub fn name<'a>(&'a self, bin: &'a Binary<'_>, to: u64) -> Option<&'a str> {
-        self.function(to)
-            .and_then(|function| function.name.as_deref())
-            .or_else(|| bin.import(to))
+    pub fn name<'a>(&'a self, bin: &'a Binary<'_>, to: Dest) -> Option<&'a str> {
+        match to {
+            Dest::Code(addr) => self.function(addr)?.name.as_deref(),
+            Dest::Slot { import, .. } => Some(bin.imports.get(import?)?.name.as_str()),
+        }
     }
 }
 
 /// Recover the functions of `bin`, doing no more work than `limits` allow.
 #[must_use]
-pub fn functions(bin: &Binary<'_>, limits: &Limits) -> Functions {
-    if bin.arch.is_none() {
-        return Functions::default();
-    }
+pub fn recover(bin: &Binary<'_>, limits: &Limits) -> Recovery {
     functions::recover(bin, limits).0
 }

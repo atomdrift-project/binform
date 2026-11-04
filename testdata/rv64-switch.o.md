@@ -46,4 +46,4 @@ int main(int argc, char **argv) {
 ```
 
 `rv64-switch.o.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`rv64-switch.o.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`rv64-switch.o.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

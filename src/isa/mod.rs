@@ -1,5 +1,11 @@
 //! What analysis needs from one instruction: its length, and where control
 //! goes after it. Everything above this module is architecture-neutral.
+//!
+//! Each architecture's module has a `Decoder`, which holds the facts of
+//! the image it decodes for (its byte order, word size, GOT) and what the
+//! instructions decoded since the last reset left in registers, and
+//! implements [`Decode`]. [`Decoder`] here picks one by the image's
+//! architecture, alongside the [`Traits`] the analysis above consults.
 
 pub(crate) mod arc;
 pub(crate) mod arm;
@@ -49,6 +55,30 @@ impl Insn {
             note: Note::None,
             pad: false,
             falls: false,
+        }
+    }
+
+    /// An instruction of `len` bytes that falls through, doing `note`.
+    pub(crate) const fn note(len: u32, note: Note) -> Self {
+        Self {
+            note,
+            ..Self::new(len, Flow::Next)
+        }
+    }
+
+    /// The transfer `self` and the instruction in its delay slot, which
+    /// runs before control arrives, as one instruction carrying the slot's
+    /// note. A missing slot, one that does not decode, or one that is
+    /// itself a transfer (undefined on every set with slots) makes the
+    /// pair invalid: bytes that only look like a transfer.
+    pub(crate) fn with_slot(self, slot: Option<Insn>) -> Self {
+        match slot {
+            Some(slot) if slot.flow == Flow::Next => Self {
+                len: self.len.wrapping_add(slot.len),
+                note: slot.note,
+                ..self
+            },
+            _ => Self::new(self.len, Flow::Invalid),
         }
     }
 }
@@ -101,30 +131,52 @@ pub(crate) enum Flow {
     Invalid,
 }
 
+impl Flow {
+    /// Whether the flow is a call of any kind.
+    pub(crate) const fn is_call(self) -> bool {
+        matches!(
+            self,
+            Self::Call(_) | Self::CallSlot(_) | Self::CallIndirect | Self::CallRegister(_)
+        )
+    }
+}
+
 /// What an instruction does to registers, as far as finding a jump table
-/// needs to know. Registers are numbered by the decoder; one number names a
-/// register at every width.
+/// needs to know. Registers are numbered by the decoder from 0, below 64;
+/// one number names a register at every width.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Note {
     /// Nothing worth knowing; writes no register a table depends on.
     None,
     /// `cmp reg, imm`: a table indexed by `reg` has `imm + 1` entries.
     Compare { reg: u32, imm: u64 },
-    /// `reg = addr`.
+    /// `reg = addr`, an address the instruction forms: PC-relative, an
+    /// absolute address operand (on m68k, which has no high/low pairs, a
+    /// long immediate), or the low half that completes a high/low pair.
+    /// When it is code, the program may call it.
     Address { reg: u32, addr: u64 },
-    /// `reg = addr`, the address of the code that reads the PC: no
-    /// pointer to a function (PowerPC's `bcl 20, 31, $+4; mflr r30`).
-    Pc { reg: u32, addr: u64 },
-    /// `reg =` the `size`-byte value at the fixed address `mem` names: the
-    /// address a GOT or TOC slot holds (a jump table's, in 32-bit PowerPC
-    /// PIC code: `lwz r3, n(r30)`), sign-extended when `signed`.
+    /// `reg = value`, an integer that is no function's address by itself:
+    /// an immediate, the high half of a pair, or the PC an instruction
+    /// reads (PowerPC's `bcl 20, 31, $+4; mflr r30`). ARC's `pcl` sums are
+    /// values too: they address constants and tables kept in the code,
+    /// rarely functions. It holds even after
+    /// a transfer: a call over data leaves the data's address in the link
+    /// register.
+    Value { reg: u32, value: u64 },
+    /// `reg =` the `size`-byte value stored at `mem`, sign-extended when
+    /// `signed`, where `mem` has no index and its base, if any, is a
+    /// register the walk may know an address in: a GOT, TOC or
+    /// literal-pool slot, whose value the walk reads from the image (a
+    /// jump table's address, in 32-bit PowerPC PIC code: `lwz r3,
+    /// n(r30)`). One the walk cannot place writes `reg` unknown.
     Fetch {
         reg: u32,
         mem: Mem,
         size: u8,
         signed: bool,
     },
-    /// `reg = the size-byte value at mem`, sign-extended when `signed`.
+    /// `reg =` the `size`-byte value at `mem`, sign-extended when `signed`:
+    /// a table entry, which depends on the case value.
     Load {
         reg: u32,
         mem: Mem,
@@ -167,7 +219,7 @@ impl Note {
             Self::Clobber(regs) => u64::from(regs),
             Self::Compare { reg, .. }
             | Self::Address { reg, .. }
-            | Self::Pc { reg, .. }
+            | Self::Value { reg, .. }
             | Self::Fetch { reg, .. }
             | Self::Load { reg, .. }
             | Self::Copy { reg, .. }
@@ -175,7 +227,10 @@ impl Note {
             | Self::Add { reg, .. }
             | Self::Sub { reg, .. }
             | Self::Pop(reg)
-            | Self::Write(reg) => 1 << (reg & 63),
+            | Self::Write(reg) => {
+                debug_assert!(reg < 64, "register {reg} out of range");
+                1_u64.checked_shl(reg).unwrap_or(0)
+            }
         }
     }
 }
@@ -201,316 +256,403 @@ pub(crate) struct Mem {
     pub(crate) disp: u64,
 }
 
-/// An instruction decoder for one image's architecture.
-#[derive(Clone)]
-pub(crate) enum Decoder {
-    X86 {
-        bitness: u32,
-        got: Option<u64>,
-    },
-    Arm64(Box<crate::isa::arm64::State>),
-    Arm {
-        state: crate::isa::arm::State,
-        /// Most of the code is Thumb: the sweep decodes it so.
-        thumb: bool,
-    },
-    Mips {
-        big: bool,
-        wide: bool,
-        /// Release 6, with compact branches in opcodes it reuses.
-        r6: bool,
-        /// The GOT, around the address `_gp` stands for.
-        got: crate::isa::mips::Got,
-        state: crate::isa::mips::State,
-    },
-    S390x(crate::isa::s390x::State),
-    Sparc {
-        wide: bool,
-        state: crate::isa::sparc::State,
-    },
-    SuperH(crate::isa::superh::State),
-    PowerPc {
-        big: bool,
-        wide: bool,
-        /// The TOC pointer 64-bit code keeps in `r2`.
-        toc: Option<u64>,
-        state: Box<crate::isa::ppc::State>,
-    },
-    RiscV {
-        config: crate::isa::riscv::Config,
-        state: Box<crate::isa::riscv::State>,
-    },
-    LoongArch(Box<crate::isa::loongarch::State>),
-    M68k(Box<crate::isa::m68k::State>),
-    OpenRisc(Box<crate::isa::openrisc::State>),
-    MicroBlaze {
-        big: bool,
-        state: Box<crate::isa::microblaze::State>,
-    },
-    Arc {
-        v2: bool,
-        state: Box<crate::isa::arc::State>,
-    },
-    CSky(Box<crate::isa::csky::State>),
-    Xtensa(Box<crate::isa::xtensa::State>),
-    Bpf,
-    Nios2(Box<crate::isa::nios2::State>),
+/// One architecture's decoder.
+///
+/// What earlier instructions left in registers follows control, by one
+/// rule [`Decode::advance`] applies after each instruction: an instruction
+/// that may fall through (or branch) keeps it, a call forgets what the
+/// callee may change ([`Decode::call`]), and any other transfer forgets it
+/// all, since only control from elsewhere reaches what follows. Callers
+/// [`reset`](Decode::reset) wherever else control may arrive from
+/// elsewhere, as at a block start.
+pub(crate) trait Decode {
+    /// The instruction at the start of `bytes`, mapped at `addr`. Bytes too
+    /// few to hold one decode as [`Flow::Invalid`], still of nonzero length.
+    fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn;
+
+    /// [`decode`](Decode::decode), then carry what the instruction leaves
+    /// in registers on to the next one, by the rule above.
+    fn advance(&mut self, bytes: &[u8], addr: u64) -> Insn {
+        let insn = self.decode(bytes, addr);
+        match insn.flow {
+            Flow::Next | Flow::Branch(_) => {}
+            _ if insn.falls => {}
+            flow if flow.is_call() => self.call(),
+            _ => self.reset(),
+        }
+        insn
+    }
+
+    /// Forget what earlier instructions left in registers.
+    fn reset(&mut self);
+
+    /// Forget what a call may change: the registers a callee need not
+    /// preserve.
+    fn call(&mut self);
+
+    /// Whether `bytes` begin by setting up a frame, as only a function's
+    /// first instructions do.
+    fn starts_frame(&self, bytes: &[u8]) -> bool;
+
+    /// The literal-pool word the instruction at the start of `bytes`, at
+    /// `addr`, reads: data, not code, to a linear sweep.
+    fn literal(&self, _bytes: &[u8], _addr: u64) -> Option<u64> {
+        None
+    }
+
+    /// The entry of the function whose start the instruction at `addr`
+    /// gives away.
+    fn entry_of(&self, _bytes: &[u8], _addr: u64) -> Option<u64> {
+        None
+    }
+
+    /// Where the function entered at `addr` starts, reading the code before
+    /// it in `memory`.
+    fn global_entry(&self, addr: u64, _memory: &Memory<'_>) -> u64 {
+        addr
+    }
+
+    /// What a call at `call` to a PC thunk at the start of `bytes` leaves
+    /// in a register, returning to `next`; `None` for any other callee.
+    fn pc_thunk(&self, _bytes: &[u8], _call: u64, _next: u64) -> Option<Note> {
+        None
+    }
+
+    /// The register that carries a call's `n`th argument (from zero);
+    /// `None` when it goes on the stack, or the decoder does not track it.
+    fn argument(&self, _n: usize) -> Option<u32> {
+        None
+    }
 }
 
-impl Decoder {
-    pub(crate) fn new(image: &Binary<'_>, arch: Arch) -> Self {
+/// What the analysis above needs to know of an architecture, besides its
+/// instructions.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Traits {
+    /// Bytes in an address.
+    width: u8,
+    /// Instructions start at multiples of this, in the mode the sweep
+    /// decodes.
+    alignment: u64,
+    /// What the sweep adds to an address to decode it in the mode most
+    /// code is in: 1 for Thumb, whose addresses are odd.
+    sweep_mode: u64,
+    /// The alignment an address taken must have to be a function's.
+    function_alignment: u64,
+    /// A GOT slot of a function of the binary holds its address in the
+    /// file, without a relocation to say so.
+    slots_hold_targets: bool,
+    /// A stub may compute its slot's address before jumping through it,
+    /// rather than only pad.
+    stub_arithmetic: bool,
+    /// A fixed address loaded into a register is, when it points at code,
+    /// a function whose address the program takes.
+    notes_pointers: bool,
+    /// Transfers have delay slots, which the decoder takes with them.
+    delay_slots: bool,
+    /// Compilers set the frame up after a function's first blocks.
+    frames_late: bool,
+    /// Every compiled function opens with a frame.
+    calls_open_frames: bool,
+    /// Literal-pool words sit before the instructions that read them.
+    literals_behind: bool,
+    /// The registers, as a mask, a callee leaves as they were, as far as a
+    /// jump table after the call is concerned.
+    call_preserved: u32,
+}
+
+impl Traits {
+    /// A 32-bit set of 4-byte instructions with none of the quirks.
+    const RISC: Self = Self {
+        width: 4,
+        alignment: 4,
+        sweep_mode: 0,
+        function_alignment: 1,
+        slots_hold_targets: false,
+        stub_arithmetic: true,
+        notes_pointers: false,
+        delay_slots: false,
+        frames_late: false,
+        calls_open_frames: false,
+        literals_behind: false,
+        call_preserved: 0,
+    };
+
+    /// The traits of `arch`, decoded mostly as Thumb when `thumb`.
+    const fn of(arch: Arch, thumb: bool) -> Self {
+        let width = arch.address_width();
+        let risc = Self {
+            width,
+            ..Self::RISC
+        };
         match arch {
-            Arch::X86 => Self::X86 {
-                bitness: 32,
-                got: image.got,
+            Arch::X86 | Arch::X86_64 => Self {
+                alignment: 1,
+                stub_arithmetic: false,
+                ..risc
             },
-            Arch::X86_64 => Self::X86 {
-                bitness: 64,
-                got: None,
+            Arch::Arm64 | Arch::PowerPc64 | Arch::PowerPc64El => risc,
+            Arch::LoongArch64 | Arch::Nios2 | Arch::PowerPc | Arch::PowerPcEl => Self {
+                notes_pointers: true,
+                ..risc
             },
-            Arch::Arm64 => Self::Arm64(Box::default()),
-            Arch::Arm => {
-                // The mode most known starts are in: Thumb addresses are odd.
-                let thumb = image.seeds.iter().filter(|seed| seed.addr & 1 != 0).count();
-                Self::Arm {
-                    state: crate::isa::arm::State::default(),
-                    thumb: 2 * thumb > image.seeds.len(),
-                }
-            }
-            arch @ (Arch::Mips
+            Arch::Arm if thumb => Self {
+                alignment: 2,
+                sweep_mode: 1,
+                ..risc
+            },
+            Arch::Arm => risc,
+            Arch::Mips
             | Arch::MipsEl
             | Arch::Mips64
             | Arch::Mips64El
             | Arch::MipsR6
             | Arch::MipsR6El
             | Arch::Mips64R6
-            | Arch::Mips64R6El) => Self::Mips {
-                big: arch.big_endian(),
-                wide: arch.address_width() == 8,
-                r6: arch.mips_r6(),
-                got: crate::isa::mips::Got::new(image.got, &image.segments).learn(
-                    arch.big_endian(),
-                    image
-                        .seeds
-                        .iter()
-                        .map(|seed| seed.addr)
-                        .chain(image.extents.iter().map(|range| range.start)),
-                    &image.segments,
-                ),
-                state: crate::isa::mips::State::default(),
+            | Arch::Mips64R6El => Self {
+                // MIPS GOTs hold their functions' addresses.
+                slots_hold_targets: true,
+                delay_slots: true,
+                // GCC shrink-wraps `addiu $sp` past an early return.
+                frames_late: true,
+                ..risc
             },
-            Arch::S390x => Self::S390x(crate::isa::s390x::State::default()),
-            Arch::Sparc => Self::Sparc {
-                wide: false,
-                state: crate::isa::sparc::State::default(),
+            Arch::S390x | Arch::RiscV32 | Arch::RiscV64 => Self {
+                alignment: 2,
+                ..risc
             },
-            Arch::Sparc64 => Self::Sparc {
-                wide: true,
-                state: crate::isa::sparc::State::default(),
+            Arch::Sparc | Arch::Sparc64 => Self {
+                delay_slots: true,
+                // GCC shrink-wraps `save` past an early return.
+                frames_late: true,
+                call_preserved: sparc::CALL_PRESERVED,
+                ..risc
             },
-            Arch::SuperH => Self::SuperH(crate::isa::superh::State::default()),
-            arch @ (Arch::PowerPc | Arch::PowerPcEl | Arch::PowerPc64 | Arch::PowerPc64El) => Self::PowerPc {
-                big: arch.big_endian(),
-                wide: arch.address_width() == 8,
-                toc: image.got,
-                state: Box::default(),
+            // Literal-pool loads hold data, callees and callbacks.
+            Arch::SuperH => Self {
+                alignment: 2,
+                notes_pointers: true,
+                delay_slots: true,
+                ..risc
             },
-            arch @ (Arch::RiscV32 | Arch::RiscV64) => Self::RiscV {
-                config: crate::isa::riscv::Config {
-                    wide: arch == Arch::RiscV64,
+            Arch::M68k => Self {
+                alignment: 2,
+                notes_pointers: true,
+                ..risc
+            },
+            Arch::OpenRisc => Self {
+                notes_pointers: true,
+                delay_slots: true,
+                ..risc
+            },
+            // Statically linked MicroBlaze GOTs hold their functions'
+            // addresses, which PIC code calls through.
+            Arch::MicroBlaze | Arch::MicroBlazeEl => Self {
+                slots_hold_targets: true,
+                notes_pointers: true,
+                delay_slots: true,
+                ..risc
+            },
+            Arch::Arc | Arch::ArcV2 => Self {
+                alignment: 2,
+                notes_pointers: true,
+                delay_slots: true,
+                ..risc
+            },
+            // GCC aligns functions to words, and a halfword-aligned
+            // integer in a literal pool is no function.
+            Arch::CSky | Arch::MCore => Self {
+                alignment: 2,
+                function_alignment: 4,
+                notes_pointers: true,
+                ..risc
+            },
+            // The windowed ABI starts each function with `entry`, and
+            // `l32r` reads pools before it.
+            Arch::Xtensa => Self {
+                alignment: 1,
+                function_alignment: 4,
+                notes_pointers: true,
+                calls_open_frames: true,
+                literals_behind: true,
+                ..risc
+            },
+            Arch::Bpf => Self {
+                alignment: 8,
+                ..risc
+            },
+        }
+    }
+}
+
+/// An instruction decoder for one image's architecture.
+#[derive(Clone)]
+pub(crate) struct Decoder {
+    isa: Isa,
+    traits: Traits,
+}
+
+/// Each architecture's decoder. All are boxed, so that the enum is one
+/// pointer whatever an architecture keeps in registers.
+#[derive(Clone)]
+enum Isa {
+    X86(Box<x86::Decoder>),
+    Arm64(Box<arm64::Decoder>),
+    Arm(Box<arm::Decoder>),
+    Mips(Box<mips::Decoder>),
+    S390x(Box<s390x::Decoder>),
+    Sparc(Box<sparc::Decoder>),
+    SuperH(Box<superh::Decoder>),
+    PowerPc(Box<ppc::Decoder>),
+    RiscV(Box<riscv::Decoder>),
+    LoongArch(Box<loongarch::Decoder>),
+    M68k(Box<m68k::Decoder>),
+    OpenRisc(Box<openrisc::Decoder>),
+    MicroBlaze(Box<microblaze::Decoder>),
+    Arc(Box<arc::Decoder>),
+    CSky(Box<csky::Decoder>),
+    Xtensa(Box<xtensa::Decoder>),
+    Bpf(Box<bpf::Decoder>),
+    Nios2(Box<nios2::Decoder>),
+}
+
+/// `$body`, with `$d` bound to the architecture's decoder.
+macro_rules! each {
+    ($isa:expr, $d:ident => $body:expr) => {
+        match $isa {
+            Isa::X86($d) => $body,
+            Isa::Arm64($d) => $body,
+            Isa::Arm($d) => $body,
+            Isa::Mips($d) => $body,
+            Isa::S390x($d) => $body,
+            Isa::Sparc($d) => $body,
+            Isa::SuperH($d) => $body,
+            Isa::PowerPc($d) => $body,
+            Isa::RiscV($d) => $body,
+            Isa::LoongArch($d) => $body,
+            Isa::M68k($d) => $body,
+            Isa::OpenRisc($d) => $body,
+            Isa::MicroBlaze($d) => $body,
+            Isa::Arc($d) => $body,
+            Isa::CSky($d) => $body,
+            Isa::Xtensa($d) => $body,
+            Isa::Bpf($d) => $body,
+            Isa::Nios2($d) => $body,
+        }
+    };
+}
+
+impl Decoder {
+    pub(crate) fn new(image: &Binary<'_>, arch: Arch) -> Self {
+        // The mode most known starts are in: Thumb addresses are odd.
+        let odd = image.seeds.iter().filter(|seed| seed.addr & 1 != 0).count();
+        let thumb = arch == Arch::Arm && odd.saturating_mul(2) > image.seeds.len();
+        let wide = arch.address_width() == 8;
+        let big = arch.big_endian();
+        let isa = match arch {
+            Arch::X86 => Isa::X86(Box::new(x86::Decoder::new(32, image.got))),
+            Arch::X86_64 => Isa::X86(Box::new(x86::Decoder::new(64, None))),
+            Arch::Arm64 => Isa::Arm64(Box::default()),
+            Arch::Arm => Isa::Arm(Box::new(arm::Decoder::new(thumb))),
+            Arch::Mips
+            | Arch::MipsEl
+            | Arch::Mips64
+            | Arch::Mips64El
+            | Arch::MipsR6
+            | Arch::MipsR6El
+            | Arch::Mips64R6
+            | Arch::Mips64R6El => Isa::Mips(Box::new(mips::Decoder::new(image, arch))),
+            Arch::S390x => Isa::S390x(Box::default()),
+            Arch::Sparc | Arch::Sparc64 => Isa::Sparc(Box::new(sparc::Decoder::new(wide))),
+            Arch::SuperH => Isa::SuperH(Box::default()),
+            Arch::PowerPc | Arch::PowerPcEl | Arch::PowerPc64 | Arch::PowerPc64El => {
+                Isa::PowerPc(Box::new(ppc::Decoder::new(big, wide, image.got)))
+            }
+            Arch::RiscV32 | Arch::RiscV64 => {
+                Isa::RiscV(Box::new(riscv::Decoder::new(riscv::Config {
+                    wide,
                     gp: image.got,
-                },
-                state: Box::default(),
-            },
-            Arch::LoongArch64 => Self::LoongArch(Box::default()),
-            Arch::M68k => Self::M68k(Box::default()),
-            Arch::OpenRisc => Self::OpenRisc(Box::default()),
-            Arch::MicroBlaze | Arch::MicroBlazeEl => Self::MicroBlaze {
-                big: arch == Arch::MicroBlaze,
-                state: Box::default(),
-            },
-            Arch::Arc | Arch::ArcV2 => Self::Arc {
-                v2: arch == Arch::ArcV2,
-                state: Box::default(),
-            },
-            Arch::CSky | Arch::MCore => Self::CSky(Box::default()),
-            Arch::Bpf => Self::Bpf,
-            Arch::Nios2 => Self::Nios2(Box::default()),
-            Arch::Xtensa => Self::Xtensa(Box::default()),
+                })))
+            }
+            Arch::LoongArch64 => Isa::LoongArch(Box::default()),
+            Arch::M68k => Isa::M68k(Box::default()),
+            Arch::OpenRisc => Isa::OpenRisc(Box::default()),
+            Arch::MicroBlaze | Arch::MicroBlazeEl => {
+                Isa::MicroBlaze(Box::new(microblaze::Decoder::new(big)))
+            }
+            Arch::Arc | Arch::ArcV2 => Isa::Arc(Box::new(arc::Decoder::new(arch == Arch::ArcV2))),
+            Arch::CSky | Arch::MCore => Isa::CSky(Box::default()),
+            Arch::Xtensa => Isa::Xtensa(Box::default()),
+            Arch::Bpf => Isa::Bpf(Box::default()),
+            Arch::Nios2 => Isa::Nios2(Box::default()),
+        };
+        Self {
+            isa,
+            traits: Traits::of(arch, thumb),
         }
     }
 
     /// Forget what earlier instructions left in registers. Called wherever
     /// control may arrive from elsewhere.
     pub(crate) fn reset(&mut self) {
-        match self {
-            Self::Arm64(state) => **state = crate::isa::arm64::State::default(),
-            Self::Arm { state, .. } => *state = crate::isa::arm::State::default(),
-            Self::Mips { state, .. } => *state = crate::isa::mips::State::default(),
-            Self::S390x(state) => *state = crate::isa::s390x::State::default(),
-            Self::Sparc { state, .. } => *state = crate::isa::sparc::State::default(),
-            Self::SuperH(state) => *state = crate::isa::superh::State::default(),
-            Self::PowerPc { state, .. } => **state = crate::isa::ppc::State::default(),
-            Self::RiscV { state, .. } => **state = crate::isa::riscv::State::default(),
-            Self::LoongArch(state) => **state = crate::isa::loongarch::State::default(),
-            Self::M68k(state) => **state = crate::isa::m68k::State::default(),
-            Self::OpenRisc(state) => **state = crate::isa::openrisc::State::default(),
-            Self::MicroBlaze { state, .. } => **state = crate::isa::microblaze::State::default(),
-            Self::Arc { state, .. } => **state = crate::isa::arc::State::default(),
-            Self::CSky(state) => state.reset(),
-            Self::Xtensa(state) => **state = crate::isa::xtensa::State::default(),
-            Self::Nios2(state) => **state = crate::isa::nios2::State::default(),
-            _ => {}
-        }
+        each!(&mut self.isa, d => d.reset());
     }
 
-    /// Decode the instruction at the start of `bytes`, mapped at `addr`.
+    /// Decode the instruction at the start of `bytes`, mapped at `addr`,
+    /// and carry what it leaves in registers on as [`Decode`] says.
     pub(crate) fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
-        match self {
-            Self::X86 { bitness, got } => crate::isa::x86::decode(*bitness, *got, bytes, addr),
-            Self::Arm64(state) => crate::isa::arm64::decode(state, bytes, addr),
-            Self::Arm { state, .. } => crate::isa::arm::decode(state, bytes, addr),
-            Self::Mips {
-                big,
-                wide,
-                r6,
-                got,
-                state,
-            } => crate::isa::mips::decode(state, got, (*big, *wide, *r6), bytes, addr),
-            Self::S390x(state) => crate::isa::s390x::decode(state, bytes, addr),
-            Self::Sparc { wide, state } => crate::isa::sparc::decode(state, *wide, bytes, addr),
-            Self::SuperH(state) => crate::isa::superh::decode(state, bytes, addr),
-            Self::PowerPc {
-                big,
-                wide,
-                toc,
-                state,
-            } => crate::isa::ppc::decode(state, (*big, *wide, *toc), bytes, addr),
-            Self::RiscV { config, state } => crate::isa::riscv::decode(state, *config, bytes, addr),
-            Self::LoongArch(state) => crate::isa::loongarch::decode(state, bytes, addr),
-            Self::M68k(state) => crate::isa::m68k::decode(state, bytes, addr),
-            Self::OpenRisc(state) => crate::isa::openrisc::decode(state, bytes, addr),
-            Self::MicroBlaze { big, state } => {
-                crate::isa::microblaze::decode(state, bytes, addr, *big)
-            }
-            Self::Arc { v2, state } => crate::isa::arc::decode(state, bytes, addr, *v2),
-            Self::CSky(state) => crate::isa::csky::decode(state, bytes, addr),
-            Self::Xtensa(state) => crate::isa::xtensa::decode(state, bytes, addr),
-            Self::Bpf => crate::isa::bpf::decode(bytes, addr),
-            Self::Nios2(state) => crate::isa::nios2::decode(state, bytes, addr),
-        }
+        each!(&mut self.isa, d => d.advance(bytes, addr))
     }
 
     /// Whether a GOT slot of a function of the binary holds its address in
     /// the file: MIPS GOTs do, without relocations to say so, and so do
     /// statically linked MicroBlaze ones (PIC code calls through them).
     pub(crate) const fn slots_hold_targets(&self) -> bool {
-        matches!(self, Self::Mips { .. } | Self::MicroBlaze { .. })
+        self.traits.slots_hold_targets
     }
 
     /// Bytes in an address.
-    pub(crate) fn address_width(&self) -> u8 {
-        match self {
-            Self::X86 { bitness: 32, .. }
-            | Self::Arm { .. }
-            | Self::Mips { wide: false, .. }
-            | Self::Sparc { wide: false, .. }
-            | Self::PowerPc { wide: false, .. }
-            | Self::SuperH(_)
-            | Self::M68k(_)
-            | Self::OpenRisc(_)
-            | Self::MicroBlaze { .. }
-            | Self::Arc { .. }
-            | Self::CSky(_)
-            | Self::Xtensa(_)
-            | Self::Nios2(_) => 4,
-            Self::RiscV { config, .. } if !config.wide => 4,
-            Self::X86 { .. }
-            | Self::Arm64(_)
-            | Self::Mips { .. }
-            | Self::S390x(_)
-            | Self::Sparc { .. }
-            | Self::PowerPc { .. }
-            | Self::RiscV { .. }
-            | Self::LoongArch(_)
-            | Self::Bpf => 8,
-        }
+    pub(crate) const fn address_width(&self) -> u8 {
+        self.traits.width
     }
 
     /// Instructions start at multiples of this, in the mode the sweep
     /// decodes.
-    pub(crate) fn alignment(&self) -> u64 {
-        match self {
-            Self::X86 { .. } | Self::Xtensa(_) => 1,
-            Self::S390x(_)
-            | Self::SuperH(_)
-            | Self::Arm { thumb: true, .. }
-            | Self::RiscV { .. }
-            | Self::M68k(_)
-            | Self::Arc { .. }
-            | Self::CSky(_) => 2,
-            Self::Arm64(_)
-            | Self::Arm { .. }
-            | Self::Mips { .. }
-            | Self::Sparc { .. }
-            | Self::PowerPc { .. }
-            | Self::LoongArch(_)
-            | Self::OpenRisc(_)
-            | Self::MicroBlaze { .. }
-            | Self::Nios2(_) => 4,
-            Self::Bpf => 8,
-        }
+    pub(crate) const fn alignment(&self) -> u64 {
+        self.traits.alignment
     }
 
     /// The alignment an address taken must have to be a function's: C-SKY's
     /// GCC aligns functions to words, and a halfword-aligned integer in its
     /// literal pools is no function. Elsewhere, any (a Thumb pointer is odd).
-    pub(crate) fn function_alignment(&self) -> u64 {
-        match self {
-            Self::CSky(_) | Self::Xtensa(_) => 4,
-            _ => 1,
-        }
+    pub(crate) const fn function_alignment(&self) -> u64 {
+        self.traits.function_alignment
     }
 
     /// What the sweep adds to an address to decode it in the mode most code
     /// is in: 1 for Thumb, whose addresses are odd.
-    pub(crate) fn sweep_mode(&self) -> u64 {
-        u64::from(matches!(self, Self::Arm { thumb: true, .. }))
+    pub(crate) const fn sweep_mode(&self) -> u64 {
+        self.traits.sweep_mode
     }
 
     /// Whether a stub may compute its slot's address before jumping
     /// through it, as on the fixed-width RISC sets, rather than only pad.
-    pub(crate) fn stub_arithmetic(&self) -> bool {
-        !matches!(self, Self::X86 { .. })
+    pub(crate) const fn stub_arithmetic(&self) -> bool {
+        self.traits.stub_arithmetic
     }
 
-    /// The register a 32-bit PC thunk at the start of `bytes` returns the
-    /// caller's address in.
     /// What a call at `call` to a PC thunk at the start of `bytes` leaves in
     /// a register, returning to `next`; `None` for any other callee. On
     /// i386 the register holds `next`; SPARC's thunk adds the call's own
     /// address to it.
     pub(crate) fn pc_thunk(&self, bytes: &[u8], call: u64, next: u64) -> Option<Note> {
-        match self {
-            Self::X86 { bitness: 32, .. } => {
-                crate::isa::x86::pc_thunk(bytes).map(|reg| Note::Address { reg, addr: next })
-            }
-            Self::Sparc { .. } => crate::isa::sparc::pc_thunk(bytes).map(|reg| Note::Offset {
-                reg,
-                src: reg,
-                imm: call,
-            }),
-            _ => None,
-        }
+        each!(&self.isa, d => d.pc_thunk(bytes, call, next))
     }
 
     /// The registers, as a mask, a callee leaves as they were, as far as
     /// a jump table after the call is concerned.
     pub(crate) const fn call_preserved(&self) -> u32 {
-        match self {
-            Self::Sparc { .. } => crate::isa::sparc::CALL_PRESERVED,
-            _ => 0,
-        }
+        self.traits.call_preserved
     }
 
     /// Whether a fixed address an instruction loads into a register is, when
@@ -518,140 +660,155 @@ impl Decoder {
     /// of SuperH's literal-pool loads, which hold data, callees and
     /// callbacks (other sets also note addresses inside the function).
     pub(crate) const fn notes_pointers(&self) -> bool {
-        matches!(
-            self,
-            Self::SuperH(_)
-                | Self::PowerPc { wide: false, .. }
-                | Self::LoongArch(_)
-                | Self::M68k(_)
-                | Self::OpenRisc(_)
-                | Self::MicroBlaze { .. }
-                | Self::Arc { .. }
-                | Self::CSky(_)
-                | Self::Xtensa(_)
-                | Self::Nios2(_)
-        )
+        self.traits.notes_pointers
     }
 
-    /// Whether transfers have delay slots, whose note a call's or jump's
-    /// is: it applies before the target.
+    /// Whether transfers have delay slots, which the decoder takes with
+    /// them: a call's or jump's note is its slot's, which applies before
+    /// the target.
     pub(crate) const fn delay_slots(&self) -> bool {
-        matches!(
-            self,
-            Self::Sparc { .. }
-                | Self::Mips { .. }
-                | Self::OpenRisc(_)
-                | Self::MicroBlaze { .. }
-                | Self::Arc { .. }
-        )
+        self.traits.delay_slots
     }
 
     /// The register that carries a call's `n`th argument (from zero) under
-    /// the System V and A64 conventions; `None` when it goes on the stack.
+    /// the System V and A64 conventions; `None` when it goes on the stack,
+    /// or the decoder does not track the registers arguments travel in.
     pub(crate) fn argument(&self, n: usize) -> Option<u32> {
-        match self {
-            Self::X86 { bitness: 64, .. } => crate::isa::x86::argument(n),
-            Self::X86 { .. } => None,
-            Self::Arm64(_) => u32::try_from(n).ok().filter(|&n| n < 8),
-            // No decoder below tracks the registers arguments travel in.
-            _ => None,
-        }
+        each!(&self.isa, d => d.argument(n))
     }
 
     /// Whether `bytes` begin by setting up a frame pointer, as only a
     /// function's first instructions do.
     pub(crate) fn starts_frame(&self, bytes: &[u8]) -> bool {
-        match self {
-            Self::X86 { bitness, .. } => crate::isa::x86::starts_frame(*bitness, bytes),
-            Self::Arm64(_) => crate::isa::arm64::starts_frame(bytes),
-            Self::Arm { thumb, .. } => crate::isa::arm::starts_frame(*thumb, bytes),
-            Self::SuperH(_) => crate::isa::superh::starts_frame(bytes),
-            Self::S390x(_) => crate::isa::s390x::starts_frame(bytes),
-            Self::PowerPc { big, .. } => crate::isa::ppc::starts_frame(*big, bytes),
-            Self::RiscV { .. } => crate::isa::riscv::starts_frame(bytes),
-            Self::LoongArch(_) => crate::isa::loongarch::starts_frame(bytes),
-            Self::M68k(_) => crate::isa::m68k::starts_frame(bytes),
-            Self::OpenRisc(_) => crate::isa::openrisc::starts_frame(bytes),
-            Self::MicroBlaze { big, .. } => crate::isa::microblaze::starts_frame(bytes, *big),
-            Self::Arc { v2, .. } => crate::isa::arc::starts_frame(bytes, *v2),
-            Self::CSky(_) => crate::isa::csky::starts_frame(bytes),
-            Self::Xtensa(_) => crate::isa::xtensa::starts_frame(bytes),
-            Self::Nios2(_) => crate::isa::nios2::starts_frame(bytes),
-            Self::Sparc { .. } => crate::isa::sparc::starts_frame(bytes),
-            Self::Mips { big, .. } => crate::isa::mips::starts_frame(*big, bytes),
-            _ => false,
-        }
+        each!(&self.isa, d => d.starts_frame(bytes))
     }
 
     /// The literal-pool word the instruction at the start of `bytes`, at
     /// `addr`, reads, ahead of it: data, not code, to a linear sweep (C-SKY
     /// keeps its pools between functions, after the last jump).
     pub(crate) fn literal(&self, bytes: &[u8], addr: u64) -> Option<u64> {
-        match self {
-            Self::CSky(_) => crate::isa::csky::literal(bytes, addr),
-            Self::Xtensa(_) => crate::isa::xtensa::literal_word(bytes, addr),
-            _ => None,
-        }
+        each!(&self.isa, d => d.literal(bytes, addr))
     }
 
     /// Whether compilers set the frame up after a function's first blocks
     /// (GCC shrink-wraps SPARC's `save` and MIPS's `addiu $sp` past an
     /// early return), so a jump to a frame setup is a branch within the
     /// function, not a tail call.
-    pub(crate) fn frames_late(&self) -> bool {
-        matches!(self, Self::Sparc { .. } | Self::Mips { .. })
+    pub(crate) const fn frames_late(&self) -> bool {
+        self.traits.frames_late
     }
 
     /// Whether every compiled function opens with a frame, so a call
     /// target that does not is a mis-decoded pool word, not a function
     /// (Xtensa's windowed ABI starts each function with `entry`).
-    pub(crate) fn calls_open_frames(&self) -> bool {
-        matches!(self, Self::Xtensa(_))
+    pub(crate) const fn calls_open_frames(&self) -> bool {
+        self.traits.calls_open_frames
     }
 
     /// Whether literal-pool words sit *before* the instruction that reads
     /// them (Xtensa's `l32r`), so a sweep must find them in a pass of its
     /// own rather than skip them as it reaches them (C-SKY's lie ahead).
-    pub(crate) fn literals_behind(&self) -> bool {
-        matches!(self, Self::Xtensa(_))
-    }
-
-    /// Whether `bytes` can only be a function's first instructions: 64-bit
-    /// ELFv2's global entry, which sets the TOC pointer from the function's
-    /// own address, and the entries into ARC's millicode epilogue, which
-    /// functions jump to.
-    pub(crate) fn starts_function(&self, bytes: &[u8]) -> bool {
-        match self {
-            Self::PowerPc {
-                big, wide: true, ..
-            } => crate::isa::ppc::global_entry(*big, bytes),
-            Self::Arc { .. } => crate::isa::arc::millicode(bytes),
-            _ => false,
-        }
+    pub(crate) const fn literals_behind(&self) -> bool {
+        self.traits.literals_behind
     }
 
     /// The entry of the function whose start the instruction at `addr`
-    /// gives away: `addr` itself for one [`starts_function`] recognises, or
-    /// on MIPS the entry a `$gp` setup computes from `$t9`, a few
-    /// instructions before it in n64 code.
+    /// gives away: `addr` itself for code only a function's first
+    /// instructions can be (64-bit ELFv2's global entry, ARC's millicode
+    /// epilogue), or on MIPS the entry a `$gp` setup computes from `$t9`,
+    /// a few instructions before it in n64 code.
     pub(crate) fn entry_of(&self, bytes: &[u8], addr: u64) -> Option<u64> {
-        match self {
-            Self::Mips { big, wide, got, .. } => {
-                crate::isa::mips::gp_entry(*big, *wide, got.gps(), bytes, addr)
-            }
-            _ => self.starts_function(bytes).then_some(addr),
+        each!(&self.isa, d => d.entry_of(bytes, addr))
+    }
+
+    /// Where the function entered at `addr` starts: 64-bit ELFv2 code
+    /// enters a function eight bytes in from within its module, past the
+    /// instructions that set the TOC pointer.
+    pub(crate) fn global_entry(&self, addr: u64, memory: &Memory<'_>) -> u64 {
+        each!(&self.isa, d => d.global_entry(addr, memory))
+    }
+}
+
+/// The 16-bit word at `bytes[at..]`, most significant byte first when
+/// `big`.
+pub(crate) fn u16_at(bytes: &[u8], at: usize, big: bool) -> Option<u16> {
+    let word = bytes.get(at..at.checked_add(2)?)?.try_into().ok()?;
+    Some(if big {
+        u16::from_be_bytes(word)
+    } else {
+        u16::from_le_bytes(word)
+    })
+}
+
+/// The 32-bit word at `bytes[at..]`, most significant byte first when
+/// `big`.
+pub(crate) fn u32_at(bytes: &[u8], at: usize, big: bool) -> Option<u32> {
+    let word = bytes.get(at..at.checked_add(4)?)?.try_into().ok()?;
+    Some(if big {
+        u32::from_be_bytes(word)
+    } else {
+        u32::from_le_bytes(word)
+    })
+}
+
+/// The unsigned integer stored in `bytes`, at most eight of them, most
+/// significant byte first when `big`.
+pub(crate) fn uint(bytes: &[u8], big: bool) -> Option<u64> {
+    let word = |value: u64, &byte: &u8| value << 8 | u64::from(byte);
+    (bytes.len() <= 8).then(|| {
+        if big {
+            bytes.iter().fold(0, word)
+        } else {
+            bytes.iter().rev().fold(0, word)
+        }
+    })
+}
+
+/// The low `bits` bits of `value`, sign-extended; `bits` is 1 to 64.
+pub(crate) fn sext(value: impl Into<u64>, bits: u32) -> i64 {
+    debug_assert!((1..=64).contains(&bits), "{bits}-bit field");
+    let shift = 64_u32.saturating_sub(bits);
+    (value.into() << shift).cast_signed() >> shift
+}
+
+/// The target of a branch: `base` plus the signed `bits`-bit `field`
+/// times `scale`, wrapping.
+pub(crate) fn relative(base: u64, field: impl Into<u64>, bits: u32, scale: i64) -> u64 {
+    base.wrapping_add_signed(sext(field, bits).wrapping_mul(scale))
+}
+
+/// What a decoder knows of the values in `N` registers.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Regs<T, const N: usize>([Option<T>; N]);
+
+impl<T: Copy, const N: usize> Default for Regs<T, N> {
+    fn default() -> Self {
+        Self([None; N])
+    }
+}
+
+impl<T: Copy, const N: usize> Regs<T, N> {
+    /// What `reg` holds, if known.
+    pub(crate) fn get(&self, reg: u32) -> Option<T> {
+        self.0.get(usize::try_from(reg).ok()?).copied().flatten()
+    }
+
+    /// Record what `reg` holds; `None` forgets it.
+    pub(crate) fn set(&mut self, reg: u32, value: Option<T>) {
+        if let Some(slot) = usize::try_from(reg)
+            .ok()
+            .and_then(|reg| self.0.get_mut(reg))
+        {
+            *slot = value;
         }
     }
 
-    /// Where the function entered at `addr` starts, given the eight bytes
-    /// before it: 64-bit ELFv2 code enters a function eight bytes in from
-    /// within its module, past the instructions that set the TOC pointer.
-    pub(crate) fn global_entry(&self, addr: u64, before: &[u8]) -> u64 {
-        match self {
-            Self::PowerPc {
-                big, wide: true, ..
-            } if crate::isa::ppc::global_entry(*big, before) => addr.wrapping_sub(8),
-            _ => addr,
+    /// Forget each register whose bit is set in `mask`.
+    pub(crate) fn forget(&mut self, mask: u64) {
+        for (reg, slot) in self.0.iter_mut().enumerate().take(64) {
+            if mask >> reg & 1 != 0 {
+                *slot = None;
+            }
         }
     }
 }
@@ -737,13 +894,7 @@ impl<'a> Memory<'a> {
     /// `addr` in the image's byte order.
     pub(crate) fn read(&self, addr: u64, size: u8) -> Option<u64> {
         let (bytes, _) = self.at(addr)?;
-        let bytes = bytes.get(..usize::from(size)).filter(|_| size <= 8)?;
-        let word = |value: u64, &byte: &u8| value << 8 | u64::from(byte);
-        Some(if self.big {
-            bytes.iter().fold(0, word)
-        } else {
-            bytes.iter().rev().fold(0, word)
-        })
+        uint(bytes.get(..usize::from(size))?, self.big)
     }
 
     /// Whether words are stored most significant byte first.
@@ -753,5 +904,189 @@ impl<'a> Memory<'a> {
 
     pub(crate) fn code_segments(&self) -> impl Iterator<Item = &Span<'a>> {
         self.segments.iter().filter(|segment| segment.executable)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Format, Seed};
+    use std::borrow::Cow;
+
+    fn segment(addr: u64, bytes: &[u8], executable: bool) -> Segment<'_> {
+        Segment {
+            addr,
+            bytes: Cow::Borrowed(bytes),
+            executable,
+        }
+    }
+
+    #[test]
+    fn overlapping_segments_fall_back_to_one_that_holds_the_address() {
+        let (low, high) = ([1_u8; 0x100], [2_u8; 0x10]);
+        let segments = [segment(0x1000, &low, true), segment(0x1080, &high, false)];
+        let memory = Memory::new(&segments);
+        // Inside the later segment, which starts nearer.
+        assert_eq!(
+            memory.at(0x1088).map(|(b, x)| (b[0], b.len(), x)),
+            Some((2, 8, false))
+        );
+        // Past its end, but inside the earlier one, which overlaps it.
+        assert_eq!(
+            memory.at(0x1090).map(|(b, x)| (b[0], b.len(), x)),
+            Some((1, 0x70, true))
+        );
+        assert!(memory.at(0x1100).is_none());
+        assert!(memory.at(0xfff).is_none());
+        assert!(memory.is_code(0x10ff));
+        assert!(!memory.is_code(0x1080));
+    }
+
+    #[test]
+    fn reads_in_the_byte_order_of_the_arch() {
+        let bytes = [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88, 0x99];
+        let segments = [segment(0x2000, &bytes, false)];
+        let little = Memory::for_arch(&segments, Arch::X86_64);
+        let big = Memory::for_arch(&segments, Arch::Mips);
+        assert_eq!(little.read(0x2000, 4), Some(0x4433_2211));
+        assert_eq!(big.read(0x2000, 4), Some(0x1122_3344));
+        assert_eq!(big.read(0x2001, 8), Some(0x2233_4455_6677_8899));
+        assert_eq!(little.read(0x2000, 0), Some(0));
+        // Too wide, or running off the segment's end.
+        assert_eq!(little.read(0x2000, 9), None);
+        assert_eq!(little.read(0x2006, 4), None);
+        assert_eq!(little.read(0x1fff, 1), None);
+    }
+
+    #[test]
+    fn notes_name_the_registers_they_write() {
+        assert_eq!(Note::None.writes(), 0);
+        assert_eq!(Note::Push(4).writes(), 0);
+        assert_eq!(Note::Clobber(0b1010).writes(), 0b1010);
+        assert_eq!(Note::Write(15).writes(), 1 << 15);
+        assert_eq!(Note::Copy { reg: 63, src: 0 }.writes(), 1 << 63);
+        assert_eq!(Note::Value { reg: 2, value: 7 }.writes(), 4);
+    }
+
+    #[test]
+    fn helpers_read_words_and_extend_signs() {
+        let bytes = [0x12, 0x34, 0x56, 0x78, 0x9a];
+        assert_eq!(u16_at(&bytes, 1, true), Some(0x3456));
+        assert_eq!(u16_at(&bytes, 1, false), Some(0x5634));
+        assert_eq!(u32_at(&bytes, 1, true), Some(0x3456_789a));
+        assert_eq!(u32_at(&bytes, 2, true), None);
+        assert_eq!(u32_at(&bytes, usize::MAX, true), None);
+        assert_eq!(sext(0x80_u32, 8), -128);
+        assert_eq!(sext(0x7f_u32, 8), 127);
+        assert_eq!(sext(u64::MAX, 64), -1);
+        assert_eq!(sext(0x1_u32, 1), -1);
+        assert_eq!(relative(0x1000, 0xfff_u32, 12, 2), 0xffe);
+        assert_eq!(relative(0, 1_u32, 12, 4), 4);
+    }
+
+    #[test]
+    fn regs_forget_by_mask() {
+        let mut regs = Regs::<u64, 4>::default();
+        regs.set(1, Some(10));
+        regs.set(3, Some(30));
+        regs.set(9, Some(90));
+        assert_eq!(regs.get(9), None);
+        regs.forget(0b1000);
+        assert_eq!((regs.get(1), regs.get(3)), (Some(10), None));
+    }
+
+    /// Every architecture, in every configuration its decoder has.
+    const ARCHES: [Arch; 34] = [
+        Arch::X86,
+        Arch::X86_64,
+        Arch::Arm64,
+        Arch::Arm,
+        Arch::Mips,
+        Arch::MipsEl,
+        Arch::Mips64,
+        Arch::Mips64El,
+        Arch::MipsR6,
+        Arch::MipsR6El,
+        Arch::Mips64R6,
+        Arch::Mips64R6El,
+        Arch::S390x,
+        Arch::Sparc,
+        Arch::Sparc64,
+        Arch::SuperH,
+        Arch::PowerPc,
+        Arch::PowerPcEl,
+        Arch::PowerPc64,
+        Arch::PowerPc64El,
+        Arch::RiscV32,
+        Arch::RiscV64,
+        Arch::LoongArch64,
+        Arch::M68k,
+        Arch::OpenRisc,
+        Arch::MicroBlaze,
+        Arch::MicroBlazeEl,
+        Arch::Arc,
+        Arch::ArcV2,
+        Arch::CSky,
+        Arch::MCore,
+        Arch::Xtensa,
+        Arch::Bpf,
+        Arch::Nios2,
+    ];
+
+    /// Every decoder takes any bytes, at any address: each prefix of up to
+    /// eight bytes, at each offset of a pseudo-random buffer, decodes
+    /// without a panic to an instruction of nonzero length.
+    #[test]
+    fn decoders_take_any_bytes() {
+        let mut buffer = vec![0_u8; 4096];
+        let mut x = 0x9e37_79b9_7f4a_7c15_u64;
+        for byte in &mut buffer {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            *byte = x.to_le_bytes()[0];
+        }
+        let base = 0x1_0000_u64;
+        let segments = [segment(base, &buffer, true)];
+        for arch in ARCHES {
+            // With and without a GOT (or TOC, or global pointer), and for
+            // Arm with most code in either mode.
+            for (got, odd) in [(None, false), (Some(base + 0x800), true)] {
+                let image = Binary {
+                    format: Format::Elf,
+                    arch: Some(arch),
+                    entry: None,
+                    sections: Vec::new(),
+                    imports: Vec::new(),
+                    exports: Vec::new(),
+                    segments: segments.to_vec(),
+                    seeds: vec![Seed {
+                        addr: base | u64::from(odd),
+                        origin: crate::Origin::Entry,
+                    }],
+                    slots: Vec::new(),
+                    handlers: Vec::new(),
+                    extents: Vec::new(),
+                    got,
+                    rebased: Vec::new(),
+                };
+                let mut decoder = Decoder::new(&image, arch);
+                for at in 0..buffer.len() {
+                    let addr = base + at as u64;
+                    for len in 1..=8 {
+                        let Some(bytes) = buffer.get(at..at + len) else {
+                            break;
+                        };
+                        for addr in [addr, addr | 1] {
+                            let insn = decoder.decode(bytes, addr);
+                            assert!(insn.len > 0, "{arch:?} {bytes:02x?} at {addr:#x}");
+                            decoder.starts_frame(bytes);
+                            decoder.literal(bytes, addr);
+                            decoder.entry_of(bytes, addr);
+                        }
+                    }
+                }
+            }
+        }
     }
 }

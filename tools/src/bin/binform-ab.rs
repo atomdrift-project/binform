@@ -1,27 +1,29 @@
 //! Compare binform with rizin, file by file.
 //!
 //! ```text
-//! binform-ab [parse|goblin] [--rizin PATH] [--script CMDS] [--timeout SECS] [--jobs N] [--save DIR] PATH...
+//! binform-ab [functions|layout] [OPTIONS] PATH...
 //! ```
 //!
-//! `parse` compares the layout instead: binform's sections, imports and
-//! exports against rizin's `iSj`, `iij` and `iEj`, name by name.
+//! `functions` (the default) compares recovered functions; `layout`
+//! compares binform's sections, imports and exports against rizin's `iSj`,
+//! `iij` and `iEj`, name by name.
 //!
-//! `goblin` compares the layout against goblin's, normalised to what
-//! filefacts emits (see `goblin_ab.rs`); it needs no rizin.
-//!
-//! Directories are walked. Each supported executable is analysed by both
-//! tools; one JSON line per file reports the function-level agreement and the
-//! file-level aggregates a consumer derives from either (average and maximum
-//! complexity, basic blocks, huge/tiny/leaf function counts, calls), and a
-//! summary follows on stderr.
+//! Directories are walked. Each executable is analysed by both tools; one
+//! JSON line per file reports the function-level agreement and the
+//! file-level aggregates a consumer derives from either (average and
+//! maximum complexity, basic blocks, huge/tiny/leaf function counts,
+//! calls), and a summary follows on stderr. A zstd-compressed file
+//! (`NAME.zst`, as the fixtures in `testdata/` are) is decompressed to a
+//! temporary file for rizin. The exit status is 1 when rizin failed on any
+//! file, 2 on a usage error.
 //!
 //! Without `--script`, rizin runs the analysis a production consumer would:
 //! `aa; aac` for PE on x86, `aaa` when nothing but entry points names a
 //! function, and `aa; aac; aap` otherwise.
 //!
 //! `--save DIR` also writes what rizin found in each file to
-//! `DIR/NAME.rizin.json.zst`, for the fixture tests to compare against.
+//! `DIR/NAME.rizin.json.zst`, the reference listing the fixture tests
+//! compare against.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::Read;
@@ -29,20 +31,25 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-#[path = "../goblin_ab.rs"]
-mod goblin_ab;
-
 use binform::diagnostics::{is_code, named};
-use binform::{Arch, RefKind};
+use binform::{Arch, Dest, RefKind};
 use serde_json::{Value, json};
 
+const USAGE: &str = "usage: binform-ab [functions|layout] [--rizin PATH] [--script CMDS] \
+[--timeout SECS] [--jobs N] [--save DIR] PATH...";
+
+/// What to compare.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Mode {
+    Functions,
+    Layout,
+}
+
 struct Options {
-    /// Compare layouts (`parse`) rather than functions.
-    parse: bool,
-    /// Compare layouts against goblin (`goblin`).
-    goblin: bool,
+    mode: Mode,
     rizin: PathBuf,
     script: Option<String>,
     timeout: Duration,
@@ -53,8 +60,7 @@ struct Options {
 
 fn options() -> Result<Options, String> {
     let mut options = Options {
-        parse: false,
-        goblin: false,
+        mode: Mode::Functions,
         rizin: PathBuf::from("rizin"),
         script: None,
         timeout: Duration::from_secs(600),
@@ -62,7 +68,17 @@ fn options() -> Result<Options, String> {
         save: None,
         paths: Vec::new(),
     };
-    let mut args = std::env::args().skip(1);
+    let mut args = std::env::args().skip(1).peekable();
+    match args.peek().map(String::as_str) {
+        Some("functions") => {
+            args.next();
+        }
+        Some("layout") => {
+            options.mode = Mode::Layout;
+            args.next();
+        }
+        _ => {}
+    }
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
@@ -74,21 +90,13 @@ fn options() -> Result<Options, String> {
             }
             "--jobs" => options.jobs = value()?.parse().map_err(|e| format!("--jobs: {e}"))?,
             "--save" => options.save = Some(PathBuf::from(value()?)),
-            "parse" if options.paths.is_empty() && !options.parse && !options.goblin => {
-                options.parse = true;
-            }
-            "goblin" if options.paths.is_empty() && !options.parse && !options.goblin => {
-                options.goblin = true;
-            }
-            _ if arg.starts_with("--") => return Err(format!("unknown option {arg}")),
+            "-h" | "--help" => return Err(USAGE.into()),
+            _ if arg.starts_with('-') => return Err(format!("unknown option {arg}\n{USAGE}")),
             _ => options.paths.push(PathBuf::from(arg)),
         }
     }
     if options.paths.is_empty() {
-        return Err(
-            "usage: binform-ab [parse|goblin] [--rizin PATH] [--script CMDS] [--timeout SECS] [--jobs N] PATH..."
-                .into(),
-        );
+        return Err(USAGE.into());
     }
     Ok(options)
 }
@@ -113,14 +121,14 @@ fn main() -> ExitCode {
         for _ in 0..options.jobs.max(1) {
             scope.spawn(|| {
                 while let Some(file) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    let found = if options.goblin {
-                        goblin_ab::compare(file).unwrap_or_default()
-                    } else if options.parse {
-                        compare_layout(&options, file).into_iter().collect()
-                    } else {
-                        compare(&options, file).into_iter().collect()
+                    let Some(input) = Input::read(file) else {
+                        continue;
                     };
-                    for report in found {
+                    let report = match options.mode {
+                        Mode::Functions => compare(&options, &input),
+                        Mode::Layout => compare_layout(&options, &input),
+                    };
+                    if let Some(report) = report {
                         println!("{report}");
                         if let Ok(mut reports) = reports.lock() {
                             reports.push(report);
@@ -131,14 +139,70 @@ fn main() -> ExitCode {
         }
     });
     let reports = reports.into_inner().unwrap_or_default();
-    if options.goblin {
-        goblin_ab::summarize(&reports);
-    } else if options.parse {
-        summarize_layout(&reports);
-    } else {
-        summarize(&reports);
+    match options.mode {
+        Mode::Functions => summarize(&reports),
+        Mode::Layout => summarize_layout(&reports),
     }
-    ExitCode::SUCCESS
+    if reports.iter().any(|report| report["rizin"].is_null()) {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+/// One file to compare: its bytes, decompressed when it is a `.zst`, and
+/// the path rizin reads them from.
+struct Input {
+    /// The file named on the command line or found in a directory.
+    path: PathBuf,
+    bytes: Vec<u8>,
+    /// The decompressed copy rizin reads, removed on drop.
+    temporary: Option<PathBuf>,
+}
+
+impl Input {
+    fn read(path: &Path) -> Option<Self> {
+        let bytes = std::fs::read(path).ok()?;
+        if path.extension().is_none_or(|ext| ext != "zst") {
+            return Some(Self {
+                path: path.to_path_buf(),
+                bytes,
+                temporary: None,
+            });
+        }
+        static NEXT: AtomicUsize = AtomicUsize::new(0);
+        let bytes = zstd::decode_all(bytes.as_slice()).ok()?;
+        let temporary = std::env::temp_dir().join(format!(
+            "binform-ab-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::write(&temporary, &bytes).ok()?;
+        Some(Self {
+            path: path.to_path_buf(),
+            bytes,
+            temporary: Some(temporary),
+        })
+    }
+
+    /// The file rizin reads.
+    fn rizin_path(&self) -> &Path {
+        self.temporary.as_deref().unwrap_or(&self.path)
+    }
+
+    /// The name a saved listing takes: the file's, less any `.zst`.
+    fn name(&self) -> String {
+        let name = self.path.file_name().unwrap_or_default().to_string_lossy();
+        name.strip_suffix(".zst").unwrap_or(&name).to_owned()
+    }
+}
+
+impl Drop for Input {
+    fn drop(&mut self) {
+        if let Some(temporary) = &self.temporary {
+            let _ = std::fs::remove_file(temporary);
+        }
+    }
 }
 
 fn walk(path: &Path, files: &mut Vec<PathBuf>) {
@@ -150,7 +214,14 @@ fn walk(path: &Path, files: &mut Vec<PathBuf>) {
             walk(&entry.path(), files);
         }
     } else if path.is_file() {
-        files.push(path.to_path_buf());
+        // The fixtures' reference listings and notes sit beside them.
+        let name = path.to_string_lossy();
+        let note = [".rizin.json.zst", ".golden", ".md"]
+            .iter()
+            .any(|suffix| name.ends_with(suffix));
+        if !note {
+            files.push(path.to_path_buf());
+        }
     }
 }
 
@@ -209,15 +280,15 @@ struct RizinFunction {
     complexity: u64,
 }
 
-fn compare(options: &Options, file: &Path) -> Option<Value> {
-    let bytes = std::fs::read(file).ok()?;
+fn compare(options: &Options, input: &Input) -> Option<Value> {
+    let bytes = &input.bytes;
     let started = Instant::now();
-    let image = binform::parse(&bytes).ok()?;
+    let image = binform::parse(bytes).ok()?;
     let (mut recovery, diagnostics) =
-        binform::diagnostics::functions(&image, &binform::Limits::DEFAULT);
+        binform::diagnostics::recover(&image, &binform::Limits::DEFAULT);
     // Thumb entries carry their mode in bit 0; rizin's are the even
     // addresses of their first instructions.
-    if image.arch == Some(Arch::Arm) {
+    if image.arch() == Some(Arch::Arm) {
         for function in &mut recovery.functions {
             function.entry &= !1;
         }
@@ -227,9 +298,9 @@ fn compare(options: &Options, file: &Path) -> Option<Value> {
     let script = options
         .script
         .clone()
-        .unwrap_or_else(|| default_script(&bytes, &image));
+        .unwrap_or_else(|| default_script(bytes, &image));
     let started = Instant::now();
-    let rizin = run_rizin(options, file, &script);
+    let rizin = run_rizin(options, input.rizin_path(), &script);
     let rizin_ms = started.elapsed().as_secs_f64() * 1e3;
 
     let mut native_shape = Shape::default();
@@ -246,8 +317,8 @@ fn compare(options: &Options, file: &Path) -> Option<Value> {
             .iter()
             .filter(|r| match r.kind {
                 RefKind::Branch => false,
-                RefKind::Jump => is_code(&image, r.to),
-                RefKind::Call | RefKind::Case => true,
+                RefKind::Jump => matches!(r.to, Dest::Code(to) if is_code(&image, to)),
+                _ => true,
             })
             .count();
         native_shape.add(
@@ -258,8 +329,8 @@ fn compare(options: &Options, file: &Path) -> Option<Value> {
         );
     }
     let mut report = json!({
-        "path": file.display().to_string(),
-        "arch": image.arch.map(|arch| format!("{arch:?}")),
+        "path": input.path.display().to_string(),
+        "arch": image.arch().map(|arch| format!("{arch:?}")),
         "script": script,
         "native_ms": native_ms,
         "rizin_ms": rizin_ms,
@@ -275,9 +346,9 @@ fn compare(options: &Options, file: &Path) -> Option<Value> {
         return Some(report);
     };
     if let Some(dir) = &options.save
-        && let Err(error) = save(dir, file, &script, &rows)
+        && let Err(error) = save(dir, &input.name(), &script, &rows)
     {
-        eprintln!("binform-ab: saving {}: {error}", file.display());
+        eprintln!("binform-ab: saving {}: {error}", input.path.display());
     }
 
     let mut rizin_shape = Shape::default();
@@ -353,11 +424,14 @@ fn compare(options: &Options, file: &Path) -> Option<Value> {
         let i = extents.partition_point(|&(start, _)| start <= entry);
         i > 0 && entry < extents[i - 1].1
     };
-    let inside = only_rizin.iter().filter(|&&(entry, _)| within(entry)).count();
+    let inside = only_rizin
+        .iter()
+        .filter(|&&(entry, _)| within(entry))
+        .count();
     // The rest that start in an executable section: rizin also makes
     // functions of the strings and tables in `.rodata` or the headers when
     // an executable segment maps them, which no recovery should match.
-    let code: Vec<&binform::Section> = image.sections.iter().filter(|s| s.executable).collect();
+    let code: Vec<&binform::Section> = image.sections().iter().filter(|s| s.executable).collect();
     let in_code = |entry: u64| {
         code.is_empty()
             || code
@@ -391,7 +465,7 @@ fn compare(options: &Options, file: &Path) -> Option<Value> {
 
 /// Write rizin's functions in `file` as `[offset, name, size, blocks,
 /// complexity]` rows, one per line, sorted by offset and compressed.
-fn save(dir: &Path, file: &Path, script: &str, rows: &[Value]) -> std::io::Result<()> {
+fn save(dir: &Path, name: &str, script: &str, rows: &[Value]) -> std::io::Result<()> {
     let mut functions: Vec<(u64, String, u64, u64, u64)> = rows
         .iter()
         .map(|row| {
@@ -413,7 +487,6 @@ fn save(dir: &Path, file: &Path, script: &str, rows: &[Value]) -> std::io::Resul
         text.push_str(&format!("{}{comma}\n", json!(function)));
     }
     text.push_str("]}\n");
-    let name = file.file_name().unwrap_or_default().to_string_lossy();
     let path = dir.join(format!("{name}.rizin.json.zst"));
     std::fs::write(path, zstd::encode_all(text.as_bytes(), 19)?)
 }
@@ -421,7 +494,7 @@ fn save(dir: &Path, file: &Path, script: &str, rows: &[Value]) -> std::io::Resul
 fn default_script(bytes: &[u8], image: &binform::Binary<'_>) -> String {
     let pe = bytes.starts_with(b"MZ");
     let named = named(image);
-    if pe && matches!(image.arch, Some(Arch::X86 | Arch::X86_64)) {
+    if pe && matches!(image.arch(), Some(Arch::X86 | Arch::X86_64)) {
         "aa; aac".into()
     } else if !named {
         "aaa".into()
@@ -460,26 +533,23 @@ fn rizin_output(options: &Options, file: &Path, commands: &str) -> Option<String
         .stderr(Stdio::null())
         .spawn()
         .ok()?;
+    // rizin's output ends when it exits; past the timeout, it is killed.
     let mut stdout = child.stdout.take()?;
-    let reader = std::thread::spawn(move || {
+    let (done, output) = mpsc::channel();
+    std::thread::spawn(move || {
         let mut out = Vec::new();
         let _ = stdout.read_to_end(&mut out);
-        out
+        let _ = done.send(out);
     });
-    let deadline = Instant::now() + options.timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Some(status),
-            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(2)),
-            _ => {
-                let _ = child.kill();
-                let _ = child.wait();
-                break None;
-            }
-        }
+    let Ok(out) = output.recv_timeout(options.timeout) else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return None;
     };
-    let out = reader.join().ok()?;
-    status.filter(std::process::ExitStatus::success)?;
+    child
+        .wait()
+        .ok()
+        .filter(std::process::ExitStatus::success)?;
     Some(String::from_utf8_lossy(&out).into_owned())
 }
 
@@ -505,23 +575,22 @@ fn normal(table: &str, macho: bool, rizin: bool, name: &str) -> String {
 }
 
 /// binform's layout against rizin's `iSj`, `iij` and `iEj`.
-fn compare_layout(options: &Options, file: &Path) -> Option<Value> {
-    let bytes = std::fs::read(file).ok()?;
+fn compare_layout(options: &Options, input: &Input) -> Option<Value> {
     let started = Instant::now();
-    let bin = binform::parse(&bytes).ok()?;
+    let bin = binform::parse(&input.bytes).ok()?;
     let native_ms = started.elapsed().as_secs_f64() * 1e3;
-    let macho = bin.format == binform::Format::MachO;
+    let macho = bin.format() == binform::Format::MachO;
     let started = Instant::now();
     let output = rizin_output(
         options,
-        file,
+        input.rizin_path(),
         "e bin.demangle=false; iSj; echo ===SEP===; iij; echo ===SEP===; iEj",
     );
     let rizin_ms = started.elapsed().as_secs_f64() * 1e3;
     let mut report = json!({
-        "path": file.display().to_string(),
-        "format": format!("{:?}", bin.format),
-        "arch": bin.arch.map(|arch| format!("{arch:?}")),
+        "path": input.path.display().to_string(),
+        "format": format!("{:?}", bin.format()),
+        "arch": bin.arch().map(|arch| format!("{arch:?}")),
         "native_ms": native_ms,
         "rizin_ms": rizin_ms,
     });
@@ -539,9 +608,9 @@ fn compare_layout(options: &Options, file: &Path) -> Option<Value> {
         })
         .collect();
     let ours: [Vec<String>; 3] = [
-        bin.sections.iter().map(|s| s.name.clone()).collect(),
-        bin.imports.iter().map(|i| i.name.clone()).collect(),
-        bin.exports.iter().map(|e| e.name.clone()).collect(),
+        bin.sections().iter().map(|s| s.name.clone()).collect(),
+        bin.imports().iter().map(|i| i.name.clone()).collect(),
+        bin.exports().iter().map(|e| e.name.clone()).collect(),
     ];
     for (i, table) in ["sections", "imports", "exports"].into_iter().enumerate() {
         let theirs: HashSet<String> = tables
@@ -576,7 +645,7 @@ fn compare_layout(options: &Options, file: &Path) -> Option<Value> {
             continue;
         };
         let name = normal("sections", macho, true, name);
-        let Some(section) = bin.sections.iter().find(|s| s.name == name) else {
+        let Some(section) = bin.sections().iter().find(|s| s.name == name) else {
             continue;
         };
         let perm = row["perm"].as_str().unwrap_or("");
@@ -604,7 +673,7 @@ fn compare_layout(options: &Options, file: &Path) -> Option<Value> {
         })
         .collect();
     let library_differ = bin
-        .imports
+        .imports()
         .iter()
         .filter_map(|import| {
             let theirs = libraries.get(&normal("imports", macho, false, &import.name))?;

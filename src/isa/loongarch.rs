@@ -18,20 +18,37 @@
 //! (GCC: `alsl.d t1, t0, s2, 3; ldptr.d t1, t1, 0; jr t1`) or relative to
 //! the table (LLVM: `ldx.w a0, a2, a0; add.d a0, a2, a0; jr a0`).
 
-use crate::isa::{Extend, Flow, Insn, Mem, Note};
+use crate::isa::{Decode, Extend, Flow, Insn, Mem, Note, Regs, relative, sext, u32_at};
 
 /// What earlier instructions left that a later one needs.
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct State {
     /// The constant in each register.
-    regs: [Option<u64>; 32],
+    regs: Regs<u64, 32>,
+    /// What only the next few instructions use.
+    pending: Pending,
+}
+
+/// What an instruction leaves for the ones right after it, until one
+/// overwrites a register it names.
+#[derive(Clone, Copy, Debug, Default)]
+struct Pending {
     /// A register holding another shifted left, and by how much.
     scaled: Option<(u32, u8)>,
     /// A register holding a base plus a scaled register, which a load then
-    /// reads through: the sum, base, index and shift.
-    indexed: Option<(u32, u32, u32, u8)>,
+    /// reads through.
+    indexed: Option<Indexed>,
     /// The last register loaded from a fixed address, and that address.
     loaded: Option<(u32, u64)>,
+}
+
+/// `sum = base + (index << shift)`.
+#[derive(Clone, Copy, Debug)]
+struct Indexed {
+    sum: u32,
+    base: u32,
+    index: u32,
+    shift: u8,
 }
 
 /// `ra`, the return address register.
@@ -43,37 +60,50 @@ const VOLATILE: u32 = 0x001f_fff2;
 /// `nop` (`andi zero, zero, 0`).
 const NOP: u32 = 0x0340_0000;
 
-fn word_at(bytes: &[u8]) -> Option<u32> {
-    Some(u32::from_le_bytes(bytes.get(..4)?.try_into().ok()?))
+fn word_at(bytes: &[u8], at: usize) -> Option<u32> {
+    u32_at(bytes, at, false)
 }
 
 pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
-    let Some(word) = word_at(bytes) else {
+    let Some(word) = word_at(bytes, 0) else {
         return Insn::new(4, Flow::Invalid);
     };
-    let mut cx = Cx { state, addr };
-    let (flow, note) = cx.decode(word);
-    let state = cx.state;
-    match flow {
-        Flow::Next | Flow::Branch(_) => {}
-        Flow::Call(_) | Flow::CallIndirect | Flow::CallRegister(_) | Flow::CallSlot(_) => {
-            state.loaded = None;
-            state.scaled = None;
-            state.indexed = None;
-            for (reg, value) in state.regs.iter_mut().enumerate() {
-                if VOLATILE >> reg & 1 != 0 {
-                    *value = None;
-                }
-            }
-        }
-        // Past a transfer that does not fall through, code is reached from
-        // elsewhere.
-        _ => *state = State::default(),
+    let (flow, note) = Cx { state, addr }.decode(word);
+    Insn {
+        note,
+        pad: word == NOP,
+        ..Insn::new(4, flow)
     }
-    let mut insn = Insn::new(4, flow);
-    insn.note = note;
-    insn.pad = word == NOP;
-    insn
+}
+
+/// The LA64 decoder.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct Decoder {
+    state: State,
+}
+
+impl Decode for Decoder {
+    fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
+        decode(&mut self.state, bytes, addr)
+    }
+
+    fn reset(&mut self) {
+        self.state = State::default();
+    }
+
+    fn call(&mut self) {
+        self.state.pending = Pending::default();
+        self.state.regs.forget(u64::from(VOLATILE));
+    }
+
+    /// The stack pointer lowered (`addi.d sp, sp, -n`) among the first
+    /// three instructions.
+    fn starts_frame(&self, bytes: &[u8]) -> bool {
+        (0..12).step_by(4).any(|at| {
+            word_at(bytes, at)
+                .is_some_and(|word| word & 0xffc0_03ff == 0x02c0_0063 && word >> 21 & 1 == 1)
+        })
+    }
 }
 
 struct Cx<'a> {
@@ -81,20 +111,9 @@ struct Cx<'a> {
     addr: u64,
 }
 
-/// `value`'s low `bits` bits, sign-extended.
-fn sign(value: u32, bits: u32) -> i64 {
-    let shift = 64 - bits;
-    (i64::from(value) << shift) >> shift
-}
-
 /// The low 32 bits of `value`, sign-extended: what a `.w` operation leaves.
 fn word_result(value: u64) -> u64 {
-    i64::from(
-        u32::try_from(value & 0xffff_ffff)
-            .unwrap_or(0)
-            .cast_signed(),
-    )
-    .cast_unsigned()
+    sext(value, 32).cast_unsigned()
 }
 
 impl Cx<'_> {
@@ -103,14 +122,12 @@ impl Cx<'_> {
         if reg == 0 {
             return Some(0);
         }
-        self.state.regs.get(reg as usize).copied().flatten()
+        self.state.regs.get(reg)
     }
 
     fn set(&mut self, reg: u32, value: Option<u64>) {
-        if reg != 0
-            && let Some(slot) = self.state.regs.get_mut(reg as usize)
-        {
-            *slot = value;
+        if reg != 0 {
+            self.state.regs.set(reg, value);
         }
     }
 
@@ -135,12 +152,12 @@ impl Cx<'_> {
         }
     }
 
-    /// `rd = value`, the high part of an address a later instruction
-    /// completes (`pcalau12i`, `pcaddu18i`, `lu12i.w`): a constant, but no
-    /// pointer of its own.
-    fn partial(&mut self, rd: u32, value: u64) -> Note {
+    /// `rd = value`, an integer that is no pointer by itself: an
+    /// immediate, the high part of an address a later instruction
+    /// completes, or the PC.
+    fn value(&mut self, rd: u32, value: u64) -> Note {
         match self.constant(rd, value) {
-            Note::Address { reg, addr } => Note::Pc { reg, addr },
+            Note::Address { reg, addr } => Note::Value { reg, value: addr },
             note => note,
         }
     }
@@ -148,6 +165,7 @@ impl Cx<'_> {
     /// `rd = f(rj)`, a constant when `rj` holds one.
     fn derive(&mut self, rd: u32, rj: u32, f: impl Fn(u64) -> u64) -> Note {
         match self.get(rj) {
+            Some(value) if rj == 0 => self.value(rd, f(value)),
             Some(value) => self.constant(rd, f(value)),
             None => self.clobber(rd),
         }
@@ -162,14 +180,19 @@ impl Cx<'_> {
             let value = self.get(rj);
             self.set(rd, value);
             if rj == 0 {
-                return self.constant(rd, 0);
+                return self.value(rd, 0);
             }
             return Note::Copy { reg: rd, src: rj };
         }
         match self.get(rj) {
             Some(base) => {
                 let sum = base.wrapping_add_signed(imm);
-                self.constant(rd, if word { word_result(sum) } else { sum })
+                let sum = if word { word_result(sum) } else { sum };
+                if rj == 0 {
+                    self.value(rd, sum)
+                } else {
+                    self.constant(rd, sum)
+                }
             }
             None if word => self.clobber(rd),
             None => {
@@ -190,7 +213,7 @@ impl Cx<'_> {
         }
         self.set(rd, None);
         if (1..=3).contains(&shift) {
-            self.state.scaled = Some((rd, u8::try_from(shift).unwrap_or(0)));
+            self.state.pending.scaled = Some((rd, u8::try_from(shift).unwrap_or(0)));
             Note::Copy { reg: rd, src: rj }
         } else {
             Note::Clobber(1 << rd)
@@ -204,7 +227,12 @@ impl Cx<'_> {
             return Note::None;
         }
         self.set(rd, None);
-        self.state.indexed = Some((rd, base, index, shift));
+        self.state.pending.indexed = Some(Indexed {
+            sum: rd,
+            base,
+            index,
+            shift,
+        });
         Note::None
     }
 
@@ -251,14 +279,19 @@ impl Cx<'_> {
         rj: u32,
         imm: i64,
         (size, signed): (u8, bool),
-        indexed: Option<(u32, u32, u32, u8)>,
+        indexed: Option<Indexed>,
     ) -> Note {
         if rd == 0 {
             return Note::None;
         }
         let base_value = self.get(rj);
         self.set(rd, None);
-        if let Some((sum, base, index, shift)) = indexed
+        if let Some(Indexed {
+            sum,
+            base,
+            index,
+            shift,
+        }) = indexed
             && sum == rj
         {
             return Note::Load {
@@ -277,7 +310,7 @@ impl Cx<'_> {
             return Note::Clobber(1 << rd);
         }
         let slot = base_value.map(|base| base.wrapping_add_signed(imm));
-        self.state.loaded = slot.map(|slot| (rd, slot));
+        self.state.pending.loaded = slot.map(|slot| (rd, slot));
         let (base, disp) = slot.map_or((Some(rj), imm.cast_unsigned()), |slot| (None, slot));
         Note::Fetch {
             reg: rd,
@@ -361,7 +394,7 @@ impl Cx<'_> {
         match (constant(rj), constant(rd)) {
             (None, Some(n)) if n > 0 => Note::Compare {
                 reg: rj,
-                imm: n - 1,
+                imm: n.wrapping_sub(1),
             },
             (Some(n), None) => Note::Compare { reg: rd, imm: n },
             _ => Note::None,
@@ -373,12 +406,15 @@ impl Cx<'_> {
         let rd = word & 0x1f;
         let rj = (word >> 5) & 0x1f;
         let rk = (word >> 10) & 0x1f;
-        let si12 = sign((word >> 10) & 0xfff, 12);
-        let si16 = sign((word >> 10) & 0xffff, 16);
-        let si20 = sign((word >> 5) & 0xf_ffff, 20);
-        let scaled = self.state.scaled.take();
-        let indexed = self.state.indexed.take();
-        let loaded = self.state.loaded.take();
+        let si12 = sext((word >> 10) & 0xfff, 12);
+        let si16 = sext((word >> 10) & 0xffff, 16);
+        let si20 = sext((word >> 5) & 0xf_ffff, 20);
+        let pending = std::mem::take(&mut self.state.pending);
+        let Pending {
+            scaled,
+            indexed,
+            loaded,
+        } = pending;
         let addr = self.addr;
         let (flow, note) = match word >> 26 {
             // The reserved start of the encoding space (all zeros).
@@ -398,12 +434,12 @@ impl Cx<'_> {
             // LU12I.W, LU32I.D
             5 if word >> 25 & 1 == 0 => (
                 Flow::Next,
-                self.partial(rd, word_result((si20 << 12).cast_unsigned())),
+                self.value(rd, word_result((si20 << 12).cast_unsigned())),
             ),
             5 => (
                 Flow::Next,
                 match self.get(rd) {
-                    Some(low) => self.partial(rd, low & 0xffff_ffff | (si20 << 32).cast_unsigned()),
+                    Some(low) => self.value(rd, low & 0xffff_ffff | (si20 << 32).cast_unsigned()),
                     None => self.clobber(rd),
                 },
             ),
@@ -414,14 +450,14 @@ impl Cx<'_> {
             ),
             6 => (
                 Flow::Next,
-                self.partial(rd, (addr & !0xfff).wrapping_add_signed(si20 << 12)),
+                self.value(rd, (addr & !0xfff).wrapping_add_signed(si20 << 12)),
             ),
             // PCADDU12I, PCADDU18I
             7 => {
                 let shift = if word >> 25 & 1 == 0 { 12 } else { 18 };
                 (
                     Flow::Next,
-                    self.partial(rd, addr.wrapping_add_signed(si20 << shift)),
+                    self.value(rd, addr.wrapping_add_signed(si20 << shift)),
                 )
             }
             // LL, SC; LDPTR, STPTR.
@@ -432,7 +468,7 @@ impl Cx<'_> {
                     self.load(
                         rd,
                         rj,
-                        sign((word >> 10) & 0x3fff, 14) << 2,
+                        sext((word >> 10) & 0x3fff, 14) << 2,
                         (4, true),
                         indexed,
                     ),
@@ -442,7 +478,7 @@ impl Cx<'_> {
                     self.load(
                         rd,
                         rj,
-                        sign((word >> 10) & 0x3fff, 14) << 2,
+                        sext((word >> 10) & 0x3fff, 14) << 2,
                         (8, false),
                         indexed,
                     ),
@@ -500,7 +536,7 @@ impl Cx<'_> {
             // BEQZ, BNEZ; BCEQZ, BCNEZ.
             0x10..=0x12 => {
                 let offs = ((word & 0x1f) << 16) | ((word >> 10) & 0xffff);
-                let target = addr.wrapping_add_signed(sign(offs, 21) << 2);
+                let target = relative(addr, offs, 21, 4);
                 (Flow::Branch(target), Note::None)
             }
             // JIRL
@@ -508,7 +544,7 @@ impl Cx<'_> {
             // B, BL
             0x14 | 0x15 => {
                 let offs = ((word & 0x3ff) << 16) | ((word >> 10) & 0xffff);
-                let target = addr.wrapping_add_signed(sign(offs, 26) << 2);
+                let target = relative(addr, offs, 26, 4);
                 if word >> 26 == 0x14 {
                     (Flow::Jump(target), Note::None)
                 } else {
@@ -529,7 +565,7 @@ impl Cx<'_> {
             0x1c | 0x1d => (Flow::Next, self.clobber(rd)),
             _ => (Flow::Invalid, Note::None),
         };
-        self.keep(note, (scaled, indexed, loaded));
+        self.keep(note, pending);
         (flow, note)
     }
 
@@ -540,7 +576,7 @@ impl Cx<'_> {
         let rd = word & 0x1f;
         let rj = (word >> 5) & 0x1f;
         let rk = (word >> 10) & 0x1f;
-        let si12 = sign((word >> 10) & 0xfff, 12);
+        let si12 = sext((word >> 10) & 0xfff, 12);
         let ui12 = u64::from((word >> 10) & 0xfff);
         match word >> 22 {
             // SLTI, SLTUI
@@ -584,7 +620,7 @@ impl Cx<'_> {
                 0x2a if rj == 0 || rk == 0 => self.add_imm(rd, rj | rk, 0, false),
                 // ALSL.W, ALSL.WU, ALSL.D: `(rj << sa) + rk`.
                 op if op >> 2 == 0x2 || op >> 2 == 0x3 || op >> 2 == 0x16 => {
-                    let shift = u8::try_from((word >> 15 & 3) + 1).unwrap_or(0);
+                    let shift = u8::try_from(word >> 15 & 3).unwrap_or(0).saturating_add(1);
                     if op >> 2 == 0x16 {
                         self.indexed(rd, rk, rj, shift)
                     } else {
@@ -602,51 +638,42 @@ impl Cx<'_> {
     }
 
     /// Carry what this instruction did not overwrite to the next one.
-    #[allow(clippy::type_complexity)]
-    fn keep(
-        &mut self,
-        note: Note,
-        (scaled, indexed, loaded): (
-            Option<(u32, u8)>,
-            Option<(u32, u32, u32, u8)>,
-            Option<(u32, u64)>,
-        ),
-    ) {
+    fn keep(&mut self, note: Note, before: Pending) {
+        let Pending {
+            scaled,
+            indexed,
+            loaded,
+        } = before;
         let written = if matches!(note, Note::Compare { .. }) {
             0
         } else {
             note.writes()
-        } | self.state.indexed.map_or(0, |(sum, ..)| 1 << sum);
-        if self.state.scaled.is_none()
+        } | self
+            .state
+            .pending
+            .indexed
+            .map_or(0, |indexed| 1 << indexed.sum);
+        if self.state.pending.scaled.is_none()
             && let Some((reg, _)) = scaled
             && written >> reg & 1 == 0
         {
-            self.state.scaled = scaled;
+            self.state.pending.scaled = scaled;
         }
-        if self.state.indexed.is_none()
-            && let Some((sum, base, index, _)) = indexed
+        if self.state.pending.indexed.is_none()
+            && let Some(Indexed {
+                sum, base, index, ..
+            }) = indexed
             && written & (1 << sum | 1 << base | 1 << index) == 0
         {
-            self.state.indexed = indexed;
+            self.state.pending.indexed = indexed;
         }
-        if self.state.loaded.is_none()
+        if self.state.pending.loaded.is_none()
             && let Some((reg, _)) = loaded
             && written >> reg & 1 == 0
         {
-            self.state.loaded = loaded;
+            self.state.pending.loaded = loaded;
         }
     }
-}
-
-/// Whether `bytes` begin a frame: the stack pointer lowered (`addi.d sp,
-/// sp, -n`) among the first three instructions.
-pub(crate) fn starts_frame(bytes: &[u8]) -> bool {
-    (0..3).any(|i| {
-        bytes
-            .get(i * 4..)
-            .and_then(word_at)
-            .is_some_and(|word| word & 0xffc0_03ff == 0x02c0_0063 && word >> 21 & 1 == 1)
-    })
 }
 
 #[cfg(test)]
@@ -655,11 +682,11 @@ mod tests {
 
     /// Decode `code` from `addr`, instruction by instruction.
     fn run(words: &[u32], addr: u64) -> Vec<Insn> {
-        let mut state = State::default();
+        let mut decoder = Decoder::default();
         words
             .iter()
             .enumerate()
-            .map(|(i, word)| decode(&mut state, &word.to_le_bytes(), addr + 4 * i as u64))
+            .map(|(i, word)| decoder.decode(&word.to_le_bytes(), addr + 4 * i as u64))
             .collect()
     }
 
@@ -823,7 +850,8 @@ mod tests {
 
     #[test]
     fn frames() {
-        assert!(starts_frame(&0x02ff_8063_u32.to_le_bytes()));
-        assert!(!starts_frame(&0x02c0_8063_u32.to_le_bytes()));
+        let decoder = Decoder::default();
+        assert!(decoder.starts_frame(&0x02ff_8063_u32.to_le_bytes()));
+        assert!(!decoder.starts_frame(&0x02c0_8063_u32.to_le_bytes()));
     }
 }

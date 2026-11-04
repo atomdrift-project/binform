@@ -1,6 +1,6 @@
 # libe_sqlite3-linux-mips64.so
 
-Little-endian MIPS64 (n64): SQLite built by GCC for SQLitePCLRaw. Its `switch` statements are jump tables binform does not read yet.
+Little-endian MIPS64 (n64): SQLite built by GCC for SQLitePCLRaw. Its `switch` statements are GCC's PIC jump tables (`sltiu; ld page(gp); daddiu; dsll; daddu; ld; daddu gp; jr`); 70 of the 75 resolve, the rest are bounded on a value reloaded from memory.
 
 - Source: the NuGet package SQLitePCLRaw.lib.e_sqlite3 2.1.10 (`https://www.nuget.org/api/v2/package/SQLitePCLRaw.lib.e_sqlite3/2.1.10`)
 - Path in the source: `runtimes/linux-mips64/native/libe_sqlite3.so`
@@ -9,4 +9,4 @@ Little-endian MIPS64 (n64): SQLite built by GCC for SQLitePCLRaw. Its `switch` s
 - License: SQLite is public domain; SQLitePCLRaw is Apache-2.0
 
 `libe_sqlite3-linux-mips64.so.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`libe_sqlite3-linux-mips64.so.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`libe_sqlite3-linux-mips64.so.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

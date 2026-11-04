@@ -8,4 +8,4 @@ Go on 32-bit Arm: A32 only (Go emits no Thumb). Go returns with `add pc, lr, #0`
 - License: Apache-2.0 (traits-dev, klog, logr); the Go runtime is BSD-3-Clause
 
 `does-nothing-linux-arm.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`does-nothing-linux-arm.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`does-nothing-linux-arm.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

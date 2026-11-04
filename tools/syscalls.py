@@ -2,11 +2,16 @@
 `libc` crate's glibc tables.
 
     python -I tools/syscalls.py LIBC_CRATE_DIR > src/syscalls.rs
+
+LIBC_CRATE_DIR is an unpacked `libc` crate, such as the one cargo keeps in
+~/.cargo/registry/src/*/libc-0.2.191.
 """
 import os
 import re
 import sys
 
+if len(sys.argv) != 2 or not os.path.isdir(sys.argv[1]):
+    sys.exit(__doc__)
 LIBC = sys.argv[1]
 VERSION = os.path.basename(os.path.normpath(LIBC))
 GNU = "src/unix/linux_like/linux/gnu/"
@@ -19,7 +24,7 @@ TABLES = [
     ("ARM", ["Arm"], "b32/arm/mod.rs"),
     ("MIPS", ["Mips", "MipsEl", "MipsR6", "MipsR6El"], "b32/mips/mod.rs"),
     ("MIPS64", ["Mips64", "Mips64El", "Mips64R6", "Mips64R6El"], "b64/mips64/mod.rs"),
-    ("POWERPC", ["PowerPc"], "b32/powerpc.rs"),
+    ("POWERPC", ["PowerPc", "PowerPcEl"], "b32/powerpc.rs"),
     ("POWERPC64", ["PowerPc64", "PowerPc64El"], "b64/powerpc64/mod.rs"),
     ("S390X", ["S390x"], "b64/s390x.rs"),
     ("SPARC", ["Sparc"], "b32/sparc/mod.rs"),
@@ -30,6 +35,11 @@ TABLES = [
     ("M68K", ["M68k"], "b32/m68k/mod.rs"),
     ("CSKY", ["CSky"], "b32/csky/mod.rs"),
 ]
+
+# Arch variants with no glibc table in the `libc` crate. With TABLES, these
+# name every variant: the generated match has no wildcard, so a new Arch
+# fails to compile until it is listed in one or the other.
+UNNAMED = ["SuperH", "OpenRisc", "MicroBlaze", "MicroBlazeEl", "Arc", "ArcV2", "Xtensa", "MCore", "Bpf", "Nios2"]
 
 CONST = re.compile(r"pub const SYS_(\w+):\s*\w+\s*=\s*([0-9+ ]+);")
 
@@ -58,7 +68,7 @@ w("fn table(arch: Arch) -> Option<&'static [(u16, &'static str)]> {")
 w("    Some(match arch {")
 for const, arches, _ in TABLES:
     w(f"        {' | '.join('Arch::' + a for a in arches)} => &{const},")
-w("        _ => return None,")
+w("        " + "\n        | ".join("Arch::" + a for a in UNNAMED) + " => return None,")
 w("    })")
 w("}")
 w("")
@@ -74,7 +84,10 @@ w("/// The number Linux gives syscall `name` on `arch`: the inverse of")
 w("/// [`name`], for resolving a libc wrapper such as `connect` to the call")
 w("/// it issues. The tables are keyed by number, so this scans.")
 w("pub(crate) fn number(arch: Arch, name: &str) -> Option<u64> {")
-w("    table(arch)?.iter().find(|&&(_, n)| n == name).map(|&(number, _)| u64::from(number))")
+w("    table(arch)?")
+w("        .iter()")
+w("        .find(|&&(_, n)| n == name)")
+w("        .map(|&(number, _)| u64::from(number))")
 w("}")
 for const, _, path in TABLES:
     rows = table(path)
@@ -92,4 +105,6 @@ for const, _, path in TABLES:
         line += item
     w(line)
     w("];")
-sys.stdout.write("\n".join(out) + "\n")
+# Unix line endings on every platform.
+with open(sys.stdout.fileno(), "w", encoding="utf-8", newline="\n", closefd=False) as stdout:
+    stdout.write("\n".join(out) + "\n")

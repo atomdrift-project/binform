@@ -10,4 +10,4 @@ Only `.init`, `.fini`, the entry point and the dynamic symbols name code. The li
 - **Malware:** this file is hostile. It is kept compressed and only ever parsed; never run it.
 
 `bot-s390x-static-pie.rizin.json.zst` holds what rizin 0.8.2 found (`binform-ab --save`);
-`bot-s390x-static-pie.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test --test fixtures`).
+`bot-s390x-static-pie.golden` holds what binform finds (`BINFORM_BLESS=1 cargo test fixtures`).

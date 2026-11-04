@@ -40,7 +40,7 @@ only rizin 0x4811e0 fcn.004811e0: inside 0x4811d9
 only rizin 0x4954e4 fcn.004954e4: inside 0x4954e0
 only rizin 0x4958a4 fcn.004958a4: inside 0x4958a0
 only rizin 0x4959f4 fcn.004959f4: inside 0x4959f0
-only rizin 0x4997f0 fcn.004997f0: missed
+only rizin 0x4997f0 fcn.004997f0: inside 0x4968d0
 0x401000 size=27 blocks=3 edges=3 cc=2 cases=0 found=CALL | SWEEP rizin=3/2
 0x401020 size=11 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
 0x401030 size=11 blocks=1 edges=0 cc=1 cases=0 found=CALL | SWEEP | STUB rizin=1/1
