@@ -13,19 +13,19 @@ decide.
   subprocesses, no temporary files, no global state.
 - **Input is hostile.** Library code does not panic, index unchecked or
   overflow (`unsafe` is forbidden, and the clippy lints in `Cargo.toml`
-  enforce the rest). Every read is bounded by the file; every walk is
-  bounded by `Limits` or by a fixed budget (PE import entries and name bytes,
-  Mach-O bind and chained-import names, export-trie names). A file that
-  runs a walk out of budget yields what was read before it, and
-  `Recovery::truncated` says so.
+  enforce the rest). Every read is bounded by the file. Every table walk is
+  bounded by a named budget in `src/layout/limits.rs`, and yields what it
+  read before the budget ran out. Recovery is bounded by `Limits`, and
+  `Recovery::truncated` says when they cut it short.
 - **Partial results over errors.** A damaged table is read as far as it
   goes. `Error` is for a file with nothing to return. A file of an
   instruction set binform does not decode parses to its layout, with
   `arch()` `None`, and `recover` returns nothing for it.
 - **The caller pays for what it calls.** No lazy fields, no `OnceLock`, no
-  option builders. A caller that wants the layout calls `parse` and stops;
-  `parse` never reads code. Anything that walks code (`.eh_frame`, Go's
-  function table, PLT stubs) is computed by `recover`.
+  option builders. A caller that wants the layout calls `parse` and stops.
+  `parse` reads tables, including those that seed recovery (`.eh_frame`,
+  Go's function table), but never decodes an instruction; decoding, PLT
+  stubs included, is `recover`'s.
 - **Data, not objects.** Output types have public fields and derive
   `Clone`, `Debug` and `PartialEq` (and `Default` where it means something);
   they are `#[non_exhaustive]`, so a field can be added without a major
