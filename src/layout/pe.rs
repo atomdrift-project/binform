@@ -31,7 +31,6 @@ pub(super) struct Pe<'a> {
     /// The entry point's RVA; zero for none.
     pub(super) entry: u32,
     pub(super) file_alignment: u32,
-    pub(super) section_alignment: u32,
     pub(super) sections: Vec<Section>,
     /// Each data directory's (RVA, size).
     directories: Vec<(u32, u32)>,
@@ -53,6 +52,8 @@ pub(super) struct Import {
     pub(super) library: String,
     pub(super) name: String,
     pub(super) ordinal: Option<u16>,
+    /// From the delay-load table.
+    pub(super) delayed: bool,
 }
 
 pub(super) struct Section {
@@ -91,7 +92,6 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Pe<'_>, String> {
         r.u32(optional + 28).map(u64::from)
     }
     .unwrap_or(0);
-    let section_alignment = r.u32(optional + 32).unwrap_or(0);
     let file_alignment = r.u32(optional + 36).unwrap_or(0);
     let (count_at, first) = if is_64 { (108, 112) } else { (92, 96) };
     // The directories that fit in the optional header the COFF header sizes.
@@ -108,11 +108,28 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Pe<'_>, String> {
         .collect();
     let table = optional + u64::from(optional_size);
     // Long section names (`/4`) are offsets into the COFF string table,
-    // which follows the symbol table.
+    // which follows the symbol table and starts with its own size. A strip
+    // can leave the pointer behind with other bytes where the table was
+    // (MinGW images whose resources were rewritten): a table whose size
+    // does not fit the file, or a name that runs past it or is no text,
+    // leaves the section with the name its header holds.
     let strings = r
         .u32(coff + 8)
         .filter(|&symbols| symbols != 0)
-        .map(|symbols| u64::from(symbols) + 18 * u64::from(r.u32(coff + 12).unwrap_or(0)));
+        .map(|symbols| u64::from(symbols) + 18 * u64::from(r.u32(coff + 12).unwrap_or(0)))
+        .and_then(|start| {
+            let size = u64::from(r.u32(start)?);
+            let table = r
+                .bytes
+                .get(usize::try_from(start).ok()?..)?
+                .get(..usize::try_from(size).ok()?)?;
+            (size >= 4).then_some(table)
+        });
+    let long_name = |offset: u64| -> Option<String> {
+        let rest = strings?.get(usize::try_from(offset).ok().filter(|&o| o >= 4)?..)?;
+        let name = std::str::from_utf8(rest.get(..rest.iter().position(|&b| b == 0)?)?).ok()?;
+        (!name.is_empty() && !name.chars().any(char::is_control)).then(|| name.to_owned())
+    };
     let sections = (0..u64::from(count))
         .map_while(|i| {
             let at = table + 40 * i;
@@ -121,8 +138,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Pe<'_>, String> {
             let long = raw
                 .strip_prefix(b"/")
                 .and_then(|digits| std::str::from_utf8(digits).ok()?.parse::<u64>().ok())
-                .zip(strings)
-                .map(|(offset, strings)| r.name(strings + offset).into_owned());
+                .and_then(long_name);
             Some(Section {
                 name: long.unwrap_or_else(|| String::from_utf8_lossy(raw).into_owned()),
                 virtual_size: r.u32(at + 8)?,
@@ -140,7 +156,6 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Pe<'_>, String> {
         image_base,
         entry,
         file_alignment,
-        section_alignment,
         sections,
         directories,
     })
@@ -297,7 +312,7 @@ impl Pe<'_> {
                 if name == 0 || address == 0 {
                     break;
                 }
-                self.thunks(lookup, name, address, 0, &mut imports);
+                self.thunks(lookup, name, address, 0, false, &mut imports);
             }
         }
         if let Some(mut at) = self
@@ -321,15 +336,31 @@ impl Pe<'_> {
                     0
                 };
                 let rva = |va: u32| u32::try_from(u64::from(va).wrapping_sub(base)).unwrap_or(0);
-                self.thunks(rva(lookup), rva(name), rva(address), base, &mut imports);
+                self.thunks(
+                    rva(lookup),
+                    rva(name),
+                    rva(address),
+                    base,
+                    true,
+                    &mut imports,
+                );
             }
         }
         imports
     }
 
     /// The imports of one descriptor: DLL `name`, its lookup and address
-    /// tables. `base` is subtracted from name addresses that are no RVAs.
-    fn thunks(&self, lookup: u32, name: u32, address: u32, base: u64, out: &mut Vec<Import>) {
+    /// tables. `base` is subtracted from name addresses that are no RVAs;
+    /// `delayed` marks the delay-load table's.
+    fn thunks(
+        &self,
+        lookup: u32,
+        name: u32,
+        address: u32,
+        base: u64,
+        delayed: bool,
+        out: &mut Vec<Import>,
+    ) {
         let r = &self.r;
         let width: u32 = if self.is_64 { 8 } else { 4 };
         let ordinal_flag = if self.is_64 { 1 << 63 } else { 1 << 31 };
@@ -363,6 +394,7 @@ impl Pe<'_> {
                 library: library.clone(),
                 name,
                 ordinal,
+                delayed,
             });
         }
     }
@@ -602,6 +634,35 @@ mod tests {
     }
 
     #[test]
+    fn long_section_names_only_from_a_string_table_that_fits() {
+        // The section table follows the optional header; the COFF header's
+        // symbol-table pointer is at 0x4c, its symbol count at 0x50.
+        let named = |table: &[u8]| {
+            let mut bytes = image(&[], &[0xc3]);
+            bytes[0x148..0x150].copy_from_slice(b"/4\0\0\0\0\0\0");
+            let at = u32::try_from(bytes.len()).unwrap_or(0);
+            bytes[0x4c..0x50].copy_from_slice(&at.to_le_bytes());
+            bytes.extend(table);
+            parse(&bytes)
+                .ok()
+                .and_then(|pe| pe.sections.first().map(|s| s.name.clone()))
+        };
+        let mut table = 16_u32.to_le_bytes().to_vec();
+        table.extend(b".debug_info\0");
+        assert_eq!(named(&table).as_deref(), Some(".debug_info"));
+        // A size past the end: what was there is no string table.
+        table[..4].copy_from_slice(&0xaa0d_6469_u32.to_le_bytes());
+        assert_eq!(named(&table).as_deref(), Some("/4"));
+        // A name that is no text, or runs past the table.
+        let mut table = 8_u32.to_le_bytes().to_vec();
+        table.extend(b"\x07\x20\xa3\0");
+        assert_eq!(named(&table).as_deref(), Some("/4"));
+        let mut table = 6_u32.to_le_bytes().to_vec();
+        table.extend(b".debug\0");
+        assert_eq!(named(&table).as_deref(), Some("/4"));
+    }
+
+    #[test]
     fn rejects_what_is_no_pe() {
         assert!(parse(b"MZ").is_err());
         let mut bytes = image(&[], &[]);
@@ -703,6 +764,7 @@ mod tests {
             library: "k.dll".into(),
             name: name.into(),
             ordinal,
+            delayed: false,
         };
         assert_eq!(
             pe.imports(),

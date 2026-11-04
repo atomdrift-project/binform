@@ -7,6 +7,7 @@
 //! Mach-O indirect symbol table.
 
 use std::borrow::Cow;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 use crate::isa::Memory;
@@ -169,6 +170,7 @@ fn import_table(
             name,
             library,
             ordinal: None,
+            delayed: false,
         })
         .collect()
 }
@@ -567,6 +569,10 @@ fn elf_slots(elf: &Elf) -> Vec<Slot> {
         .collect()
 }
 
+/// `STB_GNU_UNIQUE`: a global symbol the dynamic linker keeps one
+/// definition of process-wide.
+const STB_GNU_UNIQUE: u8 = 10;
+
 /// An ELF file's sections, imports and exports. `addrs` are the sections'
 /// addresses (an object's, as binform placed them).
 fn elf_tables(elf: &Elf, addrs: &[u64], slots: &[Slot], object: bool) -> Tables {
@@ -589,18 +595,24 @@ fn elf_tables(elf: &Elf, addrs: &[u64], slots: &[Slot], object: bool) -> Tables 
             } else {
                 sh.size
             },
+            flags: sh.flags,
             readable: sh.flags & elf::SHF_ALLOC != 0,
             writable: sh.flags & elf::SHF_WRITE != 0,
             executable: sh.flags & elf::SHF_EXECINSTR != 0,
         })
         .collect();
     // The symbols the loader binds (or, in an object, the linker): the
-    // dynamic table's undefined ones, else the static table's. Exports are
-    // the defined global symbols of either table (weak ones, rizin says, are
-    // no exports).
+    // dynamic table's, else the static table's. Imports are the undefined
+    // ones. Exports are the defined ones, weak ones too (the dynamic linker
+    // binds to a weak definition as to any other): of the dynamic table,
+    // whose symbols other images can bind to, and of an object's static
+    // table, whose the linker can. A static executable's `.symtab` names
+    // its own functions, which nothing outside binds to.
     let named = |symbol: &&elf::Symbol| {
-        matches!(symbol.bind, elf::STB_GLOBAL | elf::STB_WEAK)
-            && !matches!(symbol.kind, elf::STT_SECTION | elf::STT_FILE)
+        matches!(
+            symbol.bind,
+            elf::STB_GLOBAL | elf::STB_WEAK | STB_GNU_UNIQUE
+        ) && !matches!(symbol.kind, elf::STT_SECTION | elf::STT_FILE)
             && !symbol.name.is_empty()
     };
     let undefined = if elf.dynamic_symbols.is_empty() {
@@ -616,13 +628,18 @@ fn elf_tables(elf: &Elf, addrs: &[u64], slots: &[Slot], object: bool) -> Tables 
             .filter(|symbol| symbol.shndx == elf::SHN_UNDEF)
             .map(|symbol| (symbol.name.clone(), None)),
     );
+    let exported: &[elf::Symbol] = if !elf.dynamic_symbols.is_empty() {
+        &elf.dynamic_symbols
+    } else if object {
+        &elf.symbols
+    } else {
+        &[]
+    };
     let mut seen = std::collections::HashSet::new();
-    let exports = elf
-        .dynamic_symbols
+    let exports = exported
         .iter()
-        .chain(&elf.symbols)
         .filter(named)
-        .filter(|symbol| symbol.bind == elf::STB_GLOBAL && symbol.shndx != elf::SHN_UNDEF)
+        .filter(|symbol| symbol.shndx != elf::SHN_UNDEF)
         .filter_map(|symbol| {
             let addr = if object {
                 addrs
@@ -875,52 +892,28 @@ fn pe_tables(pe: &Pe<'_>) -> (Tables, Vec<Slot>) {
             name: import.name.clone(),
         })
         .collect();
-    let mut seen = std::collections::HashSet::new();
+    // Every address-table entry, duplicates included: the table as the
+    // linker wrote it, which the imphash is computed over.
     let imports = pe_imports
         .into_iter()
-        .filter(|import| seen.insert((import.library.clone(), import.name.clone())))
         .map(|import| Import {
             slot: Some(at(import.slot)),
             name: import.name,
             library: (!import.library.is_empty()).then_some(import.library),
             ordinal: import.ordinal,
+            delayed: import.delayed,
         })
         .collect();
-    // Rizin's rules: an unnamed section is `sect_N`; the memory size rounds
-    // up to the section alignment, the file offset down to the file
-    // alignment (the file size growing by as much).
-    let round_up = |size: u64, to: u32| match size % u64::from(to.max(1)) {
-        0 => size,
-        rest => size + (u64::from(to) - rest),
-    };
-    let sections = (0..)
-        .zip(&pe.sections)
-        .map(|(i, section)| {
-            let raw = u64::from(section.size_of_raw_data);
-            let offset = u64::from(section.pointer_to_raw_data);
-            let slack = offset % u64::from(pe.file_alignment.max(1));
-            let size = match section.virtual_size {
-                0 => raw,
-                size => u64::from(size),
-            };
-            (
-                i,
-                section,
-                round_up(size, pe.section_alignment),
-                offset - slack,
-                raw + slack,
-            )
-        })
-        .map(|(i, section, size, offset, file_size)| Section {
-            name: if section.name.is_empty() {
-                format!("sect_{i}")
-            } else {
-                section.name.clone()
-            },
+    let sections = pe
+        .sections
+        .iter()
+        .map(|section| Section {
+            name: section.name.clone(),
             addr: at(section.virtual_address),
-            size,
-            offset,
-            file_size,
+            size: u64::from(section.virtual_size),
+            offset: u64::from(section.pointer_to_raw_data),
+            file_size: u64::from(section.size_of_raw_data),
+            flags: u64::from(section.characteristics),
             readable: section.characteristics & IMAGE_SCN_MEM_READ != 0,
             writable: section.characteristics & IMAGE_SCN_MEM_WRITE != 0,
             executable: section.characteristics & IMAGE_SCN_MEM_EXECUTE != 0,
@@ -1274,6 +1267,15 @@ fn macho_slots(macho: &MachO) -> Vec<Slot> {
     imports
 }
 
+/// An install name's library stem: `/usr/lib/libSystem.B.dylib` is
+/// `libSystem.B`.
+fn dylib_stem(path: &str) -> &str {
+    let base = path.rsplit_once('/').map_or(path, |(_, base)| base);
+    base.strip_suffix(".dylib")
+        .or_else(|| base.strip_suffix(".tbd"))
+        .unwrap_or(base)
+}
+
 /// A Mach-O file's sections, imports and exports.
 fn macho_tables(bytes: &[u8], macho: &MachO, slots: &[Slot]) -> Tables {
     let symbols = &macho.symbols;
@@ -1298,6 +1300,7 @@ fn macho_tables(bytes: &[u8], macho: &MachO, slots: &[Slot]) -> Tables {
             } else {
                 section.size
             },
+            flags: u64::from(section.flags),
             readable: section.protection & 1 != 0,
             writable: section.protection & 2 != 0,
             executable: section.protection & 4 != 0,
@@ -1306,25 +1309,42 @@ fn macho_tables(bytes: &[u8], macho: &MachO, slots: &[Slot]) -> Tables {
     let external = |symbol: &&macho::Symbol| {
         !symbol.is_stab() && symbol.n_type & macho::N_EXT != 0 && !symbol.name.is_empty()
     };
-    let imports = import_table(
-        slots,
-        symbols
-            .iter()
-            .filter(external)
-            .filter(|symbol| symbol.n_type & macho::N_TYPE == macho::N_UNDF)
-            .map(|symbol| {
-                // Ordinal 0 is this image, 0xfe the executable, 0xff
-                // whichever library defines it.
-                let library = usize::from(symbol.n_desc >> 8)
-                    .checked_sub(1)
-                    .and_then(|i| macho.dylibs.get(i))
-                    .cloned();
-                (symbol.name.clone(), library)
-            }),
-    );
+    // Ordinals count the dylibs from 1; 0 is this image, 0xfe (or, bound,
+    // -1) the executable, 0xff (-2) whichever library defines the symbol.
+    let dylib = |ordinal: i64| {
+        usize::try_from(ordinal)
+            .ok()?
+            .checked_sub(1)
+            .and_then(|i| macho.dylibs.get(i))
+            .cloned()
+    };
+    // dyld's binds name the library where the symbol table does not: Go's
+    // linker leaves the two-level ordinal zero, and a chained-fixups
+    // binary's import table is the record dyld reads.
+    let binds = macho::bound_ordinals(bytes, macho);
+    let bound: HashMap<&str, i64> = binds.iter().map(|(name, n)| (name.as_str(), *n)).collect();
+    let undefined: Vec<(String, Option<String>)> = symbols
+        .iter()
+        .filter(external)
+        .filter(|symbol| symbol.n_type & macho::N_TYPE == macho::N_UNDF)
+        .map(|symbol| {
+            let library = dylib(i64::from(symbol.n_desc >> 8))
+                .or_else(|| bound.get(symbol.name.as_str()).copied().and_then(dylib));
+            (symbol.name.clone(), library)
+        })
+        .collect();
+    // Names only the binds hold: a binary stripped of its undefined symbols.
+    let listed: HashSet<&str> = undefined.iter().map(|(name, _)| name.as_str()).collect();
+    let unlisted: Vec<(String, Option<String>)> = binds
+        .iter()
+        .filter(|(name, _)| !listed.contains(name.as_str()))
+        .map(|(name, ordinal)| (name.clone(), dylib(*ordinal)))
+        .collect();
+    let imports = import_table(slots, undefined.into_iter().chain(unlisted));
     // The symbol table's defined external symbols, and the export trie's
-    // (all a stripped dylib has), once per name.
-    let mut seen = std::collections::HashSet::new();
+    // (all a stripped dylib has), once per name. A re-export forwards to
+    // its library's stem and symbol, as a PE forwarder names its DLL.
+    let mut seen = HashSet::new();
     let trie = macho
         .exports_trie
         .map(|(offset, size)| macho::exports_trie(file_range(bytes, offset, size)))
@@ -1335,16 +1355,31 @@ fn macho_tables(bytes: &[u8], macho: &MachO, slots: &[Slot]) -> Tables {
         // A private external symbol is linked as one but not exported.
         .filter(|symbol| symbol.n_type & macho::N_TYPE == macho::N_SECT)
         .filter(|symbol| symbol.n_type & macho::N_PEXT == 0)
-        .map(|symbol| (symbol.name.clone(), symbol.n_value))
-        .chain(
-            trie.into_iter()
-                .map(|(name, offset)| (name, text.unwrap_or(0).wrapping_add(offset))),
-        )
-        .filter(|(name, _)| seen.insert(name.clone()))
-        .map(|(name, addr)| Export {
+        .map(|symbol| (symbol.name.clone(), symbol.n_value, None))
+        .chain(trie.into_iter().map(|(name, exported)| match exported {
+            macho::Exported::At(offset) => (name, text.unwrap_or(0).wrapping_add(offset), None),
+            macho::Exported::Reexport {
+                ordinal,
+                name: there,
+            } => {
+                let library = i64::try_from(ordinal)
+                    .ok()
+                    .and_then(dylib)
+                    .map(|path| dylib_stem(&path).to_owned());
+                let there = if there.is_empty() {
+                    name.clone()
+                } else {
+                    there
+                };
+                let forward = library.map(|library| format!("{library}.{there}"));
+                (name, 0, Some(forward.unwrap_or(there)))
+            }
+        }))
+        .filter(|(name, _, _)| seen.insert(name.clone()))
+        .map(|(name, addr, forward)| Export {
             name,
             addr,
-            forward: None,
+            forward,
         })
         .collect();
 
@@ -1524,5 +1559,46 @@ mod tests {
         assert!(bin.segments.is_empty() && bin.seeds.is_empty());
         let functions = crate::functions(&bin, &crate::Limits::DEFAULT);
         assert!(functions.functions.is_empty());
+    }
+
+    /// A chained-fixups binary's import table (`DYLD_CHAINED_IMPORT`)
+    /// binds every import to the library its symbol's two-level ordinal
+    /// names: the table read right, on a real file.
+    #[test]
+    #[allow(clippy::panic)]
+    fn chained_fixup_imports_agree_with_the_symbol_table() {
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/testdata/chained-fixups-ios-arm64.zst"
+        );
+        let compressed = std::fs::read(path).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let bytes = zstd::decode_all(&compressed[..]).unwrap_or_else(|e| panic!("{path}: {e}"));
+        let image = macho::parse(&bytes).unwrap_or_else(|e| panic!("{e}"));
+        assert!(image.binds.is_empty() && image.chained_fixups.is_some());
+        let bound: HashMap<String, i64> =
+            macho::bound_ordinals(&bytes, &image).into_iter().collect();
+        let undefined: Vec<&macho::Symbol> = image
+            .symbols
+            .iter()
+            .filter(|s| s.n_type & macho::N_EXT != 0 && s.n_type & macho::N_TYPE == macho::N_UNDF)
+            .collect();
+        assert_eq!((undefined.len(), bound.len()), (93, 93));
+        for symbol in undefined {
+            assert_eq!(
+                bound.get(&symbol.name).copied(),
+                Some(i64::from(symbol.n_desc >> 8)),
+                "{}",
+                symbol.name
+            );
+        }
+        let bin = crate::parse(&bytes).unwrap_or_else(|e| panic!("{e}"));
+        let library = |name: &str| {
+            bin.imports
+                .iter()
+                .find(|i| i.name == name)
+                .and_then(|i| i.library.as_deref())
+        };
+        assert_eq!(library("_sqlite3_close"), Some("/usr/lib/libsqlite3.dylib"));
+        assert!(bin.imports.iter().all(|i| i.library.is_some()));
     }
 }

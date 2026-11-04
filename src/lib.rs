@@ -304,19 +304,26 @@ pub enum Format {
     MachO,
 }
 
-/// A section as the headers describe it: rizin's `iS`.
+/// A section as its header describes it, values as the header holds them:
+/// a PE section's sizes unrounded, a nameless one nameless.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Section {
-    /// The header's name; Mach-O's is `__SEGMENT.__section`.
+    /// The header's name; Mach-O's is `__SEGMENT.__section`, a PE long name
+    /// (`/4`) the one the COFF string table holds.
     pub name: String,
-    /// Virtual address.
+    /// Virtual address; in a relocatable ELF object, where binform placed
+    /// the section, as its functions' addresses are.
     pub addr: u64,
-    /// Bytes in memory.
+    /// Bytes in memory: a PE section's `VirtualSize`.
     pub size: u64,
     /// File offset of the bytes the file holds.
     pub offset: u64,
-    /// Bytes the file holds: zero for zero-filled sections (`.bss`).
+    /// Bytes the file holds: zero for zero-filled sections (`.bss`); a PE
+    /// section's `SizeOfRawData`.
     pub file_size: u64,
+    /// The header's flag word: ELF `sh_flags`, PE `Characteristics`, Mach-O
+    /// the section's `flags` (type in the low byte, attributes above).
+    pub flags: u64,
     /// Mapped readable.
     pub readable: bool,
     /// Mapped writable.
@@ -347,6 +354,9 @@ pub struct Import {
     pub ordinal: Option<u16>,
     /// The first pointer slot the loader fills with its address, if any.
     pub slot: Option<u64>,
+    /// A PE import from the delay-load table, bound on first call rather
+    /// than at load.
+    pub delayed: bool,
 }
 
 /// An exported symbol: rizin's `iE`.
@@ -357,8 +367,10 @@ pub struct Export {
     pub name: String,
     /// Its address.
     pub addr: u64,
-    /// For a PE forwarder, the export it forwards to (`NTDLL.RtlAllocateHeap`);
-    /// `addr` is then that string's.
+    /// For a forwarder, the export it forwards to: a PE forwarder's string
+    /// (`NTDLL.RtlAllocateHeap`), whose address `addr` then is; a Mach-O
+    /// re-export's library stem and symbol (`libsystem_c._memcpy`), with no
+    /// address of its own (`addr` zero).
     pub forward: Option<String>,
 }
 
@@ -414,7 +426,8 @@ impl Binary<'_> {
         self.sections
             .iter()
             .filter(|s| s.mapped())
-            .find(|s| addr.wrapping_sub(s.addr) < s.size)
+            // A PE section with no `VirtualSize` maps its raw size.
+            .find(|s| addr.wrapping_sub(s.addr) < s.size.max(s.file_size))
     }
 
     /// The file offset of `addr`, when a mapped section's file bytes hold

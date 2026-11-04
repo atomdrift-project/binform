@@ -1,11 +1,14 @@
 //! Compare binform with rizin, file by file.
 //!
 //! ```text
-//! binform-ab [parse] [--rizin PATH] [--script CMDS] [--timeout SECS] [--jobs N] [--save DIR] PATH...
+//! binform-ab [parse|goblin] [--rizin PATH] [--script CMDS] [--timeout SECS] [--jobs N] [--save DIR] PATH...
 //! ```
 //!
 //! `parse` compares the layout instead: binform's sections, imports and
 //! exports against rizin's `iSj`, `iij` and `iEj`, name by name.
+//!
+//! `goblin` compares the layout against goblin's, normalised to what
+//! filefacts emits (see `goblin_ab.rs`); it needs no rizin.
 //!
 //! Directories are walked. Each supported executable is analysed by both
 //! tools; one JSON line per file reports the function-level agreement and the
@@ -28,6 +31,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
+#[path = "../goblin_ab.rs"]
+mod goblin_ab;
+
 use binform::diagnostics::{is_code, named};
 use binform::{Arch, RefKind};
 use serde_json::{Value, json};
@@ -35,6 +41,8 @@ use serde_json::{Value, json};
 struct Options {
     /// Compare layouts (`parse`) rather than functions.
     parse: bool,
+    /// Compare layouts against goblin (`goblin`).
+    goblin: bool,
     rizin: PathBuf,
     script: Option<String>,
     timeout: Duration,
@@ -46,6 +54,7 @@ struct Options {
 fn options() -> Result<Options, String> {
     let mut options = Options {
         parse: false,
+        goblin: false,
         rizin: PathBuf::from("rizin"),
         script: None,
         timeout: Duration::from_secs(600),
@@ -65,14 +74,19 @@ fn options() -> Result<Options, String> {
             }
             "--jobs" => options.jobs = value()?.parse().map_err(|e| format!("--jobs: {e}"))?,
             "--save" => options.save = Some(PathBuf::from(value()?)),
-            "parse" if options.paths.is_empty() && !options.parse => options.parse = true,
+            "parse" if options.paths.is_empty() && !options.parse && !options.goblin => {
+                options.parse = true;
+            }
+            "goblin" if options.paths.is_empty() && !options.parse && !options.goblin => {
+                options.goblin = true;
+            }
             _ if arg.starts_with("--") => return Err(format!("unknown option {arg}")),
             _ => options.paths.push(PathBuf::from(arg)),
         }
     }
     if options.paths.is_empty() {
         return Err(
-            "usage: binform-ab [parse] [--rizin PATH] [--script CMDS] [--timeout SECS] [--jobs N] PATH..."
+            "usage: binform-ab [parse|goblin] [--rizin PATH] [--script CMDS] [--timeout SECS] [--jobs N] PATH..."
                 .into(),
         );
     }
@@ -99,12 +113,14 @@ fn main() -> ExitCode {
         for _ in 0..options.jobs.max(1) {
             scope.spawn(|| {
                 while let Some(file) = files.get(next.fetch_add(1, Ordering::Relaxed)) {
-                    let report = if options.parse {
-                        compare_layout(&options, file)
+                    let found = if options.goblin {
+                        goblin_ab::compare(file).unwrap_or_default()
+                    } else if options.parse {
+                        compare_layout(&options, file).into_iter().collect()
                     } else {
-                        compare(&options, file)
+                        compare(&options, file).into_iter().collect()
                     };
-                    if let Some(report) = report {
+                    for report in found {
                         println!("{report}");
                         if let Ok(mut reports) = reports.lock() {
                             reports.push(report);
@@ -115,7 +131,9 @@ fn main() -> ExitCode {
         }
     });
     let reports = reports.into_inner().unwrap_or_default();
-    if options.parse {
+    if options.goblin {
+        goblin_ab::summarize(&reports);
+    } else if options.parse {
         summarize_layout(&reports);
     } else {
         summarize(&reports);

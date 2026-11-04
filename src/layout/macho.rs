@@ -23,6 +23,7 @@ const LC_LOAD_DYLIB: u32 = 0xc;
 const LC_DYLD_INFO: u32 = 0x22;
 const LC_DYLD_INFO_ONLY: u32 = 0x8000_0022;
 const LC_DYLD_EXPORTS_TRIE: u32 = 0x8000_0033;
+const LC_DYLD_CHAINED_FIXUPS: u32 = 0x8000_0034;
 const EXPORT_SYMBOL_FLAGS_REEXPORT: u64 = 0x8;
 const LC_LOAD_WEAK_DYLIB: u32 = 0x8000_0018;
 const LC_REEXPORT_DYLIB: u32 = 0x8000_001f;
@@ -66,6 +67,11 @@ pub(super) struct MachO {
     pub(super) dylibs: Vec<String>,
     /// The export trie: file offset and size.
     pub(super) exports_trie: Option<(u64, u64)>,
+    /// `LC_DYLD_INFO`'s bind and lazy-bind opcode streams: file offset and
+    /// size of each.
+    pub(super) binds: Vec<(u64, u64)>,
+    /// `LC_DYLD_CHAINED_FIXUPS`' data: file offset and size.
+    pub(super) chained_fixups: Option<(u64, u64)>,
 }
 
 pub(super) struct Segment {
@@ -163,6 +169,8 @@ pub(super) fn parse(bytes: &[u8]) -> Result<MachO, String> {
         entry: 0,
         dylibs: Vec::new(),
         exports_trie: None,
+        binds: Vec::new(),
+        chained_fixups: None,
     };
     let (mut main, mut thread) = (None, None);
     let mut at: u64 = if is_64 { 32 } else { 28 };
@@ -175,10 +183,27 @@ pub(super) fn parse(bytes: &[u8]) -> Result<MachO, String> {
             LC_SYMTAB => macho.read_symbols(&r, at),
             LC_DYSYMTAB => macho.read_indirect(&r, at),
             LC_DYLD_INFO | LC_DYLD_INFO_ONLY => {
+                // Bind at 16, weak bind at 24 (by name alone, no library),
+                // lazy bind at 32.
+                macho.binds = [16, 32]
+                    .into_iter()
+                    .filter_map(|field| {
+                        Some((
+                            u64::from(r.u32(at + field)?),
+                            u64::from(r.u32(at + field + 4)?),
+                        ))
+                    })
+                    .filter(|&(_, size)| size != 0)
+                    .collect();
                 macho.exports_trie =
                     (|| Some((u64::from(r.u32(at + 40)?), u64::from(r.u32(at + 44)?))))()
                         .filter(|&(_, size)| size != 0)
                         .or(macho.exports_trie);
+            }
+            LC_DYLD_CHAINED_FIXUPS => {
+                macho.chained_fixups =
+                    (|| Some((u64::from(r.u32(at + 8)?), u64::from(r.u32(at + 12)?))))()
+                        .filter(|&(_, size)| size != 0);
             }
             LC_DYLD_EXPORTS_TRIE => {
                 macho.exports_trie =
@@ -364,9 +389,9 @@ impl MachO {
 }
 
 /// The symbols an export trie names, each with its offset from the image
-/// base. Re-exports (another library's symbols) are left out. Each node is
-/// visited at most once, so a trie whose edges loop ends.
-pub(super) fn exports_trie(trie: &[u8]) -> Vec<(String, u64)> {
+/// base, or the library symbol it re-exports. Each node is visited at most
+/// once, so a trie whose edges loop ends.
+pub(super) fn exports_trie(trie: &[u8]) -> Vec<(String, Exported)> {
     let mut out = Vec::new();
     let mut visited = std::collections::HashSet::new();
     let mut stack = vec![(0_usize, Vec::new())];
@@ -379,13 +404,21 @@ pub(super) fn exports_trie(trie: &[u8]) -> Vec<(String, u64)> {
             continue;
         };
         let children = at.saturating_add(usize::try_from(terminal).unwrap_or(usize::MAX));
-        if terminal != 0 {
-            let flags = uleb(trie, &mut at);
-            if let Some(flags) = flags
-                && flags & EXPORT_SYMBOL_FLAGS_REEXPORT == 0
-                && let Some(offset) = uleb(trie, &mut at)
-            {
-                out.push((String::from_utf8_lossy(&prefix).into_owned(), offset));
+        if terminal != 0
+            && let Some(flags) = uleb(trie, &mut at)
+        {
+            let exported = if flags & EXPORT_SYMBOL_FLAGS_REEXPORT == 0 {
+                uleb(trie, &mut at).map(Exported::At)
+            } else {
+                // The library's ordinal, then the name it exports there
+                // (empty for the same name).
+                uleb(trie, &mut at).map(|ordinal| Exported::Reexport {
+                    ordinal,
+                    name: String::from_utf8_lossy(cstr(trie, at)).into_owned(),
+                })
+            };
+            if let Some(exported) = exported {
+                out.push((String::from_utf8_lossy(&prefix).into_owned(), exported));
             }
         }
         let mut at = children;
@@ -412,6 +445,160 @@ pub(super) fn exports_trie(trie: &[u8]) -> Vec<(String, u64)> {
         }
     }
     out
+}
+
+/// What an export trie entry exports.
+pub(super) enum Exported {
+    /// Code or data at this offset from the image's base.
+    At(u64),
+    /// Another library's symbol: the library's ordinal (from 1), and the
+    /// name it has there, empty for the same.
+    Reexport { ordinal: u64, name: String },
+}
+
+/// The NUL-terminated bytes at `at`; empty past the end.
+fn cstr(data: &[u8], at: usize) -> &[u8] {
+    data.get(at..)
+        .and_then(|rest| rest.split(|&b| b == 0).next())
+        .unwrap_or_default()
+}
+
+/// The library ordinal dyld binds each symbol to, by name, as the bind
+/// opcode streams and the chained-fixup import table record it: what a
+/// binary whose symbol table carries no two-level ordinal (Go's linker
+/// writes none) says of its imports. Ordinals count the dylibs from 1;
+/// zero and below are this image, the executable, and flat lookup. The
+/// first binding of a name wins.
+pub(super) fn bound_ordinals(bytes: &[u8], macho: &MachO) -> Vec<(String, i64)> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    let mut record = |name: &[u8], ordinal: i64| {
+        if !name.is_empty() && (seen.len() as u64) < MOST && seen.insert(name.to_vec()) {
+            out.push((String::from_utf8_lossy(name).into_owned(), ordinal));
+        }
+    };
+    for &(offset, size) in &macho.binds {
+        bind_opcodes(slice(bytes, offset, size), &mut record);
+    }
+    if let Some((offset, size)) = macho.chained_fixups {
+        chained_imports(slice(bytes, offset, size), macho.big, &mut record);
+    }
+    out
+}
+
+/// The file's bytes from `offset`, `size` of them or as many as there are.
+fn slice(bytes: &[u8], offset: u64, size: u64) -> &[u8] {
+    let start = usize::try_from(offset).unwrap_or(usize::MAX);
+    let end = start
+        .saturating_add(usize::try_from(size).unwrap_or(usize::MAX))
+        .min(bytes.len());
+    bytes.get(start..end).unwrap_or_default()
+}
+
+/// The (symbol, library ordinal) of each bind in a dyld bind opcode
+/// stream. Addresses are not tracked: only which library each name binds
+/// to. An unknown or truncated opcode ends the stream.
+fn bind_opcodes(stream: &[u8], record: &mut impl FnMut(&[u8], i64)) {
+    let mut at = 0;
+    let mut ordinal = 0_i64;
+    let mut symbol: &[u8] = &[];
+    while let Some(&byte) = stream.get(at) {
+        at += 1;
+        let immediate = byte & 0x0f;
+        let skip = |at: &mut usize, n: usize| (0..n).all(|_| uleb(stream, at).is_some());
+        let ok = match byte & 0xf0 {
+            // DONE ends a lazy-bind entry, not the stream; SET_TYPE_IMM.
+            0x00 | 0x50 => true,
+            // SET_DYLIB_ORDINAL_IMM
+            0x10 => {
+                ordinal = i64::from(immediate);
+                true
+            }
+            // SET_DYLIB_ORDINAL_ULEB
+            0x20 => uleb(stream, &mut at)
+                .map(|n| ordinal = i64::try_from(n).unwrap_or(0))
+                .is_some(),
+            // SET_DYLIB_SPECIAL_IMM: zero, or negative, sign-extended.
+            0x30 => {
+                ordinal = if immediate == 0 {
+                    0
+                } else {
+                    i64::from(i8::from_ne_bytes([0xf0 | immediate]))
+                };
+                true
+            }
+            // SET_SYMBOL_TRAILING_FLAGS_IMM: the name follows.
+            0x40 => {
+                symbol = cstr(stream, at);
+                at = at.saturating_add(symbol.len() + 1);
+                at <= stream.len()
+            }
+            // DO_BIND, DO_BIND_ADD_ADDR_IMM_SCALED
+            0x90 | 0xb0 => {
+                record(symbol, ordinal);
+                true
+            }
+            // SET_ADDEND_SLEB, SET_SEGMENT_AND_OFFSET_ULEB, ADD_ADDR_ULEB:
+            // a LEB128 number, signed or not, ends at the same byte.
+            0x60..=0x80 => skip(&mut at, 1),
+            // DO_BIND_ADD_ADDR_ULEB
+            0xa0 => {
+                record(symbol, ordinal);
+                skip(&mut at, 1)
+            }
+            // DO_BIND_ULEB_TIMES_SKIPPING_ULEB
+            0xc0 => {
+                record(symbol, ordinal);
+                skip(&mut at, 2)
+            }
+            // THREADED: SET_BIND_ORDINAL_TABLE_SIZE_ULEB, or APPLY.
+            0xd0 => immediate != 0 || skip(&mut at, 1),
+            _ => false,
+        };
+        if !ok {
+            break;
+        }
+    }
+}
+
+/// The (symbol, library ordinal) of each entry of a chained-fixup import
+/// table (`dyld_chained_fixups_header`), in any of its three formats. A
+/// compressed symbol table is not read.
+fn chained_imports(data: &[u8], big: bool, record: &mut impl FnMut(&[u8], i64)) {
+    let r = Reader::new(data, big);
+    // imports_offset, symbols_offset, imports_count, imports_format,
+    // symbols_format.
+    let header = (|| Some((r.u32(8)?, r.u32(12)?, r.u32(16)?, r.u32(20)?, r.u32(24)?)))();
+    let Some((imports, symbols, count, format, 0)) = header else {
+        return;
+    };
+    let (imports, symbols) = (u64::from(imports), u64::from(symbols));
+    // The low byte (or, in the 64-bit format, half-word) is a signed ordinal.
+    let small = |v: u32| i64::from(i8::from_ne_bytes([v.to_le_bytes()[0]]));
+    for i in 0..u64::from(count).min(MOST) {
+        let entry = match format {
+            // DYLD_CHAINED_IMPORT: ordinal 8 bits, weak 1, name offset 23.
+            1 => r
+                .u32(imports + 4 * i)
+                .map(|v| (small(v), u64::from(v >> 9))),
+            // DYLD_CHAINED_IMPORT_ADDEND: the same, and a 32-bit addend.
+            2 => r
+                .u32(imports + 8 * i)
+                .map(|v| (small(v), u64::from(v >> 9))),
+            // DYLD_CHAINED_IMPORT_ADDEND64: ordinal 16 bits, weak 1,
+            // reserved 15, name offset 32; then a 64-bit addend.
+            3 => r.u64(imports + 16 * i).map(|v| {
+                let [low, high, ..] = v.to_le_bytes();
+                (i64::from(i16::from_le_bytes([low, high])), v >> 32)
+            }),
+            _ => None,
+        };
+        let Some((ordinal, name)) = entry else {
+            break;
+        };
+        let at = usize::try_from(symbols.saturating_add(name)).unwrap_or(usize::MAX);
+        record(cstr(data, at), ordinal);
+    }
 }
 
 /// The unsigned LEB128 number at `*at`, advancing past it.
@@ -593,5 +780,85 @@ mod tests {
         assert_eq!(fat(&class).err().as_deref(), Some("a Java class file"));
         // Slices past the end are left out.
         assert!(fat(&bytes[..16]).is_ok_and(|s| s.is_empty()));
+    }
+
+    #[test]
+    fn bind_opcodes_name_each_symbols_library() {
+        let mut stream = vec![0x11]; // SET_DYLIB_ORDINAL_IMM 1
+        stream.extend(b"@_malloc\0"); // SET_SYMBOL_TRAILING_FLAGS_IMM
+        stream.extend([0x51, 0x72, 0x10, 0x90]); // type, segment+offset, DO_BIND
+        stream.extend([0x20, 0x82, 0x01]); // SET_DYLIB_ORDINAL_ULEB 130
+        stream.extend(b"@_free\0");
+        stream.extend([0xc0, 0x02, 0x08]); // DO_BIND_ULEB_TIMES_SKIPPING_ULEB
+        stream.extend([0x00, 0x3e]); // DONE, SET_DYLIB_SPECIAL_IMM -2
+        stream.extend(b"@_napi_get_cb_info\0");
+        stream.extend([0xa0, 0x08]); // DO_BIND_ADD_ADDR_ULEB
+        stream.extend(b"@_cut"); // a name the stream ends inside
+        let mut found = Vec::new();
+        bind_opcodes(&stream, &mut |name, ordinal| {
+            found.push((String::from_utf8_lossy(name).into_owned(), ordinal));
+        });
+        assert_eq!(
+            found,
+            [
+                ("_malloc".to_owned(), 1),
+                ("_free".to_owned(), 130),
+                ("_napi_get_cb_info".to_owned(), -2),
+            ]
+        );
+    }
+
+    #[test]
+    fn chained_imports_in_each_format() {
+        let table = |format: u32, entries: &[u8]| {
+            let mut data = Vec::new();
+            // version, starts, imports at 32, symbols after them, count 2.
+            let symbols = 32 + u32::try_from(entries.len()).unwrap_or(0);
+            for word in [0, 0, 32, symbols, 2, format, 0, 0] {
+                data.extend(word.to_le_bytes());
+            }
+            data.extend(entries);
+            data.extend(b"_open\0_write\0");
+            let mut found = Vec::new();
+            chained_imports(&data, false, &mut |name, ordinal| {
+                found.push((String::from_utf8_lossy(name).into_owned(), ordinal));
+            });
+            found
+        };
+        let expected = [("_open".to_owned(), 2), ("_write".to_owned(), -2)];
+        // DYLD_CHAINED_IMPORT: ordinal in the low byte, name offset from bit 9.
+        let import = |ordinal: u32, name: u32| (ordinal | name << 9).to_le_bytes();
+        let one: Vec<u8> = [import(2, 0), import(0xfe, 6)].concat();
+        assert_eq!(table(1, &one), expected);
+        let two: Vec<u8> = [import(2, 0), [0; 4], import(0xfe, 6), [0; 4]].concat();
+        assert_eq!(table(2, &two), expected);
+        let wide = |ordinal: u64, name: u64| (ordinal | name << 32).to_le_bytes();
+        let three: Vec<u8> = [wide(2, 0), [0; 8], wide(0xfffe, 6), [0; 8]].concat();
+        assert_eq!(table(3, &three), expected);
+    }
+
+    #[test]
+    fn export_trie_keeps_reexports() {
+        // Root: no terminal, two children; `_a` at 0x10, `_b` re-exported
+        // from library 2 as `_c`, and `_d` as itself from library 1.
+        let mut trie = vec![0, 3];
+        trie.extend(b"_a\0\x10_b\0\x14_d\0\x1b");
+        trie.resize(0x10, 0);
+        trie.extend([2, 0, 0x10, 0]); // flags 0, offset 0x10, no children
+        trie.extend([5, 8, 2]); // flags REEXPORT, ordinal 2, then the name
+        trie.extend(b"_c\0\0");
+        trie.extend([3, 8, 1, 0, 0]); // REEXPORT, ordinal 1, same name
+        let mut found: Vec<String> = exports_trie(&trie)
+            .into_iter()
+            .map(|(name, exported)| match exported {
+                Exported::At(offset) => format!("{name}@{offset:#x}"),
+                Exported::Reexport {
+                    ordinal,
+                    name: there,
+                } => format!("{name}<{ordinal}:{there}"),
+            })
+            .collect();
+        found.sort();
+        assert_eq!(found, ["_a@0x10", "_b<2:_c", "_d<1:"]);
     }
 }

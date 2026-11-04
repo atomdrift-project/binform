@@ -7,6 +7,9 @@ description = "Command-line tools for binform: dump a function table, compare wi
 
 [dependencies]
 binform = { path = ".." }
+# Only for `binform-ab goblin`, the A/B against filefacts' former parser.
+# This crate is unpublished, so binform's dependents never see goblin.
+goblin = { version = "0.10", default-features = false, features = ["std", "pe32", "pe64", "elf32", "elf64", "endian_fd", "mach32", "mach64"] }
 serde_json = "1"
 zstd = "0.13"
 

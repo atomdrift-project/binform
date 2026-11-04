@@ -203,15 +203,24 @@ Decisions taken while building it:
 - ELF sections come from the section headers only. Rizin's `iS` does not
   synthesise them from program headers either (those are `iSS`), and
   filefacts reads rizin's sections on the PE path alone.
-- PE sections follow rizin's per-section rules (`sect_N` for no name,
-  memory size rounded up to the section alignment, file offset down to
-  the file alignment), not its entry-point fix-up, which renames or marks
-  sections executable for display (`blob`; IA-64's `.rdata`).
-- Exports: ELF's defined `GLOBAL` symbols (weak ones are no exports, as
-  rizin says); PE's export directory, forwarders and ordinal-only exports
-  included, COFF symbols not (filefacts discarded those from rizin);
-  Mach-O's external symbols that are not private, merged with the export
-  trie (all a stripped dylib has).
+- Sections report their headers' values and flag word (`Section::flags`)
+  unaltered. PE sections first followed rizin's rules (`sect_N` for no
+  name, sizes rounded to the alignments); that was dropped when filefacts
+  moved its section view from goblin to binform (see step 7): the raw
+  `VirtualSize` is what a size anomaly is judged by, and the rounding is
+  derivable from it.
+- Imports: PE's every address-table entry, duplicates included (the
+  imphash is computed over them), delay-load ones marked `delayed`;
+  Mach-O's library from the two-level ordinal, else from dyld's bind
+  opcodes or the chained-fixup import table (Go's linker writes no
+  ordinal), plus names only the binds hold.
+- Exports: ELF's defined `GLOBAL`, `WEAK` and `GNU_UNIQUE` symbols of the
+  dynamic table, and of an object's static table (a static executable's
+  `.symtab` is no export table); PE's export directory, forwarders and
+  ordinal-only exports included, COFF symbols not (filefacts discarded
+  those from rizin); Mach-O's external symbols that are not private,
+  merged with the export trie (all a stripped dylib has), whose re-exports
+  forward to `stem.symbol`.
 
 The original notes:
 
@@ -301,6 +310,38 @@ The original note: Instruction sets binform
 lacks (Nios II, IA-64, …) get a `isa/` file when a sample
 turns up, not a fallback; until then such a file has layout and no
 functions, as resource-only DLLs do today.
+
+### 7. Move filefacts' layout views from goblin
+
+filefacts' section, import and export views come from binform instead of
+goblin, in all three formats; goblin stays for what binform does not read
+(resources, Authenticode, load config, CLR, notes, the dynamic section).
+The bar is not parity but output at least as good as goblin's.
+
+`binform-ab goblin PATH...` is the A/B: both parsers per image (each
+slice of a universal file), normalised to filefacts' conventions, diffed
+table by table and field by field. goblin is a dependency of the
+unpublished tools crate only; `cargo tree -p binform` does not list it.
+
+**binform side done.** Over `testdata/` (67 images) PE now agrees with
+goblin entry for entry. What remains differs where binform is the better
+answer: no ELF null section; a relocatable object's sections at their
+placed addresses, and its static symbols as its imports and exports;
+ELF exports goblin's `FUNC`/`OBJECT` filter skipped (`_end`, TLS, static-PIE
+globals); Mach-O object sections named by their own segment; a flat-lookup
+import (Node's `napi_*`) with no library where goblin says "self"; one
+import per Mach-O symbol, not per bind.
+
+Over `triage`, `exotic_binaries` and `testdata` (648 images, 3 s): PE
+agrees entry for entry but for one ordinal-only export goblin drops.
+binform reads 4 ELF and 5 truncated Mach-O files goblin rejects; loses no
+Mach-O import goblin finds (each goblin-only one is a repeated bind); names
+the library of 444 chained-fixup imports goblin leaves bare; and leaves 100
+flat-lookup imports bare where goblin says "self". It found one binform
+bug, fixed: a PE long section name (`/4`) read from a string table a
+strip had left the pointer to, now trusted only when the table fits the
+file and the name is text. `chained-fixups-ios-arm64` is the fixture for
+the chained import table. Left: filefacts' side.
 
 ## Efficiency
 
