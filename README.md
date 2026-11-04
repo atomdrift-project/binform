@@ -1,5 +1,7 @@
 # binform
 
+![binform logo](docs/logo-small.png)
+
 binform finds the functions in a binary. Given the bytes of an ELF, PE or
 Mach-O file, it reports where each function starts and ends, its basic
 blocks and complexity, the calls and jumps it makes, and the arguments its
