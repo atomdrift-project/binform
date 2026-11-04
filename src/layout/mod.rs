@@ -626,7 +626,7 @@ fn elf_tables(elf: &Elf, addrs: &[u64], slots: &[Slot], object: bool) -> Tables 
             .iter()
             .filter(named)
             .filter(|symbol| symbol.shndx == elf::SHN_UNDEF)
-            .map(|symbol| (symbol.name.clone(), None)),
+            .map(|symbol| (symbol.name.clone(), symbol.library.clone())),
     );
     let exported: &[elf::Symbol] = if !elf.dynamic_symbols.is_empty() {
         &elf.dynamic_symbols

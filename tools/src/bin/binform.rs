@@ -152,9 +152,15 @@ fn layout(path: &str) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
     let imports: Vec<serde_json::Value> = bin
         .imports
         .iter()
-        .map(
-            |i| json!({"name": i.name, "library": i.library, "ordinal": i.ordinal, "slot": i.slot}),
-        )
+        .map(|i| {
+            json!({
+                "name": i.name,
+                "library": i.library,
+                "ordinal": i.ordinal,
+                "slot": i.slot,
+                "delayed": i.delayed,
+            })
+        })
         .collect();
     let exports: Vec<serde_json::Value> = bin
         .exports

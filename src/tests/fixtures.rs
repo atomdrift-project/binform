@@ -1458,11 +1458,14 @@ fn layout_tables() {
         exports.iter().any(|e| e.name == "sqlite3_open"),
         "{exports:?}"
     );
-    assert!(
-        imports
-            .iter()
-            .all(|i| i.library.is_none() && i.ordinal.is_none())
+    // FreeBSD versions libc's symbols, so its imports name `libc.so.7`.
+    let malloc = imports.iter().find(|i| i.name == "malloc");
+    assert_eq!(
+        malloc.and_then(|i| i.library.as_deref()),
+        Some("libc.so.7"),
+        "{malloc:?}"
     );
+    assert!(imports.iter().all(|i| i.ordinal.is_none()));
 
     let (format, _, sections, imports, exports) = parsed("classic-level-darwin.node");
     assert_eq!(format, crate::Format::MachO);

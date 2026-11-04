@@ -341,7 +341,23 @@ flat-lookup imports bare where goblin says "self". It found one binform
 bug, fixed: a PE long section name (`/4`) read from a string table a
 strip had left the pointer to, now trusted only when the table fits the
 file and the name is text. `chained-fixups-ios-arm64` is the fixture for
-the chained import table. Left: filefacts' side.
+the chained import table.
+
+**filefacts side done.** filefacts reads its section, import and export
+views from `binform::parse` in all three formats; goblin's tables, the
+binform fill-in for views goblin left empty, and the export-trie validator
+are gone. Over the same corpora (587 binaries; old filefacts vs new, no
+crash or timeout in either, 351 s against 365 s): PE sections match but
+for 4 header-only files, now at RVAs; imports differ only where ordinals
+gained names, delay imports moved to their slot RVA, and header-only files
+gained normalised libraries; exports gained one ordinal-only entry. ELF
+gained the files goblin rejected and the dynamic exports its type filter
+dropped, and lost the null section and the `.symtab`-only "exports" of 31
+executables, which stay functions. Mach-O lost no name, only repeated
+binds, and 93 chained-fixup imports gained their library. Making binform
+the primary reader put budgets on its walks: PE imports (`MOST_IMPORTS`,
+32 MiB of names, shared by both tables), PE export names, Mach-O bind and
+chained-import names, and export-trie names (4 KiB each, 32 MiB in all).
 
 ## Efficiency
 

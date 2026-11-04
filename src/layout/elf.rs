@@ -17,6 +17,8 @@ const SHT_DYNAMIC: u32 = 6;
 pub(super) const SHT_NOBITS: u32 = 8;
 const SHT_REL: u32 = 9;
 const SHT_DYNSYM: u32 = 11;
+const SHT_GNU_VERNEED: u32 = 0x6fff_fffe;
+const SHT_GNU_VERSYM: u32 = 0x6fff_ffff;
 pub(super) const SHF_WRITE: u64 = 1;
 pub(super) const SHF_ALLOC: u64 = 2;
 pub(super) const SHF_EXECINSTR: u64 = 4;
@@ -43,6 +45,11 @@ const DT_RELSZ: u64 = 18;
 const DT_PLTREL: u64 = 20;
 const DT_JMPREL: u64 = 23;
 const DT_GNU_HASH: u64 = 0x6fff_fef5;
+const DT_VERSYM: u64 = 0x6fff_fff0;
+const DT_VERNEED: u64 = 0x6fff_fffe;
+const DT_VERNEEDNUM: u64 = 0x6fff_ffff;
+/// Version indexes 0 and 1 are local and global: no version, no file.
+const FIRST_VERSION: u16 = 2;
 /// MIPS: the GOT's entries before the first symbol's, and the first
 /// dynamic symbol with a GOT entry (each after it has one, in order).
 pub(super) const DT_MIPS_LOCAL_GOTNO: u64 = 0x7000_000a;
@@ -105,6 +112,9 @@ pub(super) struct Symbol {
     pub(super) shndx: u16,
     pub(super) value: u64,
     pub(super) size: u64,
+    /// For an undefined dynamic symbol of a version the binary requires,
+    /// the file the version-requirement table names for it (`libc.so.6`).
+    pub(super) library: Option<String>,
 }
 
 pub(super) struct Reloc {
@@ -193,6 +203,7 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Elf, String> {
     };
     elf.dynamic = elf.read_dynamic(&r);
     elf.read_symbols(&r);
+    elf.read_versions(&r);
     elf.read_relocations(&r);
     Ok(elf)
 }
@@ -351,6 +362,7 @@ impl Elf {
                     shndx,
                     value,
                     size,
+                    library: None,
                 })
             })
             .collect()
@@ -380,6 +392,103 @@ impl Elf {
             entsize,
             (strtab, strsz),
         )
+    }
+
+    /// Name each undefined dynamic symbol's library by its version: the
+    /// version table (`.gnu.version`) gives each dynamic symbol's version
+    /// index, and the version-requirement table (`.gnu.version_r`) the file
+    /// each index is required from. Unversioned symbols name none. Read
+    /// through the dynamic section, else the section table.
+    fn read_versions(&mut self, r: &Reader<'_>) {
+        let files = self.version_files(r);
+        if files.is_empty() {
+            return;
+        }
+        let versym = self
+            .dynamic_value(DT_VERSYM)
+            .and_then(|addr| self.offset_of(addr))
+            .or_else(|| {
+                self.sections
+                    .iter()
+                    .find(|sh| sh.kind == SHT_GNU_VERSYM)
+                    .map(|sh| sh.offset)
+            });
+        let Some(versym) = versym else {
+            return;
+        };
+        for (i, symbol) in (0u64..).zip(self.dynamic_symbols.iter_mut()) {
+            if symbol.shndx != SHN_UNDEF {
+                continue;
+            }
+            let Some(version) = versym
+                .checked_add(i * 2)
+                .and_then(|at| r.u16(at))
+                .map(|v| v & 0x7fff)
+            else {
+                break;
+            };
+            if version >= FIRST_VERSION {
+                symbol.library = files.get(&version).cloned();
+            }
+        }
+    }
+
+    /// Each required version's index, and the file it is required from.
+    fn version_files(&self, r: &Reader<'_>) -> std::collections::HashMap<u16, String> {
+        let mut files = std::collections::HashMap::new();
+        let dynamic = (|| {
+            let at = self.offset_of(self.dynamic_value(DT_VERNEED)?)?;
+            let count = self.dynamic_value(DT_VERNEEDNUM)?;
+            let strtab = self.offset_of(self.dynamic_value(DT_STRTAB)?)?;
+            let strsz = self.dynamic_value(DT_STRSZ).unwrap_or(u64::MAX);
+            Some((at, count, (strtab, strsz)))
+        })();
+        let table = dynamic.or_else(|| {
+            let sh = self.sections.iter().find(|sh| sh.kind == SHT_GNU_VERNEED)?;
+            let strings = usize::try_from(sh.link)
+                .ok()
+                .and_then(|i| self.sections.get(i))
+                .map(|strtab| (strtab.offset, strtab.size))?;
+            Some((sh.offset, u64::from(sh.info), strings))
+        });
+        let Some((mut at, count, strings)) = table else {
+            return files;
+        };
+        // Entries chain by relative offsets; every one visited, file or
+        // version, counts against one budget, so no chain runs long.
+        let mut budget = MOST;
+        for _ in 0..count {
+            let Some([version_count, file, aux, next]) = (|| {
+                Some([
+                    u32::from(r.u16(at + 2)?),
+                    r.u32(at + 4)?,
+                    r.u32(at + 8)?,
+                    r.u32(at + 12)?,
+                ])
+            })() else {
+                break;
+            };
+            let name = string(r, strings, file);
+            let mut version = at.saturating_add(u64::from(aux));
+            for _ in 0..version_count {
+                budget = budget.saturating_sub(1);
+                let (Some(index), Some(next_version)) = (r.u16(version + 6), r.u32(version + 12))
+                else {
+                    break;
+                };
+                files.insert(index & 0x7fff, name.clone());
+                if next_version == 0 || budget == 0 {
+                    break;
+                }
+                version = version.saturating_add(u64::from(next_version));
+            }
+            budget = budget.saturating_sub(1);
+            if next == 0 || budget == 0 {
+                break;
+            }
+            at = at.saturating_add(u64::from(next));
+        }
+        files
     }
 
     fn read_relocations(&mut self, r: &Reader<'_>) {
@@ -553,6 +662,97 @@ mod tests {
         load(&mut bytes, 0x60_0000, 0x1000);
         let elf = parse(&bytes).unwrap_or_else(|e| panic!("{e}"));
         assert_eq!(elf.programs.len(), 2);
+    }
+
+    /// One section header.
+    fn section_header(
+        kind: u32,
+        offset: u64,
+        size: u64,
+        link: u32,
+        info: u32,
+        entsize: u64,
+    ) -> Vec<u8> {
+        let mut bytes = 0_u32.to_le_bytes().to_vec();
+        bytes.extend(kind.to_le_bytes());
+        for word in [0, 0, offset, size] {
+            bytes.extend(word.to_le_bytes());
+        }
+        bytes.extend(link.to_le_bytes());
+        bytes.extend(info.to_le_bytes());
+        bytes.extend(0_u64.to_le_bytes());
+        bytes.extend(entsize.to_le_bytes());
+        bytes
+    }
+
+    /// An undefined symbol of a required version names the file the
+    /// version is required from; an unversioned one names none.
+    #[test]
+    fn versioned_imports_name_their_library() {
+        let strings = b"\0libc.so.6\0puts\0open\0GLIBC_2.2.5\0";
+        let mut symbols = vec![0_u8; 24];
+        for name in [11_u32, 16] {
+            symbols.extend(name.to_le_bytes());
+            symbols.extend([0x12, 0, 0, 0]); // global function, undefined
+            symbols.extend([0_u8; 16]);
+        }
+        let versions: Vec<u8> = [0_u16, 2, 1].iter().flat_map(|v| v.to_le_bytes()).collect();
+        let mut needs = Vec::new();
+        for half in [1_u16, 1] {
+            needs.extend(half.to_le_bytes());
+        }
+        for word in [1_u32, 16, 0, 0, 0] {
+            needs.extend(word.to_le_bytes());
+        }
+        needs.truncate(16);
+        needs.extend(0_u32.to_le_bytes()); // vna_hash
+        needs.extend(0_u16.to_le_bytes()); // vna_flags
+        needs.extend(2_u16.to_le_bytes()); // vna_other: the index
+        needs.extend(21_u32.to_le_bytes()); // vna_name
+        needs.extend(0_u32.to_le_bytes()); // vna_next
+
+        let tables: [&[u8]; 4] = [&symbols, strings, &versions, &needs];
+        let mut at = 0x100_u64;
+        let mut offsets = Vec::new();
+        for table in tables {
+            offsets.push(at);
+            at += table.len() as u64;
+        }
+        let shoff = at.next_multiple_of(8);
+        let mut bytes = header(0, shoff, 5);
+        bytes.resize(0x100, 0);
+        for table in tables {
+            bytes.extend_from_slice(table);
+        }
+        bytes.resize(usize::try_from(shoff).unwrap_or(0), 0);
+        bytes.extend(section_header(0, 0, 0, 0, 0, 0));
+        bytes.extend(section_header(
+            SHT_DYNSYM,
+            offsets[0],
+            symbols.len() as u64,
+            2,
+            1,
+            24,
+        ));
+        bytes.extend(section_header(3, offsets[1], strings.len() as u64, 0, 0, 0));
+        bytes.extend(section_header(SHT_GNU_VERSYM, offsets[2], 6, 1, 0, 2));
+        bytes.extend(section_header(
+            SHT_GNU_VERNEED,
+            offsets[3],
+            needs.len() as u64,
+            2,
+            1,
+            0,
+        ));
+
+        let elf = parse(&bytes).unwrap_or_else(|e| panic!("{e}"));
+        let named: Vec<(&str, Option<&str>)> = elf
+            .dynamic_symbols
+            .iter()
+            .skip(1)
+            .map(|s| (s.name.as_str(), s.library.as_deref()))
+            .collect();
+        assert_eq!(named, [("puts", Some("libc.so.6")), ("open", None)]);
     }
 
     #[test]
