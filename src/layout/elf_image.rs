@@ -4,7 +4,7 @@
 use std::borrow::Cow;
 use std::collections::{HashMap, HashSet};
 
-use super::elf::{self, Elf};
+use super::elf::{self, Elf, Place};
 use super::read::{self, Reader};
 use super::{
     Tables, bare, eh, file_range, go_seeds, gopclntab, import_table, limits, relocate, seed,
@@ -113,13 +113,13 @@ fn image<'a>(bytes: &'a [u8], elf: &Elf, arch: Arch) -> Binary<'a> {
         seeds.push(seed(elf.entry, Origin::Entry));
     }
     for symbol in elf.symbols.iter().chain(&elf.dynamic_symbols) {
-        if symbol.kind != elf::STT_FUNC || symbol.shndx == elf::SHN_UNDEF {
+        if symbol.kind != elf::STT_FUNC || symbol.place == Place::Undefined {
             continue;
         }
         // An object's symbol values are offsets into their sections, and
         // the first function of each sits at offset zero.
         let addr = if object {
-            match addrs.get(usize::from(symbol.shndx)) {
+            match symbol.place.section().and_then(|index| addrs.get(index)) {
                 Some(&base) if base != 0 => base.wrapping_add(symbol.value),
                 _ => continue,
             }
@@ -257,7 +257,7 @@ fn section_segments<'a>(bytes: &'a [u8], elf: &Elf, arch: Arch) -> Vec<Segment<'
         .symbols
         .iter()
         .filter(|symbol| symbol.kind == elf::STT_OBJECT && symbol.size > 0)
-        .filter(|symbol| symbol.shndx != elf::SHN_UNDEF)
+        .filter(|symbol| symbol.place != Place::Undefined)
         .map(|symbol| (symbol.value, symbol.value.saturating_add(symbol.size)))
         .collect();
     fence(segments, pools)
@@ -394,7 +394,7 @@ fn slots(elf: &Elf) -> Vec<Slot> {
         .filter(|reloc| reloc.symbol != 0)
         .filter_map(|reloc| {
             let symbol = elf.dynamic_symbols.get(reloc.symbol)?;
-            (symbol.shndx == elf::SHN_UNDEF && !symbol.name.is_empty()).then(|| Slot {
+            (symbol.place == Place::Undefined && !symbol.name.is_empty()).then(|| Slot {
                 slot: reloc.offset,
                 name: symbol.name.clone(),
                 import: None,
@@ -455,7 +455,7 @@ fn tables(elf: &Elf, addrs: &[u64], slots: &[Slot], object: bool) -> Tables {
         undefined
             .iter()
             .filter(named)
-            .filter(|symbol| symbol.shndx == elf::SHN_UNDEF)
+            .filter(|symbol| symbol.place == Place::Undefined)
             .map(|symbol| (symbol.name.as_str(), symbol.library.as_deref())),
     );
     let exported: &[elf::Symbol] = if !elf.dynamic_symbols.is_empty() {
@@ -469,11 +469,11 @@ fn tables(elf: &Elf, addrs: &[u64], slots: &[Slot], object: bool) -> Tables {
     let exports = exported
         .iter()
         .filter(named)
-        .filter(|symbol| symbol.shndx != elf::SHN_UNDEF)
+        .filter(|symbol| symbol.place != Place::Undefined)
         .filter_map(|symbol| {
             let addr = if object {
                 addrs
-                    .get(usize::from(symbol.shndx))?
+                    .get(symbol.place.section()?)?
                     .wrapping_add(symbol.value)
             } else {
                 symbol.value
@@ -508,7 +508,7 @@ fn mips_got_imports(elf: &Elf) -> Vec<Slot> {
     let first = usize::try_from(first).unwrap_or(usize::MAX);
     (0_u64..)
         .zip(elf.dynamic_symbols.iter().skip(first))
-        .filter(|(_, symbol)| symbol.shndx == elf::SHN_UNDEF && !symbol.name.is_empty())
+        .filter(|(_, symbol)| symbol.place == Place::Undefined && !symbol.name.is_empty())
         .map(|(i, symbol)| Slot {
             slot: got.wrapping_add(local.wrapping_add(i).wrapping_mul(width)),
             name: symbol.name.clone(),

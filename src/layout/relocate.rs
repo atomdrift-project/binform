@@ -13,7 +13,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
-use super::elf::{self, Elf};
+use super::elf::{self, Elf, Place};
 use super::read::{self, Reader};
 use super::{file_range, limits, macho};
 
@@ -224,14 +224,15 @@ pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf, arch: Arch) -> Layout<'a> {
     let mut slots = ImportSlots::new(end);
     let mut symbol = |index: usize| -> Option<(u64, bool)> {
         let symbol = elf.symbols.get(index)?;
-        match symbol.shndx {
-            elf::SHN_UNDEF if symbol.name.is_empty() => None,
-            elf::SHN_UNDEF => Some((slots.slot(index, &symbol.name), true)),
-            elf::SHN_ABS => Some((symbol.value, false)),
-            section => {
-                let base = *addrs.get(usize::from(section)).filter(|&&addr| addr != 0)?;
+        match symbol.place {
+            Place::Undefined if symbol.name.is_empty() => None,
+            Place::Undefined => Some((slots.slot(index, &symbol.name), true)),
+            Place::Absolute => Some((symbol.value, false)),
+            Place::Section(section) => {
+                let base = *addrs.get(section).filter(|&&addr| addr != 0)?;
                 Some((base.wrapping_add(symbol.value), false))
             }
+            Place::Other => None,
         }
     };
 

@@ -225,6 +225,53 @@ impl Arch {
     }
 }
 
+/// The instruction set's short lowercase name, as toolchains spell it:
+///
+/// ```
+/// assert_eq!(binform::Arch::X86_64.to_string(), "x86-64");
+/// assert_eq!(binform::Arch::PowerPc64El.to_string(), "ppc64le");
+/// ```
+impl core::fmt::Display for Arch {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::X86 => "x86",
+            Self::X86_64 => "x86-64",
+            Self::Arm64 => "arm64",
+            Self::Arm => "arm",
+            Self::Mips => "mips",
+            Self::MipsEl => "mipsel",
+            Self::Mips64 => "mips64",
+            Self::Mips64El => "mips64el",
+            Self::MipsR6 => "mipsr6",
+            Self::MipsR6El => "mipsr6el",
+            Self::Mips64R6 => "mips64r6",
+            Self::Mips64R6El => "mips64r6el",
+            Self::S390x => "s390x",
+            Self::Sparc => "sparc",
+            Self::Sparc64 => "sparc64",
+            Self::SuperH => "sh",
+            Self::PowerPc => "ppc",
+            Self::PowerPcEl => "ppcle",
+            Self::PowerPc64 => "ppc64",
+            Self::PowerPc64El => "ppc64le",
+            Self::RiscV32 => "riscv32",
+            Self::RiscV64 => "riscv64",
+            Self::LoongArch64 => "loongarch64",
+            Self::M68k => "m68k",
+            Self::OpenRisc => "or1k",
+            Self::MicroBlaze => "microblaze",
+            Self::MicroBlazeEl => "microblazeel",
+            Self::Arc => "arc",
+            Self::ArcV2 => "arcv2",
+            Self::CSky => "csky",
+            Self::Xtensa => "xtensa",
+            Self::MCore => "mcore",
+            Self::Bpf => "bpf",
+            Self::Nios2 => "nios2",
+        })
+    }
+}
+
 /// Bytes mapped at a virtual address.
 #[derive(Clone, Debug)]
 pub(crate) struct Segment<'a> {
@@ -306,6 +353,17 @@ pub enum Format {
     Pe,
     /// Mach-O, thin or one slice of a universal file.
     MachO,
+}
+
+/// The format's name: `ELF`, `PE` or `Mach-O`.
+impl core::fmt::Display for Format {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(match self {
+            Self::Elf => "ELF",
+            Self::Pe => "PE",
+            Self::MachO => "Mach-O",
+        })
+    }
 }
 
 /// A section as its header describes it, values as the header holds them:

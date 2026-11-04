@@ -17,7 +17,10 @@
 //! Zba's `sh2add`), add the table's address and load the entry, absolute or
 //! relative to the table (`lw a5, 0(a5); add a5, a5, a4; jr a5`).
 
-use crate::isa::{Decode, Extend, Flow, Insn, Mem, Note, Regs, relative, sext, u16_at, u32_at};
+use crate::isa::{
+    Decode, Extend, Flow, Indexed, Insn, Mem, Note, Pending, Regs, bit, relative, sext, u16_at,
+    u32_at,
+};
 
 /// What earlier instructions left that a later one needs.
 #[derive(Clone, Copy, Debug, Default)]
@@ -26,31 +29,10 @@ pub(crate) struct State {
     regs: Regs<u64, 32>,
     /// What only the next few instructions use.
     pending: Pending,
-}
-
-/// What an instruction leaves for the ones right after it, until one
-/// overwrites a register it names.
-#[derive(Clone, Copy, Debug, Default)]
-struct Pending {
-    /// A register holding another shifted left, and by how much.
-    scaled: Option<(u32, u8)>,
-    /// A register holding a base plus a scaled register, which a load then
-    /// reads through.
-    indexed: Option<Indexed>,
-    /// The last register loaded from a fixed address, and that address.
-    loaded: Option<(u32, u64)>,
     /// A register holding another shifted left by 32 (`slli a5, s0, 32`),
-    /// which a right shift by 29-32 makes a zero-extended, scaled copy of.
+    /// which a right shift by 29-32 makes a zero-extended, scaled copy of;
+    /// it lasts as [`Pending`]'s facts do.
     widened: Option<(u32, u32)>,
-}
-
-/// `sum = base + (index << shift)`.
-#[derive(Clone, Copy, Debug)]
-struct Indexed {
-    sum: u32,
-    base: u32,
-    index: u32,
-    shift: u8,
 }
 
 /// `ra`, the return address register, and `t0`, the alternate one.
@@ -92,19 +74,27 @@ pub(crate) fn decode(state: &mut State, config: Config, bytes: &[u8], addr: u64)
         config,
         addr,
     };
+    let before = std::mem::take(&mut cx.state.pending);
+    let widened = cx.state.widened.take();
     let (len, flow, note, pad) = if half & 3 != 3 {
-        let (flow, note) = cx.compressed(half);
+        let (flow, note) = cx.compressed(half, before, widened);
         (2, flow, note, half == C_NOP)
     } else if half & 0x1c != 0x1c {
         let Some(word) = word_at(bytes, 0) else {
             return Insn::new(2, Flow::Invalid);
         };
-        let (flow, note) = cx.full(word);
+        let (flow, note) = cx.full(word, before, widened);
         (4, flow, note, word == NOP)
     } else {
         // 48-bit and longer encodings: none in use.
         (2, Flow::Invalid, Note::None, false)
     };
+    // Carry what this instruction did not overwrite to the next one.
+    let written = cx.state.pending.written(note);
+    cx.state.pending.keep(before, written);
+    if cx.state.widened.is_none() {
+        cx.state.widened = widened.filter(|&(reg, src)| written & (bit(reg) | bit(src)) == 0);
+    }
     Insn {
         note,
         pad,
@@ -223,7 +213,7 @@ impl Cx<'_> {
         }
         self.set(rd, None);
         if shift == 32 && self.config.wide {
-            self.state.pending.widened = Some((rd, rs1));
+            self.state.widened = Some((rd, rs1));
             return Note::Clobber(1 << rd);
         }
         if (1..=3).contains(&shift) {
@@ -399,7 +389,7 @@ impl Cx<'_> {
         }
     }
 
-    fn full(&mut self, word: u32) -> (Flow, Note) {
+    fn full(&mut self, word: u32, before: Pending, widened: Option<(u32, u32)>) -> (Flow, Note) {
         let rd = (word >> 7) & 0x1f;
         let funct3 = (word >> 12) & 7;
         let rs1 = (word >> 15) & 0x1f;
@@ -407,13 +397,11 @@ impl Cx<'_> {
         let funct7 = word >> 25;
         let imm_i = i64::from(word.cast_signed() >> 20);
         let imm_u = i64::from((word & 0xffff_f000).cast_signed());
-        let pending = std::mem::take(&mut self.state.pending);
         let Pending {
             scaled,
             indexed,
             loaded,
-            widened,
-        } = pending;
+        } = before;
         let addr = self.addr;
         let (flow, note) = match word & 0x7f {
             // JAL
@@ -522,56 +510,15 @@ impl Cx<'_> {
             0x53 | 0x2f | 0x57 => (Flow::Next, self.clobber(rd)),
             _ => (Flow::Invalid, Note::None),
         };
-        self.keep(note, pending);
         (flow, note)
     }
 
-    /// Carry what this instruction did not overwrite to the next one.
-    fn keep(&mut self, note: Note, before: Pending) {
-        let Pending {
-            scaled,
-            indexed,
-            loaded,
-            widened,
-        } = before;
-        let written = if matches!(note, Note::Compare { .. }) {
-            0
-        } else {
-            note.writes()
-        } | self
-            .state
-            .pending
-            .indexed
-            .map_or(0, |indexed| 1 << indexed.sum);
-        if self.state.pending.scaled.is_none()
-            && let Some((reg, _)) = scaled
-            && written >> reg & 1 == 0
-        {
-            self.state.pending.scaled = scaled;
-        }
-        if self.state.pending.indexed.is_none()
-            && let Some(Indexed {
-                sum, base, index, ..
-            }) = indexed
-            && written & (1 << sum | 1 << base | 1 << index) == 0
-        {
-            self.state.pending.indexed = indexed;
-        }
-        if self.state.pending.loaded.is_none()
-            && let Some((reg, _)) = loaded
-            && written >> reg & 1 == 0
-        {
-            self.state.pending.loaded = loaded;
-        }
-        if self.state.pending.widened.is_none()
-            && let Some((reg, src)) = widened
-            && written & (1 << reg | 1 << src) == 0
-        {
-            self.state.pending.widened = widened;
-        }
-    }
-
-    fn compressed(&mut self, half: u16) -> (Flow, Note) {
+    fn compressed(
+        &mut self,
+        half: u16,
+        before: Pending,
+        widened: Option<(u32, u32)>,
+    ) -> (Flow, Note) {
         let h = u32::from(half);
         let funct3 = h >> 13;
         // The full and the compact (x8-x15) register fields.
@@ -580,13 +527,11 @@ impl Cx<'_> {
         let rd_c = (h >> 2) & 7 | 8;
         let rs1_c = (h >> 7) & 7 | 8;
         let imm6 = sext((h >> 12 & 1) << 5 | (h >> 2) & 0x1f, 6);
-        let pending = std::mem::take(&mut self.state.pending);
         let Pending {
             scaled,
             indexed,
             loaded,
-            widened,
-        } = pending;
+        } = before;
         let addr = self.addr;
         let wide = self.config.wide;
         let (flow, note) = match (h & 3, funct3) {
@@ -683,7 +628,6 @@ impl Cx<'_> {
             (2, _) => (Flow::Next, Note::None),
             _ => (Flow::Invalid, Note::None),
         };
-        self.keep(note, pending);
         (flow, note)
     }
 
@@ -755,6 +699,7 @@ impl Decode for Decoder {
 
     fn call(&mut self) {
         self.state.pending = Pending::default();
+        self.state.widened = None;
         self.state.regs.forget(u64::from(VOLATILE));
     }
 

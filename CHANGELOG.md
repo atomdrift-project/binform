@@ -17,7 +17,8 @@ The first public release.
 - `calls(&Binary, &Recovery) -> Vec<Call>` reads the arguments of each call
   and syscall site on x86, x86-64, Arm and A64, and resolves calls through
   import slots and stubs to `Target::Import`.
-- Public enums and output structs are `#[non_exhaustive]`.
+- Public enums and output structs are `#[non_exhaustive]`. `Arch` and
+  `Format` display as toolchains name them (`x86-64`, `ppc64le`, `Mach-O`).
 - Per-function diagnostics are behind the `diagnostics` feature, outside
   the stable API.
 - Every count a header claims is cut to the bytes that hold it and to a

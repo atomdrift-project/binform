@@ -14,7 +14,7 @@
 //! notes each address one completes: a function whose address is taken,
 //! when it points at code.
 
-use crate::isa::{Extend, Flow, Insn, Mem, Memory, Note, Regs, sext, u32_at};
+use crate::isa::{Extend, Flow, Indexed, Insn, Mem, Memory, Note, Pending, Regs, sext, u32_at};
 
 /// The PowerPC decoder: its byte order, word size, and the TOC pointer
 /// 64-bit code keeps in `r2`, and what earlier instructions left.
@@ -32,28 +32,15 @@ struct State {
     /// The slot `ctr`'s value was loaded from: a PLT stub's (`ld r12,
     /// n(r2); mtctr r12; bctr`).
     ctr_slot: Option<u64>,
-    /// The last register loaded from a fixed address, and that address.
-    loaded: Option<(u32, u64)>,
     /// The address in `lr`, after `bcl 20, 31, $+4`.
     lr: Option<u64>,
-    /// A register holding a base plus a scaled case value (`slwi r6, r6,
-    /// 2; add r6, r27, r6`), the address a table entry is then loaded from
-    /// at an offset (`lwz r10, 0x280(r6)`).
-    indexed: Option<Indexed>,
     /// The constant in each register.
     regs: Regs<u64, 32>,
-    /// A register holding another shifted left, and by how much: a scaled
-    /// case value.
-    scaled: Option<(u32, u8)>,
-}
-
-/// `sum = base + (index << shift)`.
-#[derive(Clone, Copy, Debug)]
-struct Indexed {
-    sum: u32,
-    base: u32,
-    index: u32,
-    shift: u8,
+    /// What only the next few instructions use: a scaled case value
+    /// (`slwi r6, r6, 2`), a base plus one (`add r6, r27, r6`), the
+    /// address a table entry is then loaded from at an offset (`lwz r10,
+    /// 0x280(r6)`).
+    pending: Pending,
 }
 
 /// The registers a call may change: r0 and r3-r12.
@@ -126,6 +113,7 @@ impl Decoder {
         if word & 0xfc1f_fffe == 0x7c09_03a6 {
             self.state.ctr_slot = self
                 .state
+                .pending
                 .loaded
                 .filter(|&(reg, _)| reg == rt)
                 .map(|(_, slot)| slot);
@@ -135,7 +123,7 @@ impl Decoder {
         if word & 0xfc1f_fffe == 0x7c08_02a6 {
             let value = self.state.lr;
             self.state.regs.set(rt, value);
-            self.state.loaded = self.state.loaded.filter(|&(reg, _)| reg != rt);
+            self.state.pending.loaded = self.state.pending.loaded.filter(|&(reg, _)| reg != rt);
             return value.map_or(Note::Copy { reg: rt, src: LR }, |value| Note::Value {
                 reg: rt,
                 value,
@@ -147,9 +135,10 @@ impl Decoder {
         }
         let imm = u64::from(word & 0xffff);
         let simm = sext(word & 0xffff, 16).cast_unsigned();
-        let scaled = self.state.scaled.take();
-        let loaded = self.state.loaded.take();
-        let indexed = self.state.indexed.take();
+        let before = std::mem::take(&mut self.state.pending);
+        let Pending {
+            scaled, indexed, ..
+        } = before;
         let note = match word >> 26 {
             // ADDI, ADDIS: an address when they complete a constant in rA;
             // `li`, `lis` (rA zero) and any high half alone are integers.
@@ -200,7 +189,7 @@ impl Decoder {
                     && (reg == ra || reg == rb)
                 {
                     let base = if reg == rb { ra } else { rb };
-                    self.state.indexed = Some(Indexed {
+                    self.state.pending.indexed = Some(Indexed {
                         sum: rt,
                         base,
                         index: reg,
@@ -255,7 +244,7 @@ impl Decoder {
                 let (sh, mb, me) = (rb, (word >> 6) & 0x1f, (word >> 1) & 0x1f);
                 self.state.regs.set(ra, None);
                 if (1..=3).contains(&sh) && mb == 0 && me == 31_u32.wrapping_sub(sh) {
-                    self.state.scaled = Some((ra, u8::try_from(sh).unwrap_or(0)));
+                    self.state.pending.scaled = Some((ra, u8::try_from(sh).unwrap_or(0)));
                     Note::Copy { reg: ra, src: rt }
                 } else if sh == 0 && me == 31 {
                     Note::Copy { reg: ra, src: rt }
@@ -275,7 +264,7 @@ impl Decoder {
                         if (1..=3).contains(&sh)
                             && (m == 63_u32.wrapping_sub(sh) || (word >> 2) & 7 == 2) =>
                     {
-                        self.state.scaled = Some((ra, u8::try_from(sh).unwrap_or(0)));
+                        self.state.pending.scaled = Some((ra, u8::try_from(sh).unwrap_or(0)));
                         Note::Copy { reg: ra, src: rt }
                     }
                     _ => Note::Clobber(1 << ra),
@@ -312,7 +301,7 @@ impl Decoder {
                 }
                 let slot = self.get(ra).map(|base| self.wrap(base.wrapping_add(disp)));
                 self.clobber(1 << rt);
-                self.state.loaded = slot.map(|slot| (rt, slot));
+                self.state.pending.loaded = slot.map(|slot| (rt, slot));
                 let (base, disp) = slot.map_or((Some(ra), disp), |slot| (None, slot));
                 Note::Fetch {
                     reg: rt,
@@ -338,30 +327,8 @@ impl Decoder {
         // What the instruction left before it is kept, unless it wrote a
         // register that holds it. A compare writes only a condition
         // register.
-        let written = if matches!(note, Note::Compare { .. }) {
-            0
-        } else {
-            note.writes()
-        } | self.state.indexed.map_or(0, |held| 1 << held.sum);
-        let state = &mut self.state;
-        if state.indexed.is_none()
-            && let Some(held) = indexed
-            && written & (1 << held.sum | 1 << held.base | 1 << held.index) == 0
-        {
-            state.indexed = indexed;
-        }
-        if state.scaled.is_none()
-            && let Some((reg, _)) = scaled
-            && written >> reg & 1 == 0
-        {
-            state.scaled = scaled;
-        }
-        if state.loaded.is_none()
-            && let Some((reg, _)) = loaded
-            && written >> reg & 1 == 0
-        {
-            state.loaded = loaded;
-        }
+        let written = self.state.pending.written(note);
+        self.state.pending.keep(before, written);
         note
     }
 
@@ -378,7 +345,7 @@ impl Decoder {
             34,
         );
         let target = (relative && ra == 0).then(|| addr.wrapping_add_signed(imm));
-        self.state.loaded = None;
+        self.state.pending.loaded = None;
         match (kind, opcode, target) {
             // PADDI (MLS:D-form): `pla`, `pli`.
             (2, 14, Some(addr)) => {
@@ -388,7 +355,7 @@ impl Decoder {
             // PLD (8LS:D-form), PLWZ (MLS:D-form).
             (0, 57, Some(slot)) | (2, 32, Some(slot)) => {
                 self.clobber(1 << rt);
-                self.state.loaded = Some((rt, slot));
+                self.state.pending.loaded = Some((rt, slot));
                 Note::Fetch {
                     reg: rt,
                     mem: Mem {
@@ -528,7 +495,7 @@ impl crate::isa::Decode for Decoder {
     fn call(&mut self) {
         let state = &mut self.state;
         state.ctr_slot = None;
-        state.loaded = None;
+        state.pending = Pending::default();
         state.lr = None;
         state.regs.forget(VOLATILE);
     }

@@ -46,7 +46,7 @@ fn main() -> ExitCode {
 }
 
 fn arch(bin: &Binary<'_>) -> Option<String> {
-    bin.arch().map(|arch| format!("{arch:?}"))
+    bin.arch().map(|arch| arch.to_string())
 }
 
 fn functions(path: &str) -> Report {
@@ -193,7 +193,7 @@ fn layout(path: &str) -> Report {
         .collect();
     Ok(json!({
         "path": path,
-        "format": format!("{:?}", bin.format()),
+        "format": bin.format().to_string(),
         "arch": arch(&bin),
         "entry": bin.entry(),
         "sections": sections,

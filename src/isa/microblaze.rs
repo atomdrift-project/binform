@@ -15,7 +15,9 @@
 //! itself (`addk r3, r3, r3`) before it loads the entry (`lw r3, r3, rT`
 //! or `imm hi; lwi r3, r3, lo`) and jumps (`bra r3`).
 
-use crate::isa::{Decode, Extend, Flow, Insn, Mem, Note, Regs, sext, u32_at};
+use crate::isa::{
+    Decode, Extend, Flow, Indexed, Insn, Mem, Note, Pending, Regs, bit, sext, u32_at,
+};
 
 /// What earlier instructions left that a later one needs.
 #[derive(Clone, Copy, Debug, Default)]
@@ -25,24 +27,11 @@ struct State {
     /// The high half an `imm` gave the next instruction's immediate, and
     /// that instruction's address.
     imm: Option<(u64, u32)>,
-    /// A register holding another shifted left, and by how much.
-    scaled: Option<(u32, u8)>,
-    /// A register holding a base plus a scaled register.
-    indexed: Option<Indexed>,
+    /// What only the next few instructions use.
+    pending: Pending,
     /// A register holding a scaled register plus a constant (a table's
-    /// address).
+    /// address); it lasts as [`Pending`]'s facts do.
     displaced: Option<Displaced>,
-    /// The last register loaded from a fixed address, and that address.
-    loaded: Option<(u32, u64)>,
-}
-
-/// `sum = base + (index << shift)`.
-#[derive(Clone, Copy, Debug)]
-struct Indexed {
-    sum: u32,
-    base: u32,
-    index: u32,
-    shift: u8,
 }
 
 /// `sum = (index << shift) + disp`.
@@ -137,9 +126,7 @@ impl Decode for Decoder {
 
     fn call(&mut self) {
         let state = &mut self.state;
-        state.loaded = None;
-        state.scaled = None;
-        state.indexed = None;
+        state.pending = Pending::default();
         state.displaced = None;
         state.regs.forget(u64::from(VOLATILE));
     }
@@ -216,7 +203,10 @@ impl Cx<'_> {
 
     /// Where `target` in a register takes a jump or a call.
     fn through(&self, reg: u32, call: bool) -> Flow {
-        match (self.get(reg).filter(|_| reg != 0), self.state.loaded) {
+        match (
+            self.get(reg).filter(|_| reg != 0),
+            self.state.pending.loaded,
+        ) {
             (Some(target), _) if call => Flow::Call(target),
             (Some(target), _) => Flow::Jump(target),
             (None, Some((loaded, slot))) if loaded == reg && call => Flow::CallSlot(slot),
@@ -305,10 +295,11 @@ impl Cx<'_> {
         let func = word & 0x7ff;
         let imm = self.immediate(word);
         let uimm = imm.cast_unsigned() & 0xffff_ffff;
-        let scaled = self.state.scaled.take();
-        let indexed = self.state.indexed.take();
+        let before = std::mem::take(&mut self.state.pending);
+        let Pending {
+            scaled, indexed, ..
+        } = before;
         let displaced = self.state.displaced.take();
-        let loaded = self.state.loaded.take();
         let note = match word >> 26 {
             // ADD, ADDK
             0x00 | 0x04 if func == 0 => self.add(rd, ra, rb, scaled),
@@ -374,10 +365,8 @@ impl Cx<'_> {
             0x2c => {
                 self.state.imm = Some((self.addr.wrapping_add(4) & 0xffff_ffff, word & 0xffff));
                 // Nothing this prefixes has run yet.
-                self.state.scaled = scaled;
-                self.state.indexed = indexed;
+                self.state.pending = before;
                 self.state.displaced = displaced;
-                self.state.loaded = loaded;
                 return Some(Note::None);
             }
             // LBU, LHU, LW (rA + rB)
@@ -410,36 +399,10 @@ impl Cx<'_> {
             _ => return None,
         };
         // What this instruction did not overwrite lasts.
-        let written = if matches!(note, Note::Compare { .. }) {
-            0
-        } else {
-            note.writes()
-        } | self.state.indexed.map_or(0, |indexed| 1 << indexed.sum);
-        if self.state.scaled.is_none()
-            && let Some((reg, _)) = scaled
-            && written >> reg & 1 == 0
-        {
-            self.state.scaled = scaled;
-        }
-        if self.state.indexed.is_none()
-            && let Some(Indexed {
-                sum, base, index, ..
-            }) = indexed
-            && written & (1 << sum | 1 << base | 1 << index) == 0
-        {
-            self.state.indexed = indexed;
-        }
-        if self.state.displaced.is_none()
-            && let Some(Displaced { sum, index, .. }) = displaced
-            && written & (1 << sum | 1 << index) == 0
-        {
-            self.state.displaced = displaced;
-        }
-        if self.state.loaded.is_none()
-            && let Some((reg, _)) = loaded
-            && written >> reg & 1 == 0
-        {
-            self.state.loaded = loaded;
+        let written = self.state.pending.written(note);
+        self.state.pending.keep(before, written);
+        if self.state.displaced.is_none() {
+            self.state.displaced = displaced.filter(|d| written & (bit(d.sum) | bit(d.index)) == 0);
         }
         Some(note)
     }
@@ -513,7 +476,7 @@ impl Cx<'_> {
             };
             self.set(rd, None);
             if shift <= 3 {
-                self.state.scaled = Some((rd, shift));
+                self.state.pending.scaled = Some((rd, shift));
             }
             return if rd == ra {
                 Note::None
@@ -526,7 +489,7 @@ impl Cx<'_> {
         {
             let base = if reg == ra { rb } else { ra };
             self.set(rd, None);
-            self.state.indexed = Some(Indexed {
+            self.state.pending.indexed = Some(Indexed {
                 sum: rd,
                 base,
                 index: reg,
@@ -584,7 +547,7 @@ impl Cx<'_> {
                 .map(|(a, b)| a.wrapping_add(b))
         {
             let slot = slot & 0xffff_ffff;
-            self.state.loaded = Some((rd, slot));
+            self.state.pending.loaded = Some((rd, slot));
             return Note::Fetch {
                 reg: rd,
                 mem: Mem {
@@ -674,7 +637,7 @@ impl Cx<'_> {
             return Note::Clobber(1 << rd);
         }
         let slot = base_value.map(|base| base.wrapping_add_signed(imm) & 0xffff_ffff);
-        self.state.loaded = slot.map(|slot| (rd, slot));
+        self.state.pending.loaded = slot.map(|slot| (rd, slot));
         let (base, disp) = slot.map_or((Some(ra), imm.cast_unsigned()), |slot| (None, slot));
         Note::Fetch {
             reg: rd,

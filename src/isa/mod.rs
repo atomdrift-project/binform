@@ -777,6 +777,64 @@ pub(crate) fn relative(base: u64, field: impl Into<u64>, bits: u32, scale: i64) 
     base.wrapping_add_signed(sext(field, bits).wrapping_mul(scale))
 }
 
+/// What an instruction leaves for the ones right after it, until one
+/// overwrites a register it names: the steps by which a load/store
+/// architecture builds a jump table's address over several instructions.
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Pending {
+    /// A register holding another shifted left, and by how much.
+    pub(crate) scaled: Option<(u32, u8)>,
+    /// A register holding a base plus a scaled register, which a load then
+    /// reads through.
+    pub(crate) indexed: Option<Indexed>,
+    /// The last register loaded from a fixed address, and that address.
+    pub(crate) loaded: Option<(u32, u64)>,
+}
+
+/// `sum = base + (index << shift)`.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Indexed {
+    pub(crate) sum: u32,
+    pub(crate) base: u32,
+    pub(crate) index: u32,
+    pub(crate) shift: u8,
+}
+
+/// `reg` as a register mask.
+pub(crate) fn bit(reg: u32) -> u64 {
+    1_u64.checked_shl(reg).unwrap_or(0)
+}
+
+impl Pending {
+    /// The registers whose earlier facts end at the instruction that noted
+    /// `note` and left `self`: those it writes (a compare writes none), and
+    /// the sum it made.
+    pub(crate) fn written(&self, note: Note) -> u64 {
+        let writes = if matches!(note, Note::Compare { .. }) {
+            0
+        } else {
+            note.writes()
+        };
+        writes | self.indexed.map_or(0, |indexed| bit(indexed.sum))
+    }
+
+    /// Carry each fact `before` the instruction that left `self` into it,
+    /// unless the instruction made a new one of its kind or overwrote, in
+    /// `written`, a register the fact names.
+    pub(crate) fn keep(&mut self, before: Self, written: u64) {
+        let kept = |regs: u64| written & regs == 0;
+        self.scaled = self
+            .scaled
+            .or(before.scaled.filter(|&(reg, _)| kept(bit(reg))));
+        self.indexed = self.indexed.or(before
+            .indexed
+            .filter(|i| kept(bit(i.sum) | bit(i.base) | bit(i.index))));
+        self.loaded = self
+            .loaded
+            .or(before.loaded.filter(|&(reg, _)| kept(bit(reg))));
+    }
+}
+
 /// What a decoder knows of the values in `N` registers.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Regs<T, const N: usize>([Option<T>; N]);
@@ -912,6 +970,42 @@ mod tests {
     use super::*;
     use crate::{Format, Seed};
     use std::borrow::Cow;
+
+    /// A fact lasts until an instruction overwrites a register it names or
+    /// makes a new one of its kind; a compare overwrites nothing.
+    #[test]
+    fn pending_facts_last_until_overwritten() {
+        let before = Pending {
+            scaled: Some((5, 2)),
+            indexed: Some(Indexed {
+                sum: 6,
+                base: 7,
+                index: 5,
+                shift: 2,
+            }),
+            loaded: Some((8, 0x1000)),
+        };
+        let compare = Note::Compare { reg: 5, imm: 3 };
+        let mut after = Pending::default();
+        after.keep(before, after.written(compare));
+        assert_eq!(after.scaled, Some((5, 2)));
+        assert!(after.indexed.is_some());
+        assert_eq!(after.loaded, Some((8, 0x1000)));
+
+        // Writing r7 ends the sum built on it, not the scaled copy.
+        let mut after = Pending::default();
+        after.keep(before, after.written(Note::Write(7)));
+        assert_eq!(after.scaled, Some((5, 2)));
+        assert!(after.indexed.is_none());
+
+        // A new load replaces the old one.
+        let mut after = Pending {
+            loaded: Some((9, 0x2000)),
+            ..Pending::default()
+        };
+        after.keep(before, after.written(Note::None));
+        assert_eq!(after.loaded, Some((9, 0x2000)));
+    }
 
     fn segment(addr: u64, bytes: &[u8], executable: bool) -> Segment<'_> {
         Segment {

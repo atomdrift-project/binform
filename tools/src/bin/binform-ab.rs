@@ -331,7 +331,7 @@ fn compare(options: &Options, input: &Input) -> Option<Value> {
     }
     let mut report = json!({
         "path": input.path.display().to_string(),
-        "arch": image.arch().map(|arch| format!("{arch:?}")),
+        "arch": image.arch().map(|arch| arch.to_string()),
         "script": script,
         "native_ms": native_ms,
         "rizin_ms": rizin_ms,
@@ -590,8 +590,8 @@ fn compare_layout(options: &Options, input: &Input) -> Option<Value> {
     let rizin_ms = started.elapsed().as_secs_f64() * 1e3;
     let mut report = json!({
         "path": input.path.display().to_string(),
-        "format": format!("{:?}", bin.format()),
-        "arch": bin.arch().map(|arch| format!("{arch:?}")),
+        "format": bin.format().to_string(),
+        "arch": bin.arch().map(|arch| arch.to_string()),
         "native_ms": native_ms,
         "rizin_ms": rizin_ms,
     });

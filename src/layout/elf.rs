@@ -49,6 +49,7 @@ const SHT_DYNAMIC: u32 = 6;
 pub(super) const SHT_NOBITS: u32 = 8;
 const SHT_REL: u32 = 9;
 const SHT_DYNSYM: u32 = 11;
+const SHT_SYMTAB_SHNDX: u32 = 18;
 const SHT_GNU_VERNEED: u32 = 0x6fff_fffe;
 const SHT_GNU_VERSYM: u32 = 0x6fff_ffff;
 pub(super) const SHF_WRITE: u64 = 1;
@@ -63,8 +64,15 @@ pub(super) const STB_WEAK: u8 = 2;
 /// A global symbol the dynamic linker keeps one definition of
 /// process-wide.
 pub(super) const STB_GNU_UNIQUE: u8 = 10;
-pub(super) const SHN_UNDEF: u16 = 0;
-pub(super) const SHN_ABS: u16 = 0xfff1;
+const SHN_UNDEF: u16 = 0;
+/// The first of the section indices that name no section.
+const SHN_LORESERVE: u16 = 0xff00;
+const SHN_ABS: u16 = 0xfff1;
+/// A symbol's section index is in the `SHT_SYMTAB_SHNDX` table; the
+/// header's section-name table index is in section 0's `sh_link`.
+const SHN_XINDEX: u16 = 0xffff;
+/// The header's program header count is in section 0's `sh_info`.
+const PN_XNUM: u16 = 0xffff;
 
 const DT_NULL: u64 = 0;
 const DT_PLTRELSZ: u64 = 2;
@@ -143,13 +151,50 @@ pub(super) struct Section {
     pub(super) entsize: u64,
 }
 
+/// Where a symbol is defined.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Place {
+    /// Nowhere: an import.
+    Undefined,
+    /// At an absolute value, in no section.
+    Absolute,
+    /// In the section of this index.
+    Section(usize),
+    /// Somewhere no section says: a common block, a processor's own index.
+    Other,
+}
+
+impl Place {
+    /// The place `shndx` names; for [`SHN_XINDEX`], `extended` holds the
+    /// index.
+    fn of(shndx: u16, extended: Option<u32>) -> Self {
+        match shndx {
+            SHN_UNDEF => Self::Undefined,
+            SHN_ABS => Self::Absolute,
+            SHN_XINDEX => extended
+                .and_then(|index| usize::try_from(index).ok())
+                .map_or(Self::Other, Self::Section),
+            SHN_LORESERVE.. => Self::Other,
+            index => Self::Section(usize::from(index)),
+        }
+    }
+
+    /// The index of the section it is in.
+    pub(super) const fn section(self) -> Option<usize> {
+        match self {
+            Self::Section(index) => Some(index),
+            Self::Undefined | Self::Absolute | Self::Other => None,
+        }
+    }
+}
+
 pub(super) struct Symbol {
     pub(super) name: String,
     /// `STT_*`: the low four bits of `st_info`.
     pub(super) kind: u8,
     /// `STB_*`: the high four bits of `st_info`.
     pub(super) bind: u8,
-    pub(super) shndx: u16,
+    pub(super) place: Place,
     pub(super) value: u64,
     pub(super) size: u64,
     /// For an undefined dynamic symbol of a version the binary requires,
@@ -228,24 +273,37 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Elf, Error> {
     let r = Reader::new(bytes, big);
     let header = Header::read(&r, is_64).ok_or(Error::Truncated("ELF header"))?;
 
+    // A file with too many sections or program headers for the header's
+    // fields keeps their counts, and the section-name table's index, in
+    // section 0.
+    let least = if is_64 { 64 } else { 40 };
+    let first = table(header.shoff, header.shentsize, 1, least)
+        .next()
+        .and_then(|at| section(&r.at(at), is_64))
+        .map(|(_, sh)| sh);
+    let extended = |value: u16, escape: u16, real: fn(&Section) -> u64| match &first {
+        Some(sh) if value == escape => real(sh),
+        _ => u64::from(value),
+    };
+    let phnum = extended(header.phnum, PN_XNUM, |sh| u64::from(sh.info));
+    let shnum = extended(header.shnum, 0, |sh| sh.size);
+    let shstrndx = extended(header.shstrndx, SHN_XINDEX, |sh| u64::from(sh.link));
+
     let programs = table(
         header.phoff,
         header.phentsize,
-        header.phnum,
+        phnum,
         if is_64 { 56 } else { 32 },
     )
     .map_while(|at| program(&r.at(at), is_64))
     .collect();
-    let (names, mut sections): (Vec<u32>, Vec<Section>) = table(
-        header.shoff,
-        header.shentsize,
-        header.shnum,
-        if is_64 { 64 } else { 40 },
-    )
-    .map_while(|at| section(&r.at(at), is_64))
-    .unzip();
-    if let Some(strings) = sections
-        .get(usize::from(header.shstrndx))
+    let (names, mut sections): (Vec<u32>, Vec<Section>) =
+        table(header.shoff, header.shentsize, shnum, least)
+            .map_while(|at| section(&r.at(at), is_64))
+            .unzip();
+    if let Some(strings) = usize::try_from(shstrndx)
+        .ok()
+        .and_then(|index| sections.get(index))
         .map(|sh| (sh.offset, sh.size))
     {
         // Every section may name the same long string: past a budget of
@@ -282,15 +340,27 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Elf, Error> {
     Ok(elf)
 }
 
+/// Where in the file a symbol table and the tables it reads lie.
+struct SymbolTable {
+    offset: u64,
+    size: u64,
+    entsize: u64,
+    /// The string table's file range.
+    strings: (u64, u64),
+    /// The file offset of the `SHT_SYMTAB_SHNDX` table, which holds the
+    /// section index of each symbol whose own field is [`SHN_XINDEX`].
+    extended: Option<u64>,
+}
+
 /// The offsets of a header table's entries: `count` entries of `size`
 /// bytes from `offset`, none when the entry size is smaller than `least`.
-fn table(offset: u64, size: u16, count: u16, least: u16) -> impl Iterator<Item = u64> {
+fn table(offset: u64, size: u16, count: u64, least: u16) -> impl Iterator<Item = u64> {
     let count = if offset == 0 || size < least {
         0
     } else {
         count
     };
-    read::table(offset, u64::from(size), u64::from(count))
+    read::table(offset, u64::from(size), count)
 }
 
 /// The offsets of a table's entries of `size` bytes in the `bytes` from
@@ -398,14 +468,35 @@ impl Elf {
         // budget of name bytes.
         let mut names = limits::NAME_BYTES;
         for kind in [SHT_SYMTAB, SHT_DYNSYM] {
-            let Some(sh) = self.sections.iter().find(|sh| sh.kind == kind) else {
+            let Some((index, sh)) = self
+                .sections
+                .iter()
+                .enumerate()
+                .find(|(_, sh)| sh.kind == kind)
+            else {
                 continue;
             };
             let strings = usize::try_from(sh.link)
                 .ok()
                 .and_then(|i| self.sections.get(i))
                 .map_or((0, 0), |strtab| (strtab.offset, strtab.size));
-            let symbols = self.symbol_table(r, sh.offset, sh.size, sh.entsize, strings, &mut names);
+            // The section indices too large for the symbols' own field.
+            let extended = self
+                .sections
+                .iter()
+                .find(|x| {
+                    x.kind == SHT_SYMTAB_SHNDX
+                        && usize::try_from(x.link).is_ok_and(|link| link == index)
+                })
+                .map(|x| x.offset);
+            let table = SymbolTable {
+                offset: sh.offset,
+                size: sh.size,
+                entsize: sh.entsize,
+                strings,
+                extended,
+            };
+            let symbols = self.symbol_table(r, &table, &mut names);
             if kind == SHT_SYMTAB {
                 self.symbols = symbols;
             } else {
@@ -417,18 +508,12 @@ impl Elf {
         }
     }
 
-    fn symbol_table(
-        &self,
-        r: &Reader<'_>,
-        offset: u64,
-        size: u64,
-        entsize: u64,
-        strings: (u64, u64),
-        names: &mut usize,
-    ) -> Vec<Symbol> {
+    fn symbol_table(&self, r: &Reader<'_>, table: &SymbolTable, names: &mut usize) -> Vec<Symbol> {
         let least = if self.is_64 { 24 } else { 16 };
-        entries(offset, size, entsize.max(least))
-            .map_while(|at| {
+        let extended = table.extended.map(|offset| r.at(offset));
+        (0_u64..)
+            .zip(entries(table.offset, table.size, table.entsize.max(least)))
+            .map_while(|(i, at)| {
                 let entry = r.at(at);
                 let (info, shndx, value, size) = if self.is_64 {
                     (entry.u8(4)?, entry.u16(6)?, entry.u64(8)?, entry.u64(16)?)
@@ -444,14 +529,18 @@ impl Elf {
                 let name = if *names == 0 {
                     String::new()
                 } else {
-                    string(r, strings, entry.u32(0)?)
+                    string(r, table.strings, entry.u32(0)?)
                 };
                 *names = names.saturating_sub(name.len());
+                let extended = extended
+                    .as_ref()
+                    .filter(|_| shndx == SHN_XINDEX)
+                    .and_then(|x| x.u32(i.checked_mul(4)?));
                 Some(Symbol {
                     name,
                     kind: info & 0xf,
                     bind: info >> 4,
-                    shndx,
+                    place: Place::of(shndx, extended),
                     value,
                     size,
                     library: None,
@@ -477,14 +566,14 @@ impl Elf {
             .unwrap_or(0);
         let entsize = if self.is_64 { 24 } else { 16 };
         let strsz = self.dynamic_value(DT_STRSZ).unwrap_or(u64::MAX);
-        self.symbol_table(
-            r,
-            symtab,
-            count.saturating_mul(entsize),
+        let table = SymbolTable {
+            offset: symtab,
+            size: count.saturating_mul(entsize),
             entsize,
-            (strtab, strsz),
-            names,
-        )
+            strings: (strtab, strsz),
+            extended: None,
+        };
+        self.symbol_table(r, &table, names)
     }
 
     /// Name each undefined dynamic symbol's library by its version: the
@@ -513,7 +602,7 @@ impl Elf {
         // Every symbol may require the version of one long file name.
         let mut names = limits::NAME_BYTES;
         for (i, symbol) in (0_u64..).zip(self.dynamic_symbols.iter_mut()) {
-            if symbol.shndx != SHN_UNDEF {
+            if symbol.place != Place::Undefined {
                 continue;
             }
             let Some(version) = i
@@ -810,6 +899,67 @@ mod tests {
         bytes.extend(0_u64.to_le_bytes());
         bytes.extend(entsize.to_le_bytes());
         bytes
+    }
+
+    /// A file with more sections than the header's fields hold keeps the
+    /// count and the name table's index in section 0, and a symbol's
+    /// section index in the `SHT_SYMTAB_SHNDX` table.
+    #[test]
+    fn extended_section_numbering() {
+        let strings = b"\0.symtab\0f\0g\0";
+        let mut symbols = vec![0_u8; 24];
+        for (name, shndx, value) in [(9_u32, SHN_XINDEX, 0x10_u64), (11, SHN_ABS, 0x20)] {
+            symbols.extend(name.to_le_bytes());
+            symbols.extend([0x12, 0]); // global function
+            symbols.extend(shndx.to_le_bytes());
+            symbols.extend(value.to_le_bytes());
+            symbols.extend(0_u64.to_le_bytes());
+        }
+        let indices: Vec<u8> = [0_u32, 3, 0].iter().flat_map(|i| i.to_le_bytes()).collect();
+        let (symtab, strtab) = (0x100_u64, 0x100 + symbols.len() as u64);
+        let shndx = strtab + strings.len() as u64;
+        let shoff = (shndx + indices.len() as u64).next_multiple_of(8);
+        let mut bytes = header(0, shoff, 0);
+        bytes.splice(62..64, SHN_XINDEX.to_le_bytes());
+        bytes.resize(0x100, 0);
+        for table in [&symbols[..], strings, &indices] {
+            bytes.extend_from_slice(table);
+        }
+        bytes.resize(usize::try_from(shoff).unwrap_or(0), 0);
+        // Section 0: four sections, names in section 2.
+        bytes.extend(section_header(0, 0, 4, 2, 0, 0));
+        let mut symtab_header = section_header(SHT_SYMTAB, symtab, symbols.len() as u64, 2, 1, 24);
+        symtab_header.splice(0..4, 1_u32.to_le_bytes()); // ".symtab"
+        bytes.extend(symtab_header);
+        bytes.extend(section_header(3, strtab, strings.len() as u64, 0, 0, 0));
+        bytes.extend(section_header(
+            SHT_SYMTAB_SHNDX,
+            shndx,
+            indices.len() as u64,
+            1,
+            0,
+            4,
+        ));
+
+        let elf = parse(&bytes).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(elf.sections.len(), 4);
+        assert_eq!(
+            elf.sections.get(1).map(|sh| sh.name.as_str()),
+            Some(".symtab")
+        );
+        let places: Vec<(&str, Place)> = elf
+            .symbols
+            .iter()
+            .map(|symbol| (symbol.name.as_str(), symbol.place))
+            .collect();
+        assert_eq!(
+            places,
+            [
+                ("", Place::Undefined),
+                ("f", Place::Section(3)),
+                ("g", Place::Absolute)
+            ]
+        );
     }
 
     /// An undefined symbol of a required version names the file the

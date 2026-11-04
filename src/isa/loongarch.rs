@@ -18,7 +18,9 @@
 //! (GCC: `alsl.d t1, t0, s2, 3; ldptr.d t1, t1, 0; jr t1`) or relative to
 //! the table (LLVM: `ldx.w a0, a2, a0; add.d a0, a2, a0; jr a0`).
 
-use crate::isa::{Decode, Extend, Flow, Insn, Mem, Note, Regs, relative, sext, u32_at};
+use crate::isa::{
+    Decode, Extend, Flow, Indexed, Insn, Mem, Note, Pending, Regs, relative, sext, u32_at,
+};
 
 /// What earlier instructions left that a later one needs.
 #[derive(Clone, Copy, Debug, Default)]
@@ -27,28 +29,6 @@ pub(crate) struct State {
     regs: Regs<u64, 32>,
     /// What only the next few instructions use.
     pending: Pending,
-}
-
-/// What an instruction leaves for the ones right after it, until one
-/// overwrites a register it names.
-#[derive(Clone, Copy, Debug, Default)]
-struct Pending {
-    /// A register holding another shifted left, and by how much.
-    scaled: Option<(u32, u8)>,
-    /// A register holding a base plus a scaled register, which a load then
-    /// reads through.
-    indexed: Option<Indexed>,
-    /// The last register loaded from a fixed address, and that address.
-    loaded: Option<(u32, u64)>,
-}
-
-/// `sum = base + (index << shift)`.
-#[derive(Clone, Copy, Debug)]
-struct Indexed {
-    sum: u32,
-    base: u32,
-    index: u32,
-    shift: u8,
 }
 
 /// `ra`, the return address register.
@@ -564,7 +544,9 @@ impl Cx<'_> {
             0x1c | 0x1d => (Flow::Next, self.clobber(rd)),
             _ => (Flow::Invalid, Note::None),
         };
-        self.keep(note, pending);
+        // Carry what this instruction did not overwrite to the next one.
+        let written = self.state.pending.written(note);
+        self.state.pending.keep(pending, written);
         (flow, note)
     }
 
@@ -633,44 +615,6 @@ impl Cx<'_> {
                 0x55 | 0x56 => Note::None,
                 _ => self.clobber(rd),
             },
-        }
-    }
-
-    /// Carry what this instruction did not overwrite to the next one.
-    fn keep(&mut self, note: Note, before: Pending) {
-        let Pending {
-            scaled,
-            indexed,
-            loaded,
-        } = before;
-        let written = if matches!(note, Note::Compare { .. }) {
-            0
-        } else {
-            note.writes()
-        } | self
-            .state
-            .pending
-            .indexed
-            .map_or(0, |indexed| 1 << indexed.sum);
-        if self.state.pending.scaled.is_none()
-            && let Some((reg, _)) = scaled
-            && written >> reg & 1 == 0
-        {
-            self.state.pending.scaled = scaled;
-        }
-        if self.state.pending.indexed.is_none()
-            && let Some(Indexed {
-                sum, base, index, ..
-            }) = indexed
-            && written & (1 << sum | 1 << base | 1 << index) == 0
-        {
-            self.state.pending.indexed = indexed;
-        }
-        if self.state.pending.loaded.is_none()
-            && let Some((reg, _)) = loaded
-            && written >> reg & 1 == 0
-        {
-            self.state.pending.loaded = loaded;
         }
     }
 }
