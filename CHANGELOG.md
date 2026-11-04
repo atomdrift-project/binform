@@ -16,7 +16,8 @@ The first public release.
   `section_at`, `offset`, `import(slot)`, `syscall` and `syscall_number`.
 - `recover(&Binary, &Limits) -> Recovery` recovers functions, blocks,
   complexity and references. A reference's `Dest` is code, or a memory
-  slot and the import the loader writes there.
+  slot and the import the loader writes there. `Ref::new` builds one
+  outside the crate, as tests of a consumer need.
 - `calls(&Binary, &Recovery) -> Vec<Call>` reads each call and syscall
   site's arguments on x86, x86-64, Arm and A64, resolving calls through
   import slots and stubs to `Target::Import`. An unknown syscall number is

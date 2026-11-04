@@ -520,7 +520,7 @@ impl Walk {
     }
 
     fn refer(&mut self, from: u64, to: Dest, kind: RefKind) {
-        self.refs.push(Ref { from, to, kind });
+        self.refs.push(Ref::new(from, to, kind));
     }
 }
 

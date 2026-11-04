@@ -720,6 +720,12 @@ pub struct Ref {
 }
 
 impl Ref {
+    /// The transfer at `from`, of `kind`, to `to`.
+    #[must_use]
+    pub const fn new(from: u64, to: Dest, kind: RefKind) -> Self {
+        Self { from, to, kind }
+    }
+
     /// The address the transfer reaches: its target, or the slot it goes
     /// through.
     #[must_use]
