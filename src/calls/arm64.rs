@@ -246,12 +246,13 @@ fn load_store(state: &mut State<'_>, w: u32, addr: u64) {
     // One register: `size 111 V 0 1 opc imm12 Rn Rt` with an unsigned
     // scaled offset, or `size 111 V 0 0 opc 0 imm9 idx Rn Rt` with a signed
     // one, unscaled or pre- or post-indexed.
+    // 128-bit SIMD (Q) registers, else `1 << size` bytes.
+    let width = if simd && opc & 2 != 0 {
+        16
+    } else {
+        1_u8 << size
+    };
     let single = if w & 0x3b00_0000 == 0x3900_0000 {
-        let width = if simd && opc & 2 != 0 {
-            16
-        } else {
-            1_u8 << size
-        };
         Some((
             i64::from(w >> 10 & 0xfff).wrapping_mul(width.into()),
             Index::Offset,
@@ -262,11 +263,6 @@ fn load_store(state: &mut State<'_>, w: u32, addr: u64) {
             1 => Index::Post,
             3 => Index::Pre,
             _ => Index::Offset,
-        };
-        let width = if simd && opc & 2 != 0 {
-            16
-        } else {
-            1_u8 << size
         };
         Some((signed(w, 12, 9), index, width))
     } else {

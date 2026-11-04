@@ -63,7 +63,8 @@ impl Decode for Decoder {
         if flow == Flow::Invalid {
             return Insn::new(4, flow);
         }
-        let flow = match (flow, be_word(bytes, 4)) {
+        let slot_word = be_word(bytes, 4);
+        let flow = match (flow, slot_word) {
             (Flow::Call(target), Some(slot)) if returns_elsewhere(slot) => Flow::Jump(target),
             (Flow::CallIndirect, Some(slot)) if returns_elsewhere(slot) => Flow::JumpIndirect,
             (flow, _) => flow,
@@ -72,7 +73,7 @@ impl Decode for Decoder {
         // note is no one path's.
         let annulled = word >> 30 == 0 && word & 0x2000_0000 != 0;
         let at = addr.wrapping_add(4);
-        let slot = be_word(bytes, 4).map(|slot| match self.flow(slot, at) {
+        let slot = slot_word.map(|slot| match self.flow(slot, at) {
             Some(_) => Insn::new(4, Flow::Invalid),
             None if annulled => Insn::new(4, Flow::Next),
             None => Insn::note(4, self.note(slot, at)),
@@ -140,7 +141,6 @@ impl Decoder {
         };
         let scaled = self.scaled;
         let note = match word >> 30 {
-            // SETHI
             // SETHI: the high bits of an address, no address by itself.
             0 if (word >> 22) & 7 == 4 && rd != 0 => Note::Value {
                 reg: rd,
@@ -482,8 +482,6 @@ mod tests {
             })
         );
     }
-
-    const NOP: u32 = 0x0100_0000;
 
     #[test]
     fn transfers_take_their_slot() {

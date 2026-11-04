@@ -52,10 +52,11 @@ impl Decode for Decoder {
             (flow, ..) => flow,
         };
         if !delayed {
-            let mut insn = Insn::new(2, flow);
-            insn.pad = word == NOP;
-            insn.note = self.track(word, bytes, addr);
-            return insn;
+            return Insn {
+                note: self.track(word, bytes, addr),
+                pad: word == NOP,
+                ..Insn::new(2, flow)
+            };
         }
         let slot = half(bytes, 2);
         // A jump whose slot sets the return address (`mova 1f, r0; braf r1;
@@ -285,8 +286,6 @@ mod tests {
         assert_eq!((first.len, second.len), (2, 2));
         assert_eq!((call.flow, call.len), (Flow::Call(0x1108), 8));
     }
-
-    const NOP: u16 = 0x0009;
 
     #[test]
     fn transfers() {

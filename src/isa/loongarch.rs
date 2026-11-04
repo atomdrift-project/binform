@@ -401,7 +401,6 @@ impl Cx<'_> {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     fn decode(&mut self, word: u32) -> (Flow, Note) {
         let rd = word & 0x1f;
         let rj = (word >> 5) & 0x1f;

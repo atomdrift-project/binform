@@ -24,6 +24,7 @@ mod x86;
 use crate::isa::{Flow, Insn, Memory};
 use crate::{Arch, Binary, Dest, Function, Recovery, RefKind};
 use state::State;
+use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap};
 use std::iter::once;
 use std::ops::RangeInclusive;
@@ -91,11 +92,14 @@ pub enum Value {
 /// track: every architecture but x86, x86-64, 32-bit Arm and AArch64.
 #[must_use]
 pub fn calls(bin: &Binary<'_>, funcs: &Recovery) -> Vec<Call> {
-    match bin.arch {
-        Some(Arch::X86) => run(bin, funcs, x86::X86::new(32)),
-        Some(Arch::X86_64) => run(bin, funcs, x86::X86::new(64)),
-        Some(Arch::Arm) => run(bin, funcs, arm::Arm::new(bin)),
-        Some(Arch::Arm64) => run(bin, funcs, arm64::Arm64::new(bin)),
+    let Some(arch) = bin.arch else {
+        return Vec::new();
+    };
+    match arch {
+        Arch::X86 => run(bin, arch, funcs, x86::X86::new(32)),
+        Arch::X86_64 => run(bin, arch, funcs, x86::X86::new(64)),
+        Arch::Arm => run(bin, arch, funcs, arm::Arm::new(bin)),
+        Arch::Arm64 => run(bin, arch, funcs, arm64::Arm64::new(bin)),
         _ => Vec::new(),
     }
 }
@@ -117,10 +121,12 @@ pub(crate) trait Tracker<'a> {
 }
 
 /// The calls of `bin`'s `funcs`, walked with `tracker`.
-fn run<'a, T: Tracker<'a>>(bin: &'a Binary<'_>, funcs: &Recovery, mut tracker: T) -> Vec<Call> {
-    let Some(arch) = bin.arch else {
-        return Vec::new();
-    };
+fn run<'a, T: Tracker<'a>>(
+    bin: &'a Binary<'_>,
+    arch: Arch,
+    funcs: &Recovery,
+    mut tracker: T,
+) -> Vec<Call> {
     let memory = Memory::for_arch(&bin.segments, arch);
     let targets = Targets::new(bin, funcs);
     let mut found = Vec::new();
@@ -130,7 +136,7 @@ fn run<'a, T: Tracker<'a>>(bin: &'a Binary<'_>, funcs: &Recovery, mut tracker: T
     // Recovered functions can overlap, so one instruction may be walked from
     // several of them; an address is one call site, so keep a single record
     // per address — the one whose arguments the richest walk resolved.
-    found.sort_by(|a, b| a.addr.cmp(&b.addr).then(richness(b).cmp(&richness(a))));
+    found.sort_by_cached_key(|call| (call.addr, Reverse(richness(call))));
     found.dedup_by_key(|call| call.addr);
     found
 }
@@ -329,8 +335,9 @@ impl Step {
 
 /// The step for an instruction whose control flow binform's decoder told,
 /// on an architecture whose calls pass arguments in registers `args` and
-/// may change the registers `clobbered` and the frame below the stack\n/// pointer. `None` for an instruction that goes
-/// on to the next, whose effect on the values the tracker models.
+/// may change the registers `clobbered` and the frame below the stack
+/// pointer. `None` for an instruction that goes on to the next, whose
+/// effect on the values the tracker models.
 pub(crate) fn flow(
     state: &mut State<'_>,
     insn: &Insn,

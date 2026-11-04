@@ -31,18 +31,13 @@ const MASK: u64 = 0xffff_ffff;
 /// assemblers emit as a `nop` too.
 const NOPS: [u32; 3] = [0x00_20f0, 0xf03d, 0x20_0000];
 
-/// Bytes of an instruction whose low nibble is `op0`: two for the narrow
-/// forms (`op0` 8 to 13), three otherwise (`op0` 14 and 15 are reserved,
-/// and decode as invalid).
-const fn length(op0: u32) -> usize {
-    if op0 >= 0x8 { 2 } else { 3 }
-}
-
-/// The instruction word at the start of `bytes`, and its length.
+/// The instruction word at the start of `bytes`, and its length: two bytes
+/// for the narrow forms (`op0` 8 to 13), three otherwise (`op0` 14 and 15
+/// are reserved, and decode as invalid).
 fn word(bytes: &[u8]) -> Option<(u32, u32)> {
-    let len = length(u32::from(*bytes.first()?) & 0xf);
-    let instr = u32::try_from(uint(bytes.get(..len)?, false)?).ok()?;
-    Some((instr, u32::try_from(len).ok()?))
+    let len = if bytes.first()? & 0xf >= 0x8 { 2 } else { 3 };
+    let instr = u32::try_from(uint(bytes.get(..usize::try_from(len).ok()?)?, false)?).ok()?;
+    Some((instr, len))
 }
 
 /// The word-aligned address an `l32r` at `addr` loads from: its 16-bit
@@ -131,9 +126,10 @@ impl Decode for Decoder {
                     written = Some(t);
                     Flow::Next
                 }
-                // The syncs (nop, memw, isync, ...), the returns from
-                // exceptions, break, syscall, waiti and the boolean
-                // reductions write no address register.
+                // RFEI: the returns from exceptions and interrupts.
+                3 => Flow::Return,
+                // The syncs (nop, memw, isync, ...), break, syscall, waiti
+                // and the boolean reductions write no address register.
                 _ => Flow::Next,
             },
             // Other QRST: writes the r register (ALU), or nothing.
@@ -183,6 +179,12 @@ impl Decode for Decoder {
                     0x0 | 0x1 | 0x9 | 0xb => written = Some(t),
                     _ => {}
                 }
+                Flow::Next
+            }
+            // LSCI (the floating-point loads and stores) and MAC16: the
+            // `u` forms, `ldinc` and `lddec` update the base register.
+            0x3 | 0x4 => {
+                written = Some(s);
                 Flow::Next
             }
             // CALLN: call0/call4/call8/call12 (the n field is the window), to
@@ -264,10 +266,11 @@ impl Decode for Decoder {
             self.set(reg, false);
             note = Note::Write(reg);
         }
-        let mut insn = Insn::new(len, flow);
-        insn.note = note;
-        insn.pad = NOPS.contains(&instr);
-        insn
+        Insn {
+            note,
+            pad: NOPS.contains(&instr),
+            ..Insn::new(len, flow)
+        }
     }
 
     fn reset(&mut self) {

@@ -320,9 +320,15 @@ pub(super) fn macho(
         .unwrap_or(0);
     let mut slots = ImportSlots::new(end);
     let mut budget = limits::LINKED_BYTES;
+    // Sections may all name one table: they share a bound on entries read.
+    let mut relocations = limits::RELOCATIONS;
     let mut linked = Vec::with_capacity(sections.len());
     for section in sections {
-        let count = u64::from(section.nreloc).min(limits::TABLE);
+        let count = usize::try_from(section.nreloc)
+            .unwrap_or(usize::MAX)
+            .min(relocations);
+        relocations = relocations.saturating_sub(count);
+        let count = u64::try_from(count).unwrap_or(0).min(limits::TABLE);
         let table = file_range(bytes, u64::from(section.reloff), count.saturating_mul(8));
         let mut data = Cow::Borrowed(file_range(bytes, section.offset, section.size));
         let writable = (section.code && !table.is_empty())
@@ -986,8 +992,10 @@ mod tests {
             at(0x800_1008, 0x800_5678),
         );
         let words: Vec<u32> = code
-            .chunks_exact(4)
-            .filter_map(|w| w.try_into().ok().map(u32::from_le_bytes))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|&w| u32::from_le_bytes(w))
             .collect();
         // bl +0x40; adrp x0, +4 pages; add x0, x0, #0x678
         assert_eq!(words, [0x9400_0010, 0x9000_0020, 0x9100_0000 | 0x678 << 10]);
@@ -1140,8 +1148,10 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let words = |code: &[u8]| -> Vec<u32> {
-            code.chunks_exact(4)
-                .filter_map(|w| w.try_into().ok().map(u32::from_le_bytes))
+            code.as_chunks::<4>()
+                .0
+                .iter()
+                .map(|&w| u32::from_le_bytes(w))
                 .collect()
         };
         // pcaddu18i ra, 0; jirl ra, ra, 0: a call 0x12345678 on, and back.

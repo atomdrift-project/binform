@@ -140,6 +140,7 @@ impl Decode for Decoder {
         state.loaded = None;
         state.scaled = None;
         state.indexed = None;
+        state.displaced = None;
         state.regs.forget(u64::from(VOLATILE));
     }
 
@@ -297,7 +298,6 @@ impl Cx<'_> {
 
     /// What a non-transfer `word` does to registers; `None` when it does
     /// not decode.
-    #[allow(clippy::too_many_lines)]
     fn step(&mut self, word: u32) -> Option<Note> {
         let rd = (word >> 21) & 0x1f;
         let ra = (word >> 16) & 0x1f;
@@ -336,11 +336,12 @@ impl Cx<'_> {
             0x02 | 0x03 | 0x06 | 0x07 if func == 0 => self.clobber(rd),
             // ADDI, ADDIK
             0x08 | 0x0c => self.add_imm(rd, ra, imm, scaled),
-            // RSUBI, ADDIC, RSUBIC, RSUBIK, ADDIKC, RSUBIKC
+            // RSUBI, RSUBIK
             0x09 | 0x0d => match self.get(ra) {
                 Some(value) => self.value(rd, uimm.wrapping_sub(value)),
                 None => self.clobber(rd),
             },
+            // ADDIC, RSUBIC, ADDIKC, RSUBIKC
             0x0a | 0x0b | 0x0e | 0x0f => self.clobber(rd),
             // MUL, barrel shifts, IDIV, FPU; MULI, barrel shifts by an
             // immediate.
@@ -505,7 +506,7 @@ impl Cx<'_> {
             return self.copy(rd, ra | rb);
         }
         // A register added to itself: doubled.
-        if ra == rb && ra != 0 && self.get(ra).is_none() {
+        if ra == rb && self.get(ra).is_none() {
             let shift = match scaled {
                 Some((reg, shift)) if reg == ra => shift.saturating_add(1),
                 _ => 1,

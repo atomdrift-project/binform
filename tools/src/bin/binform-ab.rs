@@ -26,6 +26,7 @@
 //! compare against.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fmt::Write as _;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitCode, Stdio};
@@ -298,7 +299,7 @@ fn compare(options: &Options, input: &Input) -> Option<Value> {
     let script = options
         .script
         .clone()
-        .unwrap_or_else(|| default_script(bytes, &image));
+        .unwrap_or_else(|| default_script(&image));
     let started = Instant::now();
     let rizin = run_rizin(options, input.rizin_path(), &script);
     let rizin_ms = started.elapsed().as_secs_f64() * 1e3;
@@ -484,15 +485,15 @@ fn save(dir: &Path, name: &str, script: &str, rows: &[Value]) -> std::io::Result
     let mut text = format!("{{\"script\": {},\n\"functions\": [\n", json!(script));
     for (i, function) in functions.iter().enumerate() {
         let comma = if i + 1 < functions.len() { "," } else { "" };
-        text.push_str(&format!("{}{comma}\n", json!(function)));
+        let _ = writeln!(text, "{}{comma}", json!(function));
     }
     text.push_str("]}\n");
     let path = dir.join(format!("{name}.rizin.json.zst"));
     std::fs::write(path, zstd::encode_all(text.as_bytes(), 19)?)
 }
 
-fn default_script(bytes: &[u8], image: &binform::Binary<'_>) -> String {
-    let pe = bytes.starts_with(b"MZ");
+fn default_script(image: &binform::Binary<'_>) -> String {
+    let pe = image.format() == binform::Format::Pe;
     let named = named(image);
     if pe && matches!(image.arch(), Some(Arch::X86 | Arch::X86_64)) {
         "aa; aac".into()
@@ -607,10 +608,10 @@ fn compare_layout(options: &Options, input: &Input) -> Option<Value> {
                 .unwrap_or_default()
         })
         .collect();
-    let ours: [Vec<String>; 3] = [
-        bin.sections().iter().map(|s| s.name.clone()).collect(),
-        bin.imports().iter().map(|i| i.name.clone()).collect(),
-        bin.exports().iter().map(|e| e.name.clone()).collect(),
+    let ours: [Vec<&str>; 3] = [
+        bin.sections().iter().map(|s| s.name.as_str()).collect(),
+        bin.imports().iter().map(|i| i.name.as_str()).collect(),
+        bin.exports().iter().map(|e| e.name.as_str()).collect(),
     ];
     for (i, table) in ["sections", "imports", "exports"].into_iter().enumerate() {
         let theirs: HashSet<String> = tables
@@ -650,7 +651,7 @@ fn compare_layout(options: &Options, input: &Input) -> Option<Value> {
         };
         let perm = row["perm"].as_str().unwrap_or("");
         // Rizin gives a section no loader maps the address -1.
-        let mapped = section.readable || section.writable || section.executable;
+        let mapped = section.mapped();
         let addr = if mapped { section.addr } else { u64::MAX };
         let same = row["vaddr"].as_u64() == Some(addr)
             && row["vsize"].as_u64() == Some(section.size)

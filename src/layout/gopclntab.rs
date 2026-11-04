@@ -137,12 +137,17 @@ impl<'a> Table<'a> {
     }
 
     /// Every function, in entry order, up to the first out of order. A
-    /// table cut short yields the functions before the cut.
+    /// table cut short yields the functions before the cut. Every record
+    /// may name the same long string: the table also ends where its names
+    /// spend [`limits::NAME_BYTES`].
     pub(super) fn functions(&self) -> Vec<(u64, String)> {
-        let mut last = 0;
+        let (mut last, mut names) = (0, limits::NAME_BYTES);
         (0..self.count)
             .map_while(|i| self.function(i))
-            .take_while(|&(entry, _)| std::mem::replace(&mut last, entry) <= entry)
+            .take_while(|(entry, name)| {
+                names = names.saturating_sub(name.len());
+                names > 0 && std::mem::replace(&mut last, *entry) <= *entry
+            })
             .collect()
     }
 }

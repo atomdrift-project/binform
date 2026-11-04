@@ -106,17 +106,18 @@ fn image<'a>(bytes: &'a [u8], macho: &MachO, arch: Arch) -> Binary<'a> {
         let table = file_range(bytes, section.offset, section.size);
         seeds.extend(go_seeds(gopclntab::functions(table, text, true, false)));
     }
-    // Stubs: each jumps through the symbol pointer its index names.
-    for section in sections {
-        if section.kind() != macho::S_SYMBOL_STUBS || section.reserved2 == 0 {
-            continue;
-        }
-        seeds.extend(
-            read::entries(section.addr, section.size, u64::from(section.reserved2))
-                .take(limits::STUBS)
-                .map(|stub| seed(stub, Origin::Stub)),
-        );
-    }
+    // Stubs: each jumps through the symbol pointer its index names. Every
+    // stub section may claim the address space: all share one bound.
+    seeds.extend(
+        sections
+            .iter()
+            .filter(|section| section.kind() == macho::S_SYMBOL_STUBS && section.reserved2 != 0)
+            .flat_map(|section| {
+                read::entries(section.addr, section.size, u64::from(section.reserved2))
+            })
+            .take(limits::STUBS)
+            .map(|stub| seed(stub, Origin::Stub)),
+    );
 
     let memory = Memory::new(&segments);
     let mut pads = eh::Pads::new(if macho.is_64 { 8 } else { 4 });
@@ -148,32 +149,39 @@ fn image<'a>(bytes: &'a [u8], macho: &MachO, arch: Arch) -> Binary<'a> {
 /// table names.
 fn slots(macho: &MachO) -> Vec<Slot> {
     let pointer: u64 = if macho.is_64 { 8 } else { 4 };
-    let mut slots = Vec::new();
-    for section in &macho.sections {
-        let kind = section.kind();
-        if kind != macho::S_NON_LAZY_SYMBOL_POINTERS && kind != macho::S_LAZY_SYMBOL_POINTERS {
-            continue;
-        }
-        let first = usize::try_from(section.reserved1).unwrap_or(usize::MAX);
-        let entries = macho.indirect.iter().skip(first);
-        for (slot, &index) in read::entries(section.addr, section.size, pointer).zip(entries) {
-            if index & macho::INDIRECT_SYMBOL_LOCAL_OR_ABS != 0 {
-                continue;
-            }
-            if let Some(symbol) = usize::try_from(index)
-                .ok()
-                .and_then(|index| macho.symbols.get(index))
-                && !symbol.name.is_empty()
-            {
-                slots.push(Slot {
-                    slot,
-                    name: symbol.name.clone(),
-                    import: None,
-                });
-            }
-        }
-    }
-    slots
+    // Every pointer section may name the same indirect entries, and every
+    // entry the same long name: one bound on both for all sections.
+    let mut names = limits::NAME_BYTES;
+    macho
+        .sections
+        .iter()
+        .filter(|section| {
+            matches!(
+                section.kind(),
+                macho::S_NON_LAZY_SYMBOL_POINTERS | macho::S_LAZY_SYMBOL_POINTERS
+            )
+        })
+        .flat_map(|section| {
+            let first = usize::try_from(section.reserved1).unwrap_or(usize::MAX);
+            read::entries(section.addr, section.size, pointer)
+                .zip(macho.indirect.iter().skip(first))
+        })
+        .take(usize::try_from(limits::TABLE).unwrap_or(usize::MAX))
+        .filter(|&(_, &index)| index & macho::INDIRECT_SYMBOL_LOCAL_OR_ABS == 0)
+        .filter_map(|(slot, &index)| {
+            let symbol = macho.symbols.get(usize::try_from(index).ok()?)?;
+            (!symbol.name.is_empty()).then_some((slot, symbol.name.as_str()))
+        })
+        .take_while(|&(_, name)| {
+            names = names.saturating_sub(name.len());
+            names > 0
+        })
+        .map(|(slot, name)| Slot {
+            slot,
+            name: name.to_owned(),
+            import: None,
+        })
+        .collect()
 }
 
 /// An install name's library stem: `/usr/lib/libSystem.B.dylib` is
@@ -307,7 +315,7 @@ fn unwind_info_lsdas(info: &[u8]) -> impl Iterator<Item = (u32, u32)> + '_ {
         info.get(start..end.max(start))
     })()
     .unwrap_or_default();
-    span.chunks_exact(8).filter_map(|pair| {
+    span.as_chunks::<8>().0.iter().filter_map(|pair| {
         let pair = Reader::new(pair, false);
         Some((pair.u32(0)?, pair.u32(4)?))
     })

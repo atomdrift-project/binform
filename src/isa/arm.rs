@@ -11,6 +11,8 @@
 
 use crate::isa::{Flow, Insn, Mem, Note, Regs, sext, u16_at, u32_at};
 
+/// The intra-procedure scratch register, r12, which stubs jump through.
+const IP: u32 = 12;
 /// The link register.
 const LR: u32 = 14;
 /// The stack pointer.
@@ -24,7 +26,7 @@ pub(crate) struct State {
     /// Thumb instructions left in the current `it` block, which run only
     /// when its condition holds.
     it: u8,
-    /// The address in `ip` (r12), from the arithmetic a PLT stub does.
+    /// The address in `ip` (r12), from the arithmetic an Arm PLT stub does.
     ip: Option<u64>,
     /// The slot whose pointer Arm code loaded into `ip` (`ldr ip, [ip]`).
     ip_slot: Option<u64>,
@@ -168,7 +170,7 @@ fn a32(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
         // BX
         match (word & 0xf, state.ip_slot) {
             (LR, _) => Flow::Return,
-            (12, Some(slot)) => Flow::JumpSlot(slot),
+            (IP, Some(slot)) => Flow::JumpSlot(slot),
             (rm, _) => Flow::JumpRegister(rm),
         }
     } else if word & 0x0fff_fff0 == 0x012f_ff30 {
@@ -221,7 +223,7 @@ fn a32(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
         match rn {
             SP if !pre => Flow::Return,
             PC if immediate => Flow::JumpSlot(at(pc)),
-            12 if immediate && pre => state
+            IP if immediate && pre => state
                 .ip
                 .map_or(Flow::JumpIndirect, |ip| Flow::JumpSlot(at(ip))),
             _ => Flow::JumpIndirect,
@@ -248,7 +250,7 @@ fn a32(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
         // The arithmetic a PLT stub finds its slot with, or the literal
         // a Windows CE import stub loads it from (`ldr ip, [pc, #n]; ldr pc,
         // [ip]`).
-        if rd == 12 {
+        if rd == IP {
             state.ip_slot = (word & 0x0fff_ffff == 0x059c_c000)
                 .then_some(state.ip)
                 .flatten();
@@ -308,18 +310,14 @@ fn thumb(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
             return Insn::new(2, Flow::Invalid);
         };
         let (first, second) = (u32::from(first), u32::from(second));
-        let flow = through_slot(state, t32(first, second, pc, conditional, state.ip), None);
-        track_t32(state, bytes, addr, first, second);
-        // MOVW, MOVT into ip: the address a Windows import thunk jumps
-        // through (`movw ip, #lo; movt ip, #hi; ldr.w pc, [ip]`).
-        let imm16 =
-            (first & 0xf) << 12 | (first >> 10 & 1) << 11 | (second >> 12 & 7) << 8 | second & 0xff;
-        let to_ip = second & 0x8000 == 0 && second >> 8 & 0xf == 12;
-        state.ip = match first & 0xfbf0 {
-            0xf240 if to_ip => Some(u64::from(imm16)),
-            0xf2c0 if to_ip => state.ip.map(|ip| ip & 0xffff | u64::from(imm16) << 16),
+        // The address a Windows import thunk jumps through (`movw ip, #lo;
+        // movt ip, #hi; ldr.w pc, [ip]`).
+        let ip = match state.regs.get(IP) {
+            Some(Held::Address(ip)) => Some(u64::from(ip)),
             _ => None,
         };
+        let flow = t32(first, second, pc, conditional, ip);
+        track_t32(state, bytes, addr, first, second);
         let mut decoded = insn(4, flow, conditional);
         if flow == Flow::Next {
             // CMP.W rn, #imm
@@ -385,7 +383,7 @@ fn thumb(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
     } else {
         Flow::Next
     };
-    let flow = through_slot(state, flow, Some(word));
+    let flow = through_slot(state, flow, word);
     track_t16(state, bytes, addr, word);
     let mut decoded = insn(2, flow, conditional);
     // NOP and the other hints, `mov r8, r8`
@@ -402,10 +400,7 @@ fn thumb(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
 /// `flow`, a call or jump through a register (`blx rm`, `bx rm`, from the
 /// 16-bit `word` that does it), as one through the slot that register was
 /// loaded from.
-fn through_slot(state: &State, flow: Flow, word: Option<u32>) -> Flow {
-    let Some(word) = word else {
-        return flow;
-    };
+fn through_slot(state: &State, flow: Flow, word: u32) -> Flow {
     let rm = (word >> 3) & 0xf;
     match (flow, state.regs.get(rm)) {
         (Flow::CallIndirect, Some(Held::Loaded(slot))) if word & 0xff87 == 0x4780 => {
@@ -431,10 +426,6 @@ fn forget(state: &mut State, writes: Writes) {
     });
 }
 
-fn set(state: &mut State, reg: u32, held: Option<Held>) {
-    state.regs.set(reg, held);
-}
-
 /// `held`, an address `offset` on, loaded from.
 fn load(held: Option<Held>, offset: u32) -> Option<Held> {
     match held? {
@@ -452,17 +443,17 @@ fn track_t16(state: &mut State, bytes: &[u8], addr: u64, word: u32) {
     if word & 0xf800 == 0x4800 {
         let at = (addr.wrapping_add(4) & !3).wrapping_add(u64::from(word & 0xff) << 2);
         let value = literal(bytes, addr, at).map(Held::Address);
-        return set(state, high, value);
+        return state.regs.set(high, value);
     }
     // LDR rt, [rn, #imm5 * 4]
     if word & 0xf800 == 0x6800 {
         let value = load(held((word >> 3) & 7), ((word >> 6) & 0x1f) << 2);
-        return set(state, low, value);
+        return state.regs.set(low, value);
     }
     // MOV rd, rm (high registers too)
     if word & 0xff00 == 0x4600 {
         let rd = (word >> 4) & 8 | low;
-        return set(state, rd, held((word >> 3) & 0xf));
+        return state.regs.set(rd, held((word >> 3) & 0xf));
     }
     let writes = match word >> 11 {
         // Shifts, ADD/SUB (register, 3-bit immediate)
@@ -488,8 +479,8 @@ fn track_t16(state: &mut State, bytes: &[u8], addr: u64, word: u32) {
         0x0c..=0x12 => Writes::None,
         // LDR (SP-relative), ADR, ADD rd, sp
         0x13..=0x15 => Writes::Regs(1 << high),
-        // POP
-        0x17 if word & 0x0600 == 0x0400 => Writes::Regs(word & 0x1ff),
+        // POP (bit 8, the PC, makes it a return)
+        0x17 if word & 0x0600 == 0x0400 => Writes::Regs(word & 0xff),
         // SXTH and the like, REV and the like.
         0x16 | 0x17 if word & 0x0f00 == 0x0200 || word & 0x0f00 == 0x0a00 => Writes::Regs(1 << low),
         // PUSH, CBZ, IT, hints, ADD/SUB sp
@@ -514,13 +505,13 @@ fn track_t32(state: &mut State, bytes: &[u8], addr: u64, first: u32, second: u32
         (first & 0xf) << 12 | (first >> 10 & 1) << 11 | (second >> 12 & 7) << 8 | second & 0xff;
     match first & 0xfbf0 {
         // MOVW, MOVT
-        0xf240 if second & 0x8000 == 0 => return set(state, rd, Some(Held::Address(imm16))),
+        0xf240 if second & 0x8000 == 0 => return state.regs.set(rd, Some(Held::Address(imm16))),
         0xf2c0 if second & 0x8000 == 0 => {
             let value = match held(rd) {
                 Some(Held::Address(low)) => Some(Held::Address(low & 0xffff | imm16 << 16)),
                 _ => None,
             };
-            return set(state, rd, value);
+            return state.regs.set(rd, value);
         }
         _ => {}
     }
@@ -534,12 +525,12 @@ fn track_t32(state: &mut State, bytes: &[u8], addr: u64, first: u32, second: u32
             base.wrapping_sub(offset)
         };
         let value = literal(bytes, addr, at).map(Held::Address);
-        return set(state, rt, value);
+        return state.regs.set(rt, value);
     }
     // LDR.W rt, [rn, #imm12]
     if first & 0xfff0 == 0xf8d0 {
         let value = load(held(rn), second & 0xfff);
-        return set(state, rt, value);
+        return state.regs.set(rt, value);
     }
     let writes = if first & 0xf800 == 0xf000 && second & 0x8000 == 0 {
         // Data processing with an immediate.
@@ -646,7 +637,7 @@ fn t32(first: u32, second: u32, pc: u64, conditional: bool, ip: Option<u64>) -> 
             // `pop.w {pc}`: post-indexed from the stack.
             SP if first & 0xfff0 == 0xf850 && second & 0x0f00 == 0x0b00 => Flow::Return,
             // An import thunk's `ldr.w pc, [ip, #n]`.
-            12 if first & 0xfff0 == 0xf8d0 => ip.map_or(Flow::JumpIndirect, |ip| {
+            IP if first & 0xfff0 == 0xf8d0 => ip.map_or(Flow::JumpIndirect, |ip| {
                 Flow::JumpSlot(wrap(ip.wrapping_add(u64::from(second & 0xfff))))
             }),
             _ => Flow::JumpIndirect,

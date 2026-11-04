@@ -181,18 +181,14 @@ impl<'a> State<'a> {
     /// the walk does not know.
     pub(crate) fn forget(&mut self, off: i64, width: u16) {
         let end = off.saturating_add(i64::from(width));
-        self.bytes.retain(|&at, _| !(off..end).contains(&at));
+        self.bytes.extract_if(off..end, |_, _| true).for_each(drop);
         // A stored pointer is at most eight bytes wide, so one that overlaps
         // starts at most seven bytes before `off`.
-        let stale: Vec<i64> = self
-            .pointers
-            .range(off.saturating_sub(7)..end)
-            .filter(|&(&at, &(_, w))| at.saturating_add(i64::from(w)) > off)
-            .map(|(&at, _)| at)
-            .collect();
-        for at in stale {
-            self.pointers.remove(&at);
-        }
+        self.pointers
+            .extract_if(off.saturating_sub(7)..end, |&at, &mut (_, w)| {
+                at.saturating_add(i64::from(w)) > off
+            })
+            .for_each(drop);
     }
 
     /// Forget the whole frame: a store into it at an offset the walk cannot

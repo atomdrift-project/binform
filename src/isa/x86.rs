@@ -93,21 +93,9 @@ fn near(instruction: &Instruction) -> Option<u64> {
 /// The register a 32-bit PC thunk (`mov reg, [esp]; ret`) at the start of
 /// `bytes` returns the caller's address in.
 pub(crate) fn pc_thunk(bytes: &[u8]) -> Option<u32> {
-    const REGISTERS: [Register; 8] = [
-        Register::EAX,
-        Register::ECX,
-        Register::EDX,
-        Register::EBX,
-        Register::ESP,
-        Register::EBP,
-        Register::ESI,
-        Register::EDI,
-    ];
+    // `reg` numbers the register as `register_id` does.
     match *bytes.get(..4)? {
-        [0x8b, modrm, 0x24, 0xc3] if modrm & 0xc7 == 0x04 => REGISTERS
-            .get(usize::from(modrm >> 3 & 7))
-            .copied()
-            .map(register_id),
+        [0x8b, modrm, 0x24, 0xc3] if modrm & 0xc7 == 0x04 => Some(u32::from(modrm >> 3 & 7)),
         _ => None,
     }
 }

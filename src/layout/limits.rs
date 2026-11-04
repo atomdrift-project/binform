@@ -7,7 +7,7 @@
 /// relocations, dynamic entries, exception data, version records.
 pub(super) const TABLE: u64 = 1 << 20;
 
-/// Relocation entries read from all of an ELF file's tables together.
+/// Relocation entries read from all of an object's tables together.
 /// Section headers may point many tables at the same bytes.
 pub(super) const RELOCATIONS: usize = 1 << 21;
 
@@ -27,14 +27,14 @@ pub(super) const DESCRIPTORS: u64 = 1 << 12;
 /// Entries read from one PE import descriptor's lookup table.
 pub(super) const THUNKS: u64 = 1 << 16;
 
-/// PE imports read across both import tables. Descriptors may share one
-/// lookup table, so a few kilobytes can claim billions; real binaries
-/// import thousands at most.
+/// PE import lookup-table entries read across both import tables.
+/// Descriptors may share one lookup table, so a few kilobytes can claim
+/// billions; real binaries import thousands at most.
 pub(super) const IMPORTS: usize = 1 << 18;
 
-/// Name bytes copied out of a file's import, export and bind tables. Every
-/// entry may name the same long string; real tables hold well under a
-/// megabyte of names.
+/// Name bytes copied out of each of a file's symbol, import, export, bind
+/// and Go function tables. Every entry may name the same long string; real
+/// tables hold well under a megabyte of names.
 pub(super) const NAME_BYTES: usize = 32 << 20;
 
 /// The longest name read: symbol, section, library or function.
@@ -49,7 +49,7 @@ pub(super) const UNWIND_CHAIN: usize = 32;
 /// Nodes visited in a Mach-O export trie.
 pub(super) const TRIE_NODES: usize = 1 << 20;
 
-/// Stubs read from one stub section or PLT.
+/// Stubs read from one PLT, or from all of a Mach-O file's stub sections.
 pub(super) const STUBS: usize = 1 << 16;
 
 /// Entries read from one initializer or finalizer array.

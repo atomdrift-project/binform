@@ -154,7 +154,7 @@ fn image<'a>(bytes: &'a [u8], pe: &Pe<'_>, arch: Arch, layout: Binary<'a>) -> Bi
         })
         .collect();
 
-    let go = go_functions(&segments);
+    let go = go_functions(&segments, bytes.len());
     // ARMNT code addresses carry Thumb's bit 0, as `.pdata` writes them;
     // Windows CE's set it for Thumb code only. Go's `windows/arm` port is
     // the exception: it emits A32 code under the ARMNT machine.
@@ -218,15 +218,19 @@ fn image<'a>(bytes: &'a [u8], pe: &Pe<'_>, arch: Arch, layout: Binary<'a>) -> Bi
 /// section of its own: the first header in data whose first function is
 /// code, of at most [`limits::GO_HEADERS`] tried. Entries count from the
 /// first code section when the header leaves the text start to the loader.
-fn go_functions(segments: &[Segment<'_>]) -> Vec<(u64, String)> {
+/// Sections may all map the same bytes: no more than `file_len` bytes are
+/// searched.
+fn go_functions(segments: &[Segment<'_>], file_len: usize) -> Vec<(u64, String)> {
     let memory = Memory::new(segments);
     let text = segments
         .iter()
         .find(|segment| segment.executable)
         .map(|segment| segment.addr);
     let mut tried = 0_usize;
+    let mut scan = file_len;
     for segment in segments.iter().filter(|segment| !segment.executable) {
-        let data: &[u8] = &segment.bytes;
+        let data: &[u8] = segment.bytes.get(..scan).unwrap_or(&segment.bytes);
+        scan = scan.saturating_sub(data.len());
         let r = Reader::new(data, false);
         // Each header starts at a pointer-aligned magic number, two zero
         // bytes, the instruction size quantum, and the pointer size.
@@ -281,7 +285,7 @@ mod tests {
             executable: false,
         }];
         let start = std::time::Instant::now();
-        assert!(go_functions(&segments).is_empty());
+        assert!(go_functions(&segments, data.len()).is_empty());
         assert!(start.elapsed().as_secs() < 5);
     }
 }

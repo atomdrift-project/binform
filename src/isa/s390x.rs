@@ -143,7 +143,7 @@ fn note(state: &mut State, insn: &[u8], addr: u64) -> Note {
     match (byte(0), byte(5), r2) {
         // LARL
         (0xc0, _, 0) => {
-            state.scaled = scaled;
+            state.scaled = scaled.filter(|&(reg, _)| reg != r1);
             Note::Address {
                 reg: r1,
                 addr: relative(addr, imm32(), 32, 2),
@@ -238,9 +238,10 @@ fn writes(insn: &[u8]) -> u32 {
         0x98 => range(),
         // SI and SS forms: memory only.
         0x91..=0x97 | 0xd0..=0xdf | 0xe5 | 0xe8..=0xea | 0xee | 0xef => 0,
-        // TM, CHI, CGHI and the relative branches.
+        // TM, BRC, CHI, CGHI write nothing; BRAS links into r1, BRCT and
+        // BRCTG count it down, and the rest load or compute it.
         0xa7 => match byte(1) & 0xf {
-            0..=7 | 0xe | 0xf => 0,
+            0..=4 | 0xe | 0xf => 0,
             _ => one,
         },
         // CGR, CLGR, CGFR, CLGFR

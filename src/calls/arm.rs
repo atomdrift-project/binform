@@ -67,7 +67,11 @@ impl<'a> Tracker<'a> for Arm<'a> {
         let conditional = if thumb {
             let inside = self.it > 0;
             let left = self.it.saturating_sub(1);
-            self.it = half(bytes).and_then(it_block).unwrap_or(left);
+            // An `it` makes up to four instructions after it conditional,
+            // as many as its mask has bits above the lowest set one.
+            self.it = half(bytes)
+                .filter(|h| h & 0xff00 == 0xbf00 && h & 0xf != 0)
+                .map_or(left, |h| 4_u32.saturating_sub((h & 0xf).trailing_zeros()));
             inside
         } else {
             word(bytes).is_some_and(|w| w >> 28 < 0b1110)
@@ -133,13 +137,6 @@ fn is_svc(bytes: &[u8], thumb: bool) -> bool {
     } else {
         word(bytes).is_some_and(|w| w & 0x0fff_ffff == 0x0f00_0000 && w >> 28 != 0b1111)
     }
-}
-
-/// The count of instructions a Thumb `it` halfword makes conditional, or
-/// `None` when `h` is no `it`.
-fn it_block(h: u32) -> Option<u32> {
-    let mask = h & 0xf;
-    (h & 0xff00 == 0xbf00 && mask != 0).then(|| 4_u32.saturating_sub(mask.trailing_zeros()))
 }
 
 /// A little-endian 16-bit halfword, widened.
@@ -358,9 +355,7 @@ fn a32(state: &mut State<'_>, w: u32, pc: u64) {
         let offset = if bit(25) {
             // A register offset, unshifted.
             match state.get(rm) {
-                Val::Int(n) if w & 0xff0 == 0 => {
-                    Some(i64::from(u32::try_from(n & 0xffff_ffff).unwrap_or(0)))
-                }
+                Val::Int(n) if w & 0xff0 == 0 => Some((n & 0xffff_ffff).cast_signed()),
                 _ => None,
             }
         } else {
@@ -382,7 +377,7 @@ fn a32(state: &mut State<'_>, w: u32, pc: u64) {
             Some(i64::from((w >> 4 & 0xf0) | (w & 0xf)))
         } else {
             match state.get(rm) {
-                Val::Int(n) => Some(i64::from(u32::try_from(n & 0xffff_ffff).unwrap_or(0))),
+                Val::Int(n) => Some((n & 0xffff_ffff).cast_signed()),
                 _ => None,
             }
         };

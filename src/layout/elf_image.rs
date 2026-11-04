@@ -23,8 +23,9 @@ pub(super) fn binary<'a>(bytes: &'a [u8], elf: &Elf) -> Binary<'a> {
         return image(bytes, elf, arch);
     }
     let addrs: Vec<u64> = elf.sections.iter().map(|sh| sh.addr).collect();
-    let tables = tables(elf, &addrs, &slots(elf), elf.kind == elf::ET_REL);
-    bare(Format::Elf, elf.entry, tables, Vec::new())
+    let slots = slots(elf);
+    let tables = tables(elf, &addrs, &slots, elf.kind == elf::ET_REL);
+    bare(Format::Elf, elf.entry, tables, slots)
 }
 
 /// The instruction set of an ELF file's machine, word size and byte order.
@@ -211,6 +212,9 @@ fn mapped(memory: &Memory<'_>, addr: u64, size: u64) -> u64 {
 /// An executable's loaded sections, as segments, with the data objects
 /// that lie in code split out of it.
 fn section_segments<'a>(bytes: &'a [u8], elf: &Elf, arch: Arch) -> Vec<Segment<'a>> {
+    // Sections may all map the same bytes: count no more zeros than the
+    // file holds.
+    let mut zeros_left = bytes.len();
     let segments = elf
         .sections
         .iter()
@@ -223,7 +227,13 @@ fn section_segments<'a>(bytes: &'a [u8], elf: &Elf, arch: Arch) -> Vec<Segment<'
             // whole `.plt` but the entries' first jumps), which the dynamic
             // linker fills.
             let zeros = if executable && matches!(arch, Arch::Sparc | Arch::Sparc64) {
-                data.iter().take_while(|&&b| b == 0).count() & !15
+                let zeros = data
+                    .iter()
+                    .take(zeros_left)
+                    .take_while(|&&b| b == 0)
+                    .count();
+                zeros_left = zeros_left.saturating_sub(zeros);
+                zeros & !15
             } else {
                 0
             };

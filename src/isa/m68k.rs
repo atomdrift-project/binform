@@ -404,7 +404,6 @@ impl Decoder {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     fn step(&mut self, op: u16, words: &mut Words<'_>) -> Option<(Flow, Note)> {
         let mode = op >> 3 & 7;
         let reg = op & 7;
@@ -538,8 +537,9 @@ impl Decoder {
                         };
                         (Flow::Next, note)
                     }
-                    // SBCD, ABCD; SUBX, ADDX; EXG
+                    // SBCD, ABCD; SUBX.B, ADDX.B
                     (4, 0 | 1) => (Flow::Next, self.clobber(dreg)),
+                    // EXG
                     (5 | 6, 0 | 1) if group == 0xc => {
                         let note = Note::Clobber(0x101 << dreg | 0x101 << reg);
                         self.set(dreg, None);
@@ -749,7 +749,6 @@ impl Decoder {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     fn group4(
         &mut self,
         op: u16,

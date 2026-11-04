@@ -416,8 +416,7 @@ impl Decoder {
                         clobber(rt),
                         |value| {
                             let value = if signed {
-                                i64::from(u32::try_from(value).unwrap_or(0).cast_signed())
-                                    .cast_unsigned()
+                                sext(value, 32).cast_unsigned()
                             } else {
                                 value
                             };
@@ -657,16 +656,13 @@ fn gp_setup(big: bool, bytes: &[u8]) -> Option<(i64, bool)> {
     }
     let addiu = |w: u32| w >> 16 == 0x279c || w >> 16 == 0x679c;
     let add_t9 = |w: u32| w == 0x0399_e021 || w == 0x0399_e02d;
-    let rest: Vec<u32> = [4, 8, 12]
-        .into_iter()
-        .filter_map(|at| u32_at(bytes, at, big))
-        .collect();
-    let low = rest.iter().copied().find(|&w| addiu(w))?;
-    if !aui && !rest.iter().copied().any(add_t9) {
+    // A missing word leaves the ones after it missing too.
+    let rest = [4, 8, 12].map(|at| u32_at(bytes, at, big));
+    let low = rest.iter().flatten().copied().find(|&w| addiu(w))?;
+    if !aui && !rest.iter().flatten().copied().any(add_t9) {
         return None;
     }
-    let cpload = !aui
-        && matches!(rest.as_slice(), [second, third, ..] if addiu(*second) && *third == 0x0399_e021);
+    let cpload = !aui && matches!(rest, [Some(second), Some(0x0399_e021), _] if addiu(second));
     let (hi, lo) = (sext(first << 16, 32), sext(low, 16));
     Some((hi.wrapping_add(lo), cpload))
 }

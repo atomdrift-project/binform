@@ -248,8 +248,15 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Elf, Error> {
         .get(usize::from(header.shstrndx))
         .map(|sh| (sh.offset, sh.size))
     {
+        // Every section may name the same long string: past a budget of
+        // name bytes, sections are nameless.
+        let mut budget = limits::NAME_BYTES;
         for (sh, &name) in sections.iter_mut().zip(&names) {
+            if budget == 0 {
+                break;
+            }
             sh.name = string(&r, strings, name);
+            budget = budget.saturating_sub(sh.name.len());
         }
     }
 
@@ -387,6 +394,9 @@ impl Elf {
     }
 
     fn read_symbols(&mut self, r: &Reader<'_>) {
+        // Every symbol may name the same long string: both tables share one
+        // budget of name bytes.
+        let mut names = limits::NAME_BYTES;
         for kind in [SHT_SYMTAB, SHT_DYNSYM] {
             let Some(sh) = self.sections.iter().find(|sh| sh.kind == kind) else {
                 continue;
@@ -395,7 +405,7 @@ impl Elf {
                 .ok()
                 .and_then(|i| self.sections.get(i))
                 .map_or((0, 0), |strtab| (strtab.offset, strtab.size));
-            let symbols = self.symbol_table(r, sh.offset, sh.size, sh.entsize, strings);
+            let symbols = self.symbol_table(r, sh.offset, sh.size, sh.entsize, strings, &mut names);
             if kind == SHT_SYMTAB {
                 self.symbols = symbols;
             } else {
@@ -403,7 +413,7 @@ impl Elf {
             }
         }
         if self.dynamic_symbols.is_empty() {
-            self.dynamic_symbols = self.dynamic_symbol_table(r);
+            self.dynamic_symbols = self.dynamic_symbol_table(r, &mut names);
         }
     }
 
@@ -414,6 +424,7 @@ impl Elf {
         size: u64,
         entsize: u64,
         strings: (u64, u64),
+        names: &mut usize,
     ) -> Vec<Symbol> {
         let least = if self.is_64 { 24 } else { 16 };
         entries(offset, size, entsize.max(least))
@@ -429,8 +440,15 @@ impl Elf {
                         u64::from(entry.u32(8)?),
                     )
                 };
+                // Past the budget, symbols keep their values, not names.
+                let name = if *names == 0 {
+                    String::new()
+                } else {
+                    string(r, strings, entry.u32(0)?)
+                };
+                *names = names.saturating_sub(name.len());
                 Some(Symbol {
-                    name: string(r, strings, entry.u32(0)?),
+                    name,
                     kind: info & 0xf,
                     bind: info >> 4,
                     shndx,
@@ -444,7 +462,7 @@ impl Elf {
 
     /// The symbol table the dynamic section names, for a file whose section
     /// table is gone. Its length is the hash table's symbol count.
-    fn dynamic_symbol_table(&self, r: &Reader<'_>) -> Vec<Symbol> {
+    fn dynamic_symbol_table(&self, r: &Reader<'_>, names: &mut usize) -> Vec<Symbol> {
         let at = |tag| {
             self.dynamic_value(tag)
                 .and_then(|addr| self.offset_of(addr))
@@ -465,6 +483,7 @@ impl Elf {
             count.saturating_mul(entsize),
             entsize,
             (strtab, strsz),
+            names,
         )
     }
 
@@ -491,6 +510,8 @@ impl Elf {
             return;
         };
         let versions = r.at(versym);
+        // Every symbol may require the version of one long file name.
+        let mut names = limits::NAME_BYTES;
         for (i, symbol) in (0_u64..).zip(self.dynamic_symbols.iter_mut()) {
             if symbol.shndx != SHN_UNDEF {
                 continue;
@@ -502,8 +523,14 @@ impl Elf {
             else {
                 break;
             };
-            if version >= FIRST_VERSION {
-                symbol.library = files.get(&version).cloned();
+            if version >= FIRST_VERSION
+                && let Some(file) = files.get(&version)
+            {
+                names = names.saturating_sub(file.len());
+                if names == 0 {
+                    break;
+                }
+                symbol.library = Some(file.clone());
             }
         }
     }

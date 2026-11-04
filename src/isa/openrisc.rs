@@ -202,7 +202,6 @@ impl Cx<'_> {
 
     /// What a non-transfer `word` does to registers; `None` when it does
     /// not decode.
-    #[allow(clippy::too_many_lines)]
     fn step(&mut self, word: u32) -> Option<Note> {
         let rd = (word >> 21) & 0x1f;
         let ra = (word >> 16) & 0x1f;

@@ -610,7 +610,7 @@ impl Cx<'_> {
                 )
             }
             // Zcb's byte and halfword loads and stores.
-            (0, 4) if (h >> 10) & 7 < 4 && (h >> 11) & 1 == 0 => (Flow::Next, self.clobber(rd_c)),
+            (0, 4) if (h >> 10) & 7 < 2 => (Flow::Next, self.clobber(rd_c)),
             // FP loads, stores.
             (0, _) => (Flow::Next, Note::None),
             // C.ADDI (C.NOP with rd zero).
@@ -754,15 +754,10 @@ impl Decode for Decoder {
     }
 
     fn call(&mut self) {
-        let pending = &mut self.state.pending;
-        pending.loaded = None;
-        pending.scaled = None;
-        pending.indexed = None;
+        self.state.pending = Pending::default();
         self.state.regs.forget(u64::from(VOLATILE));
     }
 
-    /// The stack pointer lowered (`addi sp, sp, -n`, `c.addi16sp sp, -n`,
-    /// `c.addi sp, -n`) among the first three instructions.
     fn starts_frame(&self, bytes: &[u8]) -> bool {
         starts_frame(bytes)
     }
@@ -779,10 +774,7 @@ fn starts_frame(bytes: &[u8]) -> bool {
         };
         if half & 3 != 3 {
             // C.ADDI16SP and C.ADDI sp with the sign bit set.
-            if half & 0xef83 == 0x6101 && half & 0x1000 != 0 {
-                return true;
-            }
-            if half & 0xef83 == 0x0101 && half & 0x1000 != 0 {
+            if matches!(half & 0xef83, 0x6101 | 0x0101) && half & 0x1000 != 0 {
                 return true;
             }
             at = at.saturating_add(2);

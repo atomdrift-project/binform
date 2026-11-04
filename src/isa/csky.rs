@@ -59,22 +59,14 @@ fn pool(h: u32, addr: u64) -> u64 {
 }
 
 impl Decoder {
-    fn get(&self, reg: u32) -> Option<(u32, Kind)> {
-        self.regs.get(reg)
-    }
-
-    fn set(&mut self, reg: u32, value: Option<(u32, Kind)>) {
-        self.regs.set(reg, value);
-    }
-
     fn clobber(&mut self, reg: u32) -> Note {
-        self.set(reg, None);
+        self.regs.set(reg, None);
         Note::Clobber(1 << (reg & 15))
     }
 
     /// `reg = value`: an address when it came from a literal pool.
     fn constant(&mut self, reg: u32, value: u32, kind: Kind) -> Note {
-        self.set(reg, Some((value, kind)));
+        self.regs.set(reg, Some((value, kind)));
         let value = u64::from(value);
         if kind == Kind::Pool {
             Note::Address { reg, addr: value }
@@ -125,13 +117,13 @@ fn decode(state: &mut Decoder, bytes: &[u8], addr: u64) -> Insn {
                 (_, Some(value)) => {
                     // An offset the next instruction adds to the PC (the
                     // GOT base's, a far branch's) is no address.
-                    let offset = half(bytes, 2) == u16::try_from(0x1cf0 | r).ok();
+                    let offset = half(bytes, 2).is_some_and(|next| u32::from(next) == 0x1cf0 | r);
                     let kind = if offset { Kind::Imm } else { Kind::Pool };
                     note = state.constant(r, value, kind);
                     Flow::Next
                 }
                 _ => {
-                    state.set(r, None);
+                    state.regs.set(r, None);
                     note = Note::Fetch {
                         reg: r,
                         mem: Mem {
@@ -157,12 +149,12 @@ fn decode(state: &mut Decoder, bytes: &[u8], addr: u64) -> Insn {
             // rts
             0x00cf => Flow::Return,
             // jmp rx: a jump to a constant (a far branch), or a table.
-            0x00c0..=0x00ce => match state.get(z) {
+            0x00c0..=0x00ce => match state.regs.get(z) {
                 Some((to, _)) => Flow::Jump(u64::from(to)),
                 None => Flow::JumpRegister(z),
             },
             // jsr rx
-            0x00d0..=0x00df => match state.get(z) {
+            0x00d0..=0x00df => match state.regs.get(z) {
                 Some((to, _)) => Flow::Call(u64::from(to)),
                 None => Flow::CallRegister(z),
             },
@@ -172,11 +164,12 @@ fn decode(state: &mut Decoder, bytes: &[u8], addr: u64) -> Insn {
             }
         },
     };
-    let mut insn = Insn::new(2, flow);
-    insn.note = note;
-    // mov r0, r0
-    insn.pad = h == 0x1200;
-    insn
+    Insn {
+        note,
+        // mov r0, r0
+        pad: h == 0x1200,
+        ..Insn::new(2, flow)
+    }
 }
 
 /// A branch's target: an 11-bit halfword displacement from `next`.
@@ -194,20 +187,15 @@ fn step(state: &mut Decoder, h: u32, z: u32, x: u32) -> Note {
         0x00 if h < 0x40 => state.clobber(z),
         // ldq: r4-r7
         0x00 if h < 0x50 => {
-            for reg in 4..8 {
-                state.set(reg, None);
-            }
+            state.regs.forget(0xf0);
             Note::Clobber(0xf0)
         }
         // stq, stm
         0x00 if h < 0x60 || (0x70..0x80).contains(&h) => Note::None,
         // ldm rz-r15, (r0)
         0x00 if h < 0x70 => {
-            let mut mask = 0;
-            for reg in z..16 {
-                state.set(reg, None);
-                mask |= 1 << reg;
-            }
+            let mask = 0xffff_u32 << z & 0xffff;
+            state.regs.forget(mask.into());
             Note::Clobber(mask)
         }
         // tstnbz
@@ -215,16 +203,16 @@ fn step(state: &mut Decoder, h: u32, z: u32, x: u32) -> Note {
         // One-register operations on rz.
         0x00 | 0x01 => state.clobber(z),
         // mov rz, rx
-        0x12 => match state.get(x) {
+        0x12 => match state.regs.get(x) {
             Some((value, kind)) => state.constant(z, value, kind),
             None if z == x => Note::None,
             None => {
-                state.set(z, None);
+                state.regs.set(z, None);
                 Note::Copy { reg: z, src: x }
             }
         },
         // addu rz, rx
-        0x1c => match state.get(z).zip(state.get(x)) {
+        0x1c => match state.regs.get(z).zip(state.regs.get(x)) {
             Some(((a, ka), (b, kb))) => {
                 let sum = a.wrapping_add(b);
                 let kind = match (ka, kb) {
@@ -242,7 +230,7 @@ fn step(state: &mut Decoder, h: u32, z: u32, x: u32) -> Note {
             None => state.clobber(z),
         },
         // subu rz, rx
-        0x05 => match state.get(z).zip(state.get(x)) {
+        0x05 => match state.regs.get(z).zip(state.regs.get(x)) {
             Some(((a, ka), (b, _))) => state.constant(z, a.wrapping_sub(b), ka),
             None => state.clobber(z),
         },
@@ -253,7 +241,7 @@ fn step(state: &mut Decoder, h: u32, z: u32, x: u32) -> Note {
         // addi, subi rz, imm + 1
         0x20 | 0x21 | 0x24 | 0x25 => {
             let imm = imm5.wrapping_add(1);
-            match state.get(z) {
+            match state.regs.get(z) {
                 Some((value, kind)) => {
                     let value = if h >> 9 == 0x10 {
                         value.wrapping_add(imm)
@@ -274,7 +262,7 @@ fn step(state: &mut Decoder, h: u32, z: u32, x: u32) -> Note {
             state.constant(z, u32::MAX >> 32_u32.wrapping_sub(imm5), Kind::Imm)
         }
         // bseti, bclri, lsli on a constant
-        0x34 | 0x35 | 0x30 | 0x31 | 0x3c | 0x3d => match state.get(z) {
+        0x34 | 0x35 | 0x30 | 0x31 | 0x3c | 0x3d => match state.regs.get(z) {
             Some((value, kind)) => {
                 let value = match h >> 9 {
                     0x1a => value | 1 << imm5,
@@ -298,8 +286,8 @@ fn step(state: &mut Decoder, h: u32, z: u32, x: u32) -> Note {
         0x80..=0x8f => {
             let rz = (h >> 8) & 15;
             let disp = u64::from((h >> 4) & 15) << 2;
-            let base = state.get(z);
-            state.set(rz, None);
+            let base = state.regs.get(z);
+            state.regs.set(rz, None);
             Note::Fetch {
                 reg: rz,
                 mem: match base {
@@ -335,7 +323,7 @@ impl Decode for Decoder {
     /// The state a block starts in: nothing known but the GOT base.
     fn reset(&mut self) {
         self.regs = Regs::default();
-        self.set(GB, self.gb.map(|gb| (gb, Kind::Gb)));
+        self.regs.set(GB, self.gb.map(|gb| (gb, Kind::Gb)));
     }
 
     fn call(&mut self) {

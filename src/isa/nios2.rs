@@ -168,11 +168,11 @@ impl crate::isa::Decode for Decoder {
             ),
             // ldw, ldwio
             0x17 | 0x37 => (Flow::Next, self.load_word(a, b, simm)),
-            // Stores, cache operations and the custom instruction: nothing a
-            // jump table needs (a custom instruction may write rC, forgotten).
+            // Stores and cache operations: nothing a jump table needs.
             0x05 | 0x0d | 0x15 | 0x25 | 0x2d | 0x35 | 0x13 | 0x1b | 0x33 | 0x3b => {
                 (Flow::Next, Note::None)
             }
+            // custom: may write rC.
             0x32 => (Flow::Next, self.set((w >> 17) & 31, None)),
             // Other loads, compares and immediate ALU operations write rB.
             0x03 | 0x07 | 0x0b | 0x0f | 0x23 | 0x27 | 0x2b | 0x2f | 0x08 | 0x10 | 0x18 | 0x20

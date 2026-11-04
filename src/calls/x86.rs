@@ -83,8 +83,13 @@ impl<'a> Tracker<'a> for X86<'a> {
                 _ => None,
             };
             let args = args.iter().map(|&r| mode.value(state, r)).collect();
-            // The kernel returns in the number register; the rest survive.
+            // The kernel returns in the number register; `syscall` itself
+            // leaves the return address in rcx and the flags in r11.
             mode.set(state, nr, Val::Unknown);
+            if insn.code() == Code::Syscall {
+                mode.set(state, Register::RCX, Val::Unknown);
+                mode.set(state, Register::R11, Val::Unknown);
+            }
             return Step::site(
                 len,
                 Site {
@@ -97,12 +102,16 @@ impl<'a> Tracker<'a> for X86<'a> {
         match insn.flow_control() {
             FlowControl::Call | FlowControl::IndirectCall => {
                 use Register::{R8, R9, R10, R11, RAX, RCX, RDI, RDX, RSI};
-                let raw = if let Some(to) = near(&insn) {
-                    RawTarget::Call(to)
-                } else if let Some(slot) = got_slot(&insn) {
-                    RawTarget::Slot(slot)
-                } else {
-                    RawTarget::Indirect
+                let raw = match insn.op0_kind() {
+                    OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64 => {
+                        RawTarget::Call(insn.near_branch_target())
+                    }
+                    // `call [rip+disp]`: an import's GOT entry, or some
+                    // other pointer.
+                    OpKind::Memory if insn.is_ip_rel_memory_operand() => {
+                        RawTarget::Slot(insn.ip_rel_memory_address())
+                    }
+                    _ => RawTarget::Indirect,
                 };
                 let args = if self.bitness == 64 {
                     [RDI, RSI, RDX, RCX, R8, R9]
@@ -124,7 +133,16 @@ impl<'a> Tracker<'a> for X86<'a> {
             | FlowControl::IndirectBranch
             | FlowControl::Return
             | FlowControl::Exception => Step::stop(len),
-            FlowControl::ConditionalBranch => Step::go(len),
+            FlowControl::ConditionalBranch => {
+                // `loop` and its kin count rcx down.
+                if matches!(
+                    insn.mnemonic(),
+                    Mnemonic::Loop | Mnemonic::Loope | Mnemonic::Loopne
+                ) {
+                    mode.set(state, Register::RCX, Val::Unknown);
+                }
+                Step::go(len)
+            }
             _ => {
                 self.track(state, &insn);
                 Step::go(len)
@@ -142,22 +160,6 @@ fn syscall_entry(insn: &Instruction, bitness: u32) -> Option<(Register, [Registe
         Code::Int_imm8 if insn.immediate8() == 0x80 => Some((EAX, [EBX, ECX, EDX, ESI, EDI, EBP])),
         _ => None,
     }
-}
-
-/// The near-call target, when direct.
-fn near(insn: &Instruction) -> Option<u64> {
-    matches!(
-        insn.op0_kind(),
-        OpKind::NearBranch16 | OpKind::NearBranch32 | OpKind::NearBranch64
-    )
-    .then(|| insn.near_branch_target())
-}
-
-/// The fixed memory slot an indirect call goes through (`call qword
-/// [rip+disp]`): an import's GOT entry, or some other pointer.
-fn got_slot(insn: &Instruction) -> Option<u64> {
-    (insn.op0_kind() == OpKind::Memory && insn.is_ip_rel_memory_operand())
-        .then(|| insn.ip_rel_memory_address())
 }
 
 impl X86<'_> {
@@ -343,7 +345,7 @@ impl Mode {
         if self.full == 8 {
             v.cast_signed()
         } else {
-            i64::from(u32::try_from(v & 0xffff_ffff).unwrap_or(0).cast_signed())
+            crate::isa::sext(v, 32)
         }
     }
 }

@@ -471,7 +471,6 @@ impl Cx<'_> {
     }
 
     /// A 32-bit instruction.
-    #[allow(clippy::too_many_lines)]
     fn wide(&mut self, word: u32, limm: Option<u32>, len: u32) -> Kind {
         let major = word >> 27;
         let b = (word >> 24) & 7 | ((word >> 12) & 7) << 3;
@@ -548,7 +547,7 @@ impl Cx<'_> {
                 let size = zz_size(zz);
                 // .as scales the offset by the size.
                 let disp = match aa {
-                    3 => s9 << zz_size(zz).trailing_zeros().min(2),
+                    3 => s9 << size.trailing_zeros().min(2),
                     _ => s9,
                 };
                 let access = Access {
@@ -587,7 +586,6 @@ impl Cx<'_> {
     /// The general format of majors 4 to 7: `op a, b, c` with `c` a
     /// register or `u6` (`p` 0 and 1), `op b, b, s12` (2), or a conditional
     /// `op.cc b, b, c` (3).
-    #[allow(clippy::too_many_lines)]
     fn general(&mut self, word: u32, limm: Option<u32>, len: u32) -> Kind {
         let major = word >> 27;
         let sub = (word >> 16) & 0x3f;
@@ -634,7 +632,7 @@ impl Cx<'_> {
                 return Kind::Op(None);
             }
             let size = zz_size(zz);
-            let scale = if aa == 3 { zz_size(zz) } else { 1 };
+            let scale = if aa == 3 { size } else { 1 };
             let access = Access {
                 scale,
                 aa,
@@ -712,25 +710,14 @@ impl Cx<'_> {
                         (2 | 3, Src::Imm(imm)) => imm.cast_signed() << 1,
                         _ => return Kind::Op(None),
                     };
-                    let to = self.relative(offset);
-                    return Kind::Transfer {
-                        flow: Flow::Branch(to),
-                        delay: false,
-                        falls: false,
-                        compare: None,
-                    };
+                    return transfer(Flow::Branch(self.relative(offset)), false);
                 }
                 // FLAG: bit 0 halts.
                 0x29 => {
                     let halts = matches!(self.src(src, limm), Some((value, false)) if value & 1 != 0)
                         && cond == 0;
                     return if halts {
-                        Kind::Transfer {
-                            flow: Flow::Stop,
-                            delay: false,
-                            falls: false,
-                            compare: None,
-                        }
+                        transfer(Flow::Stop, false)
                     } else {
                         Kind::Op(Some(Note::None))
                     };
@@ -827,12 +814,7 @@ impl Cx<'_> {
             (1..=3, _) | (6..=0x0b, true) => return Kind::Op(Some(Note::None)),
             _ => return Kind::Op(None),
         };
-        Kind::Transfer {
-            flow,
-            delay: false,
-            falls: false,
-            compare: None,
-        }
+        transfer(flow, false)
     }
 
     /// A compare of register `reg` with `src`: a bound when `src` is a
@@ -1026,7 +1008,6 @@ impl Cx<'_> {
     }
 
     /// A 16-bit instruction.
-    #[allow(clippy::too_many_lines)]
     fn narrow(&mut self, half: u32, limm: Option<u32>) -> Kind {
         let major = half >> 11;
         let b = short(half >> 8);

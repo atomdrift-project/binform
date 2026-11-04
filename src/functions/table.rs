@@ -269,13 +269,13 @@ impl Tracker {
     /// the case value.
     fn load(&self, mem: Mem, size: u8, signed: bool) -> Option<Table> {
         let (offset, index, scale) = match (mem.base, mem.index) {
-            (base, Some(index)) if self.address(base).is_some() => {
-                (self.address(base)?, index, mem.scale)
-            }
-            // `[value + address]`: the encoding put the address second.
-            (Some(base), Some(index)) if mem.scale == 1 => (self.address(Some(index))?, base, 1),
+            (base, Some(index)) => match self.address(base) {
+                Some(offset) => (offset, index, mem.scale),
+                // `[value + address]`: the encoding put the address second.
+                None if mem.scale == 1 => (self.address(Some(index))?, base?, 1),
+                None => return None,
+            },
             (Some(base), None) => (0, base, 1),
-            (_, Some(_)) => return None,
             (None, None) => return None,
         };
         if !matches!(size, 1 | 2 | 4 | 8) || !matches!(scale, 1 | 2 | 4 | 8) {

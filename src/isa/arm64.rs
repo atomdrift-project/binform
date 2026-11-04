@@ -45,10 +45,7 @@ pub(crate) fn decode(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
 /// `stp x29, x30, [sp, ...]`, saving the frame record, after at most two of
 /// `bti c`, `paciasp` and `sub sp, sp, #n`.
 pub(crate) fn starts_frame(bytes: &[u8]) -> bool {
-    for word in bytes.chunks_exact(4).take(3) {
-        let Ok(word) = <[u8; 4]>::try_from(word) else {
-            return false;
-        };
+    for &word in bytes.as_chunks::<4>().0.iter().take(3) {
         let word = u32::from_le_bytes(word);
         // Pre-indexed or signed-offset, at any offset.
         let pair = word & 0xffc0_7fff;
@@ -89,7 +86,7 @@ fn flow(state: &State, word: u32, addr: u64) -> Flow {
         // pointer-authenticating forms.
         let slot = state.loaded.get(rn);
         return match (word >> 21) & 0xf {
-            0 | 8 => slot.map_or(Flow::JumpRegister((word >> 5) & 0x1f), Flow::JumpSlot),
+            0 | 8 => slot.map_or(Flow::JumpRegister(rn), Flow::JumpSlot),
             1 | 9 => slot.map_or(Flow::CallIndirect, Flow::CallSlot),
             2 | 4 | 5 => Flow::Return,
             _ => Flow::Stop,
@@ -138,7 +135,7 @@ fn track(state: &mut State, word: u32, addr: u64) -> bool {
     true
 }
 
-/// What the instruction tells a jump-table read, once [`flow`] has updated
+/// What the instruction tells a jump-table read, once [`track`] has updated
 /// `state`.
 fn note(state: &State, word: u32) -> Note {
     let reg = |shift: u32| (word >> shift) & 0x1f;

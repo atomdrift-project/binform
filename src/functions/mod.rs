@@ -8,7 +8,7 @@ use crate::functions::table::Tracker;
 use crate::isa::{Decoder, Flow, Insn, Mem, Memory, Note};
 use crate::{Arch, Binary, Dest, Found, Function, Limits, Origin, Recovery, Ref, RefKind};
 
-/// Recovery that never return, by name: a call to one ends its basic block.
+/// Functions that never return, by name: a call to one ends its basic block.
 const NORETURN: &[&str] = &[
     "ExitProcess",
     "ExitThread",
@@ -113,11 +113,10 @@ fn never_returns(name: &str) -> bool {
 
 /// Which argument is `main`, when `name` is a C runtime start routine.
 fn main_argument(name: &str) -> Option<usize> {
-    c_names(name).iter().find_map(|name| {
-        STARTS
-            .iter()
-            .find_map(|&(start, argument)| (start == *name).then_some(argument))
-    })
+    let names = c_names(name);
+    STARTS
+        .iter()
+        .find_map(|&(start, argument)| names.contains(&start).then_some(argument))
 }
 
 /// What recovery knows about a function beyond [`Function`]: how it was
@@ -321,7 +320,8 @@ pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Recovery, Vec<Det
             })
             .map(str::to_owned);
     }
-    functions.sort_by_key(|(function, _)| function.entry);
+    // Each entry is explored once.
+    functions.sort_unstable_by_key(|(function, _)| function.entry);
     let stubs = functions
         .iter()
         .filter_map(|(function, detail)| Some((function.entry, detail.thunk?)))

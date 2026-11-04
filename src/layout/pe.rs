@@ -139,10 +139,14 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Pe<'_>, Error> {
         });
     let long_name = |offset: u64| -> Option<String> {
         let rest = strings?.get(usize::try_from(offset).ok().filter(|&o| o >= 4)?..)?;
+        let rest = rest.get(..limits::NAME_LEN).unwrap_or(rest);
         let name = std::str::from_utf8(rest.get(..rest.iter().position(|&b| b == 0)?)?).ok()?;
         (!name.is_empty() && !name.chars().any(char::is_control)).then(|| name.to_owned())
     };
     let headers = optional.at(u64::from(optional_size));
+    // Every section may name the same long string: past a budget of name
+    // bytes, sections keep the names their headers hold.
+    let mut names = limits::NAME_BYTES;
     let sections: Vec<Section> = read::table(0, 40, u64::from(count))
         .map_while(|at| {
             let header = headers.at(at);
@@ -150,8 +154,10 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Pe<'_>, Error> {
             let raw = raw.split(|&b| b == 0).next().unwrap_or_default();
             let long = raw
                 .strip_prefix(b"/")
+                .filter(|_| names > 0)
                 .and_then(|digits| std::str::from_utf8(digits).ok()?.parse::<u64>().ok())
                 .and_then(long_name);
+            names = names.saturating_sub(long.as_ref().map_or(0, String::len));
             Some(Section {
                 name: long.unwrap_or_else(|| String::from_utf8_lossy(raw).into_owned()),
                 virtual_size: header.u32(8)?,
@@ -269,7 +275,11 @@ struct Descriptor {
 /// The imports read so far, and the name bytes they may still spend.
 struct ImportWalk {
     imports: Vec<Import>,
+    /// Name bytes left to copy.
     budget: usize,
+    /// Lookup-table entries left to look at: descriptors may all share one
+    /// table of entries that name nothing.
+    entries: usize,
 }
 
 impl Pe<'_> {
@@ -385,12 +395,13 @@ impl Pe<'_> {
 
     /// The import address table's slots, then the delay-load table's, with
     /// the DLL each imports from and the name it imports (`Ordinal_n` for
-    /// one imported by ordinal only). Stops at [`limits::IMPORTS`], or once
-    /// the names spend [`limits::NAME_BYTES`].
+    /// one imported by ordinal only). Stops after [`limits::IMPORTS`]
+    /// lookup-table entries, or once the names spend [`limits::NAME_BYTES`].
     pub(super) fn imports(&self) -> Vec<Import> {
         let mut walk = ImportWalk {
             imports: Vec::new(),
             budget: limits::NAME_BYTES,
+            entries: limits::IMPORTS,
         };
         if let Some(table) = self
             .directory(DIRECTORY_IMPORT)
@@ -463,9 +474,10 @@ impl Pe<'_> {
         };
         let library = self.name_at(d.name).unwrap_or_default();
         for (i, at) in (0_u32..).zip(read::table(table, u64::from(width), limits::THUNKS)) {
-            if walk.imports.len() >= limits::IMPORTS || walk.budget == 0 {
+            if walk.entries == 0 || walk.budget == 0 {
                 return;
             }
+            walk.entries = walk.entries.saturating_sub(1);
             let Some(entry) = r.word(at, self.is_64) else {
                 break;
             };

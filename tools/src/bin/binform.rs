@@ -113,7 +113,7 @@ fn calls(path: &str) -> Report {
         binform::Value::Int(n) => json!(n),
         binform::Value::Mem { addr, bytes } => json!({
             "addr": addr,
-            "bytes": bytes.iter().map(|b| json!(b)).collect::<Vec<_>>(),
+            "bytes": bytes,
         }),
         _ => Value::Null,
     };

@@ -400,6 +400,9 @@ impl MachO {
         };
         let stroff = u64::from(stroff);
         let size = if self.is_64 { 16 } else { 12 };
+        // Every symbol may name the same long string: past a budget of name
+        // bytes, symbols keep their values, not names.
+        let mut names = limits::NAME_BYTES;
         self.symbols = read::table(u64::from(symoff), size, u64::from(nsyms))
             .map_while(|at| {
                 let entry = r.at(at);
@@ -408,9 +411,15 @@ impl MachO {
                 } else {
                     u64::from(entry.u32(8)?)
                 };
-                let name = stroff.saturating_add(u64::from(entry.u32(0)?));
+                let name = if names == 0 {
+                    String::new()
+                } else {
+                    r.name(stroff.saturating_add(u64::from(entry.u32(0)?)))
+                        .into_owned()
+                };
+                names = names.saturating_sub(name.len());
                 Some(Symbol {
-                    name: r.name(name).into_owned(),
+                    name,
                     n_type: entry.u8(4)?,
                     n_desc: entry.u16(6)?,
                     n_value,
@@ -567,7 +576,7 @@ fn bind_opcodes<'a>(stream: &'a [u8], record: &mut impl FnMut(&'a [u8], i64)) {
                 ordinal = if immediate == 0 {
                     0
                 } else {
-                    i64::from(i8::from_ne_bytes([0xf0 | immediate]))
+                    i64::from((0xf0 | immediate).cast_signed())
                 };
                 true
             }
@@ -625,7 +634,7 @@ fn chained_imports<'a>(data: &'a [u8], big: bool, record: &mut impl FnMut(&'a [u
         _ => return,
     };
     // The low byte (or, in the 64-bit format, half-word) is a signed ordinal.
-    let small = |v: u32| i64::from(i8::from_ne_bytes([v.to_le_bytes()[0]]));
+    let small = |v: u32| i64::from(v.to_le_bytes()[0].cast_signed());
     for at in read::table(u64::from(imports), size, u64::from(count)) {
         let entry = if format == 3 {
             // Ordinal 16 bits, weak 1, reserved 15, name offset 32; then a
