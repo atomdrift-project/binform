@@ -8,6 +8,14 @@ use super::read::Reader;
 
 /// The most entries read from any one table.
 const MOST: u64 = 1 << 20;
+/// The most imports read across both import tables. Descriptors may share
+/// one lookup table, so a few kilobytes can claim billions; real binaries
+/// import thousands at most.
+const MOST_IMPORTS: usize = 1 << 18;
+/// The most name bytes copied out of the import or export table. Every
+/// entry may point at the same long string; real tables hold well under a
+/// megabyte of names.
+const NAME_BYTES: usize = 32 << 20;
 
 const DIRECTORY_EXPORT: usize = 0;
 const DIRECTORY_IMPORT: usize = 1;
@@ -255,6 +263,7 @@ impl Pe<'_> {
         };
         // Each function by its index: the names table names some of them;
         // the rest are exported by ordinal only.
+        let mut budget = NAME_BYTES;
         let mut named: Vec<Option<String>> =
             vec![None; usize::try_from(u64::from(functions).min(MOST)).unwrap_or(0)];
         for i in 0..u64::from(names).min(MOST) {
@@ -267,6 +276,10 @@ impl Pe<'_> {
                 *slot = r
                     .u32(name_table + 4 * i)
                     .and_then(|name| self.name_at(name));
+                budget = budget.saturating_sub(slot.as_ref().map_or(0, String::len));
+                if budget == 0 {
+                    break;
+                }
             }
         }
         (0_u32..)
@@ -278,9 +291,10 @@ impl Pe<'_> {
                 }
                 // A forwarder's RVA lies inside the export directory and
                 // names another DLL's export.
-                let forward = (rva >= dir && rva - dir < size)
+                let forward = (rva >= dir && rva - dir < size && budget > 0)
                     .then(|| self.name_at(rva))
                     .flatten();
+                budget = budget.saturating_sub(forward.as_ref().map_or(0, String::len));
                 Some(Export {
                     rva,
                     name: name
@@ -297,6 +311,7 @@ impl Pe<'_> {
     pub(super) fn imports(&self) -> Vec<Import> {
         let r = &self.r;
         let mut imports = Vec::new();
+        let mut budget = NAME_BYTES;
         if let Some(mut at) = self
             .directory(DIRECTORY_IMPORT)
             .and_then(|(rva, _)| self.offset(rva))
@@ -312,7 +327,7 @@ impl Pe<'_> {
                 if name == 0 || address == 0 {
                     break;
                 }
-                self.thunks(lookup, name, address, 0, false, &mut imports);
+                self.thunks(lookup, name, address, 0, false, &mut imports, &mut budget);
             }
         }
         if let Some(mut at) = self
@@ -343,6 +358,7 @@ impl Pe<'_> {
                     base,
                     true,
                     &mut imports,
+                    &mut budget,
                 );
             }
         }
@@ -351,7 +367,9 @@ impl Pe<'_> {
 
     /// The imports of one descriptor: DLL `name`, its lookup and address
     /// tables. `base` is subtracted from name addresses that are no RVAs;
-    /// `delayed` marks the delay-load table's.
+    /// `delayed` marks the delay-load table's. Stops at [`MOST_IMPORTS`],
+    /// or once the names spend `budget`.
+    #[allow(clippy::too_many_arguments)]
     fn thunks(
         &self,
         lookup: u32,
@@ -360,6 +378,7 @@ impl Pe<'_> {
         base: u64,
         delayed: bool,
         out: &mut Vec<Import>,
+        budget: &mut usize,
     ) {
         let r = &self.r;
         let width: u32 = if self.is_64 { 8 } else { 4 };
@@ -371,6 +390,9 @@ impl Pe<'_> {
         };
         let library = self.name_at(name).unwrap_or_default();
         for i in 0..1_u32 << 16 {
+            if out.len() >= MOST_IMPORTS || *budget == 0 {
+                return;
+            }
             let Some(entry) = r.word(table + u64::from(width * i), self.is_64) else {
                 break;
             };
@@ -389,6 +411,7 @@ impl Pe<'_> {
                     _ => continue,
                 }
             };
+            *budget = budget.saturating_sub(name.len() + library.len());
             out.push(Import {
                 slot,
                 library: library.clone(),
@@ -775,6 +798,33 @@ mod tests {
         );
         assert_eq!(pe.tls_callbacks(), [0x1_4000_1100]);
         assert_eq!(pe.x64_functions(), [(0x1100, 0x1110)]);
+    }
+
+    /// Import descriptors sharing one lookup table, every entry naming the
+    /// same long string, claim gigabytes of names from a hundred kilobytes;
+    /// the walk stops once the names spend its budget.
+    #[test]
+    fn shared_import_names_spend_a_budget() {
+        let (lookup, name, entries) = (0x1_4000_usize, 0x1_6000_usize, 1000);
+        // The table's and the name's RVAs: the section starts at 0x1000.
+        let (lookup_rva, name_rva) = (0x1_5000_u32, 0x1_7000_u32);
+        let mut body = vec![0; name + 0x1000];
+        for d in 0..0x1000 {
+            let at = 20 * d;
+            body[at..at + 4].copy_from_slice(&lookup_rva.to_le_bytes());
+            body[at + 12..at + 16].copy_from_slice(&name_rva.to_le_bytes());
+            body[at + 16..at + 20].copy_from_slice(&lookup_rva.to_le_bytes());
+        }
+        for e in 0..entries {
+            let at = lookup + 8 * e;
+            body[at..at + 8].copy_from_slice(&u64::from(name_rva - 2).to_le_bytes());
+        }
+        body[name..name + 0xfff].fill(b'A');
+        let bytes = image(&[(0, 0), (0x1000, 0x1000 * 20)], &body);
+        let imports = parsed(&bytes).imports();
+        assert!(!imports.is_empty());
+        let names: usize = imports.iter().map(|i| i.name.len() + i.library.len()).sum();
+        assert!(names <= NAME_BYTES + 2 * 0x1000, "{names}");
     }
 
     #[test]

@@ -395,6 +395,10 @@ pub(super) fn exports_trie(trie: &[u8]) -> Vec<(String, Exported)> {
     let mut out = Vec::new();
     let mut visited = std::collections::HashSet::new();
     let mut stack = vec![(0_usize, Vec::new())];
+    // Name bytes built: each child copies its parent's prefix, so a chain of
+    // terminal nodes costs the square of its length. Real names are short,
+    // and a real trie's total well under a megabyte.
+    let mut budget: usize = 32 << 20;
     while let Some((node, prefix)) = stack.pop() {
         if !visited.insert(node) || visited.len() > 1 << 20 {
             continue;
@@ -433,12 +437,18 @@ pub(super) fn exports_trie(trie: &[u8]) -> Vec<(String, Exported)> {
             else {
                 break;
             };
-            let mut name = prefix.clone();
-            name.extend_from_slice(trie.get(at..at + len).unwrap_or_default());
+            let edge = trie.get(at..at + len).unwrap_or_default();
             at += len + 1;
             let Some(child) = uleb(trie, &mut at) else {
                 break;
             };
+            let size = prefix.len() + edge.len();
+            if size > 1 << 12 || size > budget {
+                continue;
+            }
+            budget -= size;
+            let mut name = prefix.clone();
+            name.extend_from_slice(edge);
             if let Ok(child) = usize::try_from(child) {
                 stack.push((child, name));
             }
@@ -459,6 +469,7 @@ pub(super) enum Exported {
 /// The NUL-terminated bytes at `at`; empty past the end.
 fn cstr(data: &[u8], at: usize) -> &[u8] {
     data.get(at..)
+        .map(|rest| rest.get(..1 << 12).unwrap_or(rest))
         .and_then(|rest| rest.split(|&b| b == 0).next())
         .unwrap_or_default()
 }
@@ -471,9 +482,14 @@ fn cstr(data: &[u8], at: usize) -> &[u8] {
 /// first binding of a name wins.
 pub(super) fn bound_ordinals(bytes: &[u8], macho: &MachO) -> Vec<(String, i64)> {
     let mut out = Vec::new();
-    let mut seen = std::collections::HashSet::new();
+    let mut seen = std::collections::HashSet::<Vec<u8>>::new();
+    // Name bytes looked at: every bind and import entry may name the same
+    // long string, which costs a hash each time.
+    let mut budget: usize = 32 << 20;
     let mut record = |name: &[u8], ordinal: i64| {
-        if !name.is_empty() && (seen.len() as u64) < MOST && seen.insert(name.to_vec()) {
+        budget = budget.saturating_sub(name.len());
+        if budget > 0 && !name.is_empty() && (seen.len() as u64) < MOST && !seen.contains(name) {
+            seen.insert(name.to_vec());
             out.push((String::from_utf8_lossy(name).into_owned(), ordinal));
         }
     };
@@ -860,5 +876,28 @@ mod tests {
             .collect();
         found.sort();
         assert_eq!(found, ["_a@0x10", "_b<2:_c", "_d<1:"]);
+    }
+
+    /// A chain of terminal nodes, each a one-byte edge below the last,
+    /// names every prefix of a long run: the square of its length. The walk
+    /// stops at names longer than any real symbol.
+    #[test]
+    fn a_deep_export_trie_builds_bounded_names() {
+        // Each node: terminal size 2, flags, offset; one child, edge `a`,
+        // the child's offset as a three-byte LEB128.
+        let nodes = 100_000_usize;
+        let mut trie = Vec::with_capacity(nodes * 9);
+        for i in 1..=nodes {
+            let next = u32::try_from(9 * i).unwrap_or(0);
+            trie.extend([2, 0, 0, 1, b'a', 0]);
+            trie.extend([
+                0x80 | (next & 0x7f) as u8,
+                0x80 | (next >> 7 & 0x7f) as u8,
+                (next >> 14 & 0x7f) as u8,
+            ]);
+        }
+        let found = exports_trie(&trie);
+        assert!(found.len() > 1000);
+        assert!(found.iter().all(|(name, _)| name.len() <= 1 << 12));
     }
 }
