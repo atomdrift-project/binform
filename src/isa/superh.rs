@@ -197,19 +197,27 @@ fn track(state: &mut State, word: u16, bytes: &[u8], addr: u64) -> Note {
 /// @-r15`), the return address (`sts.l pr, @-r15`) or the frame pointer
 /// (`mov.l r14, @-r15`) among them, before anything else.
 pub(crate) fn starts_frame(bytes: &[u8]) -> bool {
+    let push = |word: u16| word & 0xff0f == 0x2f06;
+    let lower = |word: u16| word & 0xff00 == 0x7f00 && word & 0x80 != 0;
+    // The first instruction saves a register or lowers the stack; GCC then
+    // interleaves the rest of the setup (`mova`, literal loads) with the
+    // saves, so the saves that make it a frame may come a few later.
+    match bytes.get(..2).and_then(half) {
+        Some(word) if push(word) || lower(word) || word == 0x4f22 => {}
+        _ => return false,
+    }
     let mut saved = 0;
     for at in (0..16).step_by(2) {
         match bytes.get(at..).and_then(half) {
             // STS.L PR, @-R15; MOV.L R14, @-R15
             Some(0x4f22 | 0x2fe6) => return true,
             // Other saved registers
-            Some(word) if word & 0xff0f == 0x2f06 => saved += 1,
-            // ADD #-n, R15
-            Some(word) if word & 0xff00 == 0x7f00 && word & 0x80 != 0 => {}
-            // A leaf saves two registers or more before anything else.
-            _ => return saved >= 2,
+            Some(word) if push(word) => saved += 1,
+            Some(_) => {}
+            None => break,
         }
     }
+    // A leaf saves two registers or more.
     saved >= 2
 }
 
@@ -299,6 +307,10 @@ mod tests {
         assert!(starts_frame(&bytes(&[0x2fe6, 0x6ef3])));
         // mov r4, r1: no frame
         assert!(!starts_frame(&bytes(&[0x6143, 0x4f22])));
+        // mov.l r8, @-r15; mova; mov.l r9, @-r15: GCC interleaves setup.
+        assert!(starts_frame(&bytes(&[0x2f86, 0xc71e, 0x2f96])));
+        // One save and nothing more is no frame.
+        assert!(!starts_frame(&bytes(&[0x2f86, 0xc71e, 0x6143])));
     }
 
     #[test]

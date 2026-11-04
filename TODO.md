@@ -233,7 +233,13 @@ only. Next:
   hostile: parse only):
   - SuperH static bots now cover 70-88% (`bot-sh-uclibc-static`: 77%).
     What remains: code reached only through tables and pointers kept
-    outside literal pools.
+    outside literal pools. A frame now counts when GCC interleaves its
+    setup with the saves (`mov.l r8, @-r15; mova; mov.l r9, @-r15`):
+    `sh/bad-00fcbe21` 75% to 79%, against rizin's 47% by extent. Tried
+    and dropped: a `literal` hook for `mov.l @(disp, pc)` so the sweep
+    skips pools as C-SKY's does; data that decodes as `mov.l` names
+    "pools" inside real code, and `bot-sh-uclibc-static` lost 132 of its
+    291 functions.
   - Packed and encrypted code: the sweep now skips kilobytes of
     near-random bytes (`bot-s390x-static-pie`, whose `.text` is mostly an
     encrypted payload: 1070 invalid down to 50). Such files cover little,
