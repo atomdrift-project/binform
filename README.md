@@ -21,17 +21,15 @@ Xtensa and eBPF.
 
 ## Why not goblin or rizin
 
-goblin parses headers: sections, symbols, imports. It does not read code.
-binform parses the headers itself and goes on to the code.
+We started with goblin, but it was not lenient enough for malformed
+malware: it rejects a whole file over one bad table, 23 of the 582 in our
+corpus. We moved to rizin, which does far more, but its analysis of the
+same corpus took 65 times as long. binform is the result. It reads what it
+can of a damaged file, and does less on purpose: it says what the code
+does and leaves what that means to the caller.
 
-rizin does far more: debugging, emulation, decompilation, scripting. It is
-also a large LGPL C framework, reached from Rust through a subprocess or
-bindings. binform is one Rust dependency. It does less on purpose: it says
-what the code does and leaves what that means to the caller.
-
-rizin is the yardstick. `tools/binform-ab` has compared the two on thousands
-of binaries, many of them malware, and the test suite keeps 67 of them as
-fixtures, checked against rizin 0.8.2's listings.
+rizin is the yardstick: `tools/binform-ab` has compared the two on thousands
+of binaries, and the fixtures are checked against rizin 0.8.2's listings.
 
 ## Status
 
