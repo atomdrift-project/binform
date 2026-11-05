@@ -7,9 +7,10 @@ another needs corpus evidence for which matters more.
 ## Building
 
 ```sh
-cargo test --workspace --all-features
-cargo clippy --workspace --all-targets --all-features
-cargo fmt --all
+make test     # cargo test --workspace --all-features
+make lint     # rustfmt --check, clippy and rustdoc, warnings denied
+make fmt      # cargo fmt --all
+make install  # install the binform and binform-ab tools
 ```
 
 CI runs these with warnings denied on Linux, Windows and macOS, builds the
