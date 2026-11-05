@@ -71,7 +71,7 @@ impl Insn {
     /// note. A missing slot, one that does not decode, or one that is
     /// itself a transfer (undefined on every set with slots) makes the
     /// pair invalid: bytes that only look like a transfer.
-    pub(crate) fn with_slot(self, slot: Option<Insn>) -> Self {
+    pub(crate) fn with_slot(self, slot: Option<Self>) -> Self {
         match slot {
             Some(slot) if slot.flow == Flow::Next => Self {
                 len: self.len.wrapping_add(slot.len),
@@ -287,14 +287,17 @@ pub(crate) struct Mem {
 /// all, since only control from elsewhere reaches what follows. Callers
 /// [`reset`](Decode::reset) wherever else control may arrive from
 /// elsewhere, as at a block start.
-pub(crate) trait Decode {
+///
+/// The code decoded lives for `'a`, so a decoder may keep a view of it
+/// between instructions, as the x86 one does.
+pub(crate) trait Decode<'a> {
     /// The instruction at the start of `bytes`, mapped at `addr`. Bytes too
     /// few to hold one decode as [`Flow::Invalid`], still of nonzero length.
-    fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn;
+    fn decode(&mut self, bytes: &'a [u8], addr: u64) -> Insn;
 
     /// [`decode`](Decode::decode), then carry what the instruction leaves
     /// in registers on to the next one, by the rule above.
-    fn advance(&mut self, bytes: &[u8], addr: u64) -> Insn {
+    fn advance(&mut self, bytes: &'a [u8], addr: u64) -> Insn {
         let insn = self.decode(bytes, addr);
         match insn.flow {
             Flow::Next | Flow::Branch(_) => {}
@@ -509,19 +512,19 @@ impl Traits {
 
 /// An instruction decoder for one image's architecture.
 #[derive(Clone)]
-pub(crate) struct Decoder {
-    isa: Isa,
+pub(crate) struct Decoder<'a> {
+    isa: Isa<'a>,
     traits: Traits,
 }
 
 /// Each architecture's decoder. All are boxed, so that the enum is one
 /// pointer whatever an architecture keeps in registers.
 #[derive(Clone)]
-enum Isa {
-    X86(Box<x86::Decoder>),
+enum Isa<'a> {
+    X86(Box<x86::Decoder<'a>>),
     Arm64(Box<arm64::Decoder>),
     Arm(Box<arm::Decoder>),
-    Mips(Box<mips::Decoder>),
+    Mips(Box<mips::Decoder<'a>>),
     S390x(Box<s390x::Decoder>),
     Sparc(Box<sparc::Decoder>),
     SuperH(Box<superh::Decoder>),
@@ -564,8 +567,8 @@ macro_rules! each {
     };
 }
 
-impl Decoder {
-    pub(crate) fn new(image: &Binary<'_>, arch: Arch) -> Self {
+impl<'a> Decoder<'a> {
+    pub(crate) fn new(image: &'a Binary<'_>, arch: Arch) -> Self {
         // The mode most known starts are in: Thumb addresses are odd.
         let odd = image.seeds.iter().filter(|seed| seed.addr & 1 != 0).count();
         let thumb = arch == Arch::Arm && odd.saturating_mul(2) > image.seeds.len();
@@ -626,7 +629,7 @@ impl Decoder {
     /// No instruction is empty: every walk steps on by lengths, and one of
     /// zero would hold it at the same address for good. A decoder that
     /// reports one has its bytes taken as invalid, a unit of alignment long.
-    pub(crate) fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
+    pub(crate) fn decode(&mut self, bytes: &'a [u8], addr: u64) -> Insn {
         let insn = each!(&mut self.isa, d => d.advance(bytes, addr));
         if insn.len == 0 {
             let unit = u32::try_from(self.alignment()).unwrap_or(1).max(1);

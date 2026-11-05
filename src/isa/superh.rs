@@ -35,7 +35,7 @@ fn half(bytes: &[u8], at: usize) -> Option<u16> {
     u16_at(bytes, at, false)
 }
 
-impl Decode for Decoder {
+impl Decode<'_> for Decoder {
     fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
         let Some(word) = half(bytes, 0) else {
             return Insn::new(2, Flow::Invalid);

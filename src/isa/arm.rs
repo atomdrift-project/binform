@@ -652,7 +652,7 @@ impl Decoder {
     }
 }
 
-impl crate::isa::Decode for Decoder {
+impl crate::isa::Decode<'_> for Decoder {
     fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
         decode(&mut self.state, bytes, addr)
     }

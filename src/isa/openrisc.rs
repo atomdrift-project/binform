@@ -38,7 +38,7 @@ fn word_at(bytes: &[u8], at: usize) -> Option<u32> {
     u32_at(bytes, at, true)
 }
 
-impl Decode for Decoder {
+impl Decode<'_> for Decoder {
     fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
         let Some(word) = word_at(bytes, 0) else {
             return Insn::new(4, Flow::Invalid);

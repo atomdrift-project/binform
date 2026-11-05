@@ -3,9 +3,16 @@
 use crate::isa::{Extend, Flow, Insn, Mem, Note};
 use iced_x86::{Code, DecoderOptions, FlowControl, Instruction, Mnemonic, OpKind, Register};
 
-pub(crate) fn decode(bitness: u32, got: Option<u64>, bytes: &[u8], addr: u64) -> Insn {
+/// The instruction at the start of `bytes`, mapped at `addr`.
+#[cfg(test)]
+fn decode(bitness: u32, got: Option<u64>, bytes: &[u8], addr: u64) -> Insn {
     let instruction =
         iced_x86::Decoder::with_ip(bitness, bytes, addr, DecoderOptions::NONE).decode();
+    insn(instruction, bitness, got, addr)
+}
+
+/// What the decoded `instruction`, at `addr`, does.
+fn insn(instruction: Instruction, bitness: u32, got: Option<u64>, addr: u64) -> Insn {
     if instruction.is_invalid() {
         return Insn::new(1, Flow::Invalid);
     }
@@ -268,22 +275,55 @@ fn register_id(register: Register) -> u32 {
 }
 
 /// The x86 decoder: 32- or 64-bit, and the GOT address 32-bit PIC stubs
-/// jump through, when known. It keeps nothing between instructions.
-#[derive(Clone, Debug)]
-pub(crate) struct Decoder {
+/// jump through, when known. It keeps nothing between instructions but an
+/// `iced-x86` decoder over the code last decoded.
+pub(crate) struct Decoder<'a> {
     bitness: u32,
     got: Option<u64>,
+    /// The code the last instruction was decoded from, to the end of its
+    /// segment, and a decoder over it. Making a decoder costs as much as
+    /// decoding an instruction, and the next instruction is nearly always
+    /// further on in the same code: the decoder is moved there instead.
+    iced: Option<(&'a [u8], iced_x86::Decoder<'a>)>,
 }
 
-impl Decoder {
+impl Decoder<'_> {
     pub(crate) const fn new(bitness: u32, got: Option<u64>) -> Self {
-        Self { bitness, got }
+        Self {
+            bitness,
+            got,
+            iced: None,
+        }
     }
 }
 
-impl crate::isa::Decode for Decoder {
-    fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
-        decode(self.bitness, self.got, bytes, addr)
+/// A copy makes its own `iced-x86` decoder when it first decodes: one can
+/// be neither copied nor shared.
+impl Clone for Decoder<'_> {
+    fn clone(&self) -> Self {
+        Self::new(self.bitness, self.got)
+    }
+}
+
+impl<'a> crate::isa::Decode<'a> for Decoder<'a> {
+    fn decode(&mut self, bytes: &'a [u8], addr: u64) -> Insn {
+        // `bytes` ending where the code decoded before ends are the same
+        // memory: the rest of that code, from `at`.
+        let held = self.iced.as_mut().and_then(|(code, iced)| {
+            let same_end = code.as_ptr_range().end == bytes.as_ptr_range().end;
+            let at = code.len().checked_sub(bytes.len()).filter(|_| same_end)?;
+            iced.set_position(at).ok()?;
+            Some(iced)
+        });
+        let iced = match held {
+            Some(iced) => iced,
+            None => {
+                let fresh = iced_x86::Decoder::new(self.bitness, bytes, DecoderOptions::NONE);
+                &mut self.iced.insert((bytes, fresh)).1
+            }
+        };
+        iced.set_ip(addr);
+        insn(iced.decode(), self.bitness, self.got, addr)
     }
 
     fn reset(&mut self) {}
@@ -310,6 +350,37 @@ mod tests {
 
     fn one(bitness: u32, bytes: &[u8], addr: u64) -> Insn {
         decode(bitness, Some(0x5000), bytes, addr)
+    }
+
+    /// The decoder kept between instructions decodes as a fresh one does:
+    /// further on in the same code, back in it, in other code, in code that
+    /// ends sooner (a shorter slice of the same bytes), and as a copy.
+    #[test]
+    fn kept_decoder_decodes_as_a_fresh_one() {
+        use crate::isa::Decode;
+        // push rbp; mov rbp, rsp; call +11; ret; je +2
+        let code = [
+            0x55, 0x48, 0x89, 0xe5, 0xe8, 0x0b, 0, 0, 0, 0xc3, 0x74, 0x02,
+        ];
+        let other = [0xeb, 0xfe, 0x0f, 0x05]; // jmp $; syscall
+        let base = 0x1000;
+        let steps: [(&[u8], u64); 8] = [
+            (&code, base),
+            (&code[1..], base + 1),
+            (&code[4..], base + 4),
+            (&code[1..], base + 1),
+            (&other, 0x2000),
+            (&other[2..], 0x2002),
+            // The call, cut short: it no longer fits.
+            (&code[4..7], base + 4),
+            (&code[9..], base + 9),
+        ];
+        let mut kept = Decoder::new(64, Some(0x5000));
+        for (bytes, addr) in steps {
+            let fresh = one(64, bytes, addr);
+            assert_eq!(kept.decode(bytes, addr), fresh, "{bytes:02x?} at {addr:#x}");
+            assert_eq!(kept.clone().decode(bytes, addr), fresh);
+        }
     }
 
     #[test]

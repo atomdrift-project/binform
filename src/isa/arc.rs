@@ -164,7 +164,7 @@ impl Decoder {
     }
 }
 
-impl Decode for Decoder {
+impl Decode<'_> for Decoder {
     fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
         let mut cx = Cx {
             state: &mut self.state,

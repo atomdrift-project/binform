@@ -375,7 +375,7 @@ impl Decoder {
     }
 }
 
-impl crate::isa::Decode for Decoder {
+impl crate::isa::Decode<'_> for Decoder {
     fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
         let Some(word) = self.word(bytes, 0) else {
             return Insn::new(4, Flow::Invalid);

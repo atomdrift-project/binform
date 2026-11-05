@@ -279,7 +279,7 @@ fn program_segments<'a>(bytes: &'a [u8], elf: &Elf) -> Vec<Segment<'a>> {
 /// `segments` with the `ranges` (start, end) that lie wholly inside
 /// executable ones split out of them as data. At most [`limits::TABLE`]
 /// ranges are looked at in all, however the segments overlap.
-fn fence<'a>(segments: Vec<Segment<'a>>, mut ranges: Vec<(u64, u64)>) -> Vec<Segment<'a>> {
+fn fence(segments: Vec<Segment<'_>>, mut ranges: Vec<(u64, u64)>) -> Vec<Segment<'_>> {
     ranges.sort_unstable();
     let mut budget = usize::try_from(limits::TABLE).unwrap_or(usize::MAX);
     let mut out = Vec::with_capacity(segments.len());

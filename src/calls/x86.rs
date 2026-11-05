@@ -17,6 +17,11 @@ use iced_x86::{
     OpAccess, OpKind, Register,
 };
 
+/// The value an argument in `register` carries.
+fn argument(state: &State<'_>, register: Register) -> Value {
+    reg_index(register).map_or(Value::Unknown, |r| state.value(r))
+}
+
 /// `rsp` (or `esp`): the fifth register in iced's order.
 const SP: u32 = 4;
 
@@ -62,6 +67,7 @@ impl<'a> Tracker<'a> for X86<'a> {
     fn reset(&mut self) {}
 
     fn step(&mut self, state: &mut State<'_>, at: usize, addr: u64) -> Step {
+        use Register::{EAX, EBP, EBX, ECX, EDI, EDX, ESI, R8, R9, R10, RAX, RDI, RDX, RSI};
         let Some(decoder) = self.decoder.as_mut() else {
             return Step::stop(1);
         };
@@ -78,7 +84,6 @@ impl<'a> Tracker<'a> for X86<'a> {
 
         // A syscall reads the registers as they stand: its number register,
         // then its argument registers.
-        use Register::{EAX, EBP, EBX, ECX, EDI, EDX, ESI, R8, R9, R10, RAX, RDI, RDX, RSI};
         let syscall = match insn.code() {
             Code::Syscall if self.bitness == 64 => Some((RAX, [RDI, RSI, RDX, R10, R8, R9])),
             Code::Int_imm8 if insn.immediate8() == 0x80 => {
@@ -90,7 +95,7 @@ impl<'a> Tracker<'a> for X86<'a> {
             let step = Step::syscall(
                 len,
                 mode.reg(state, nr),
-                args.iter().map(|&r| mode.value(state, r)),
+                args.iter().map(|&r| argument(state, r)),
             );
             // The kernel returns in the number register; `syscall` itself
             // leaves the return address in rcx and the flags in r11.
@@ -119,7 +124,7 @@ impl<'a> Tracker<'a> for X86<'a> {
                 let args = if self.bitness == 64 {
                     [RDI, RSI, RDX, RCX, R8, R9]
                         .iter()
-                        .map(|&r| mode.value(state, r))
+                        .map(|&r| argument(state, r))
                         .collect()
                 } else {
                     Vec::new()
@@ -299,10 +304,6 @@ impl Mode {
             _ => Val::Unknown,
         };
         state.set(r, value);
-    }
-
-    fn value(self, state: &State<'_>, register: Register) -> Value {
-        reg_index(register).map_or(Value::Unknown, |r| state.value(r))
     }
 
     /// The value operand `n` of `insn` reads: a register, an immediate, or

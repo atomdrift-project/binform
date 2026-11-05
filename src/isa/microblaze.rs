@@ -66,7 +66,7 @@ impl Decoder {
     }
 }
 
-impl Decode for Decoder {
+impl Decode<'_> for Decoder {
     fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
         let Some(word) = u32_at(bytes, 0, self.big) else {
             return Insn::new(4, Flow::Invalid);

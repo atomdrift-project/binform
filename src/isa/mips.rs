@@ -20,8 +20,6 @@
 //! earlier releases gave `addi`, `daddi`, the branch-likely instructions
 //! and coprocessor 2's loads and stores.
 
-use std::sync::Arc;
-
 use crate::isa::{
     Decode, Extend, Flow, Insn, Mem, Memory, Note, Regs, relative, sext, u32_at, uint,
 };
@@ -41,12 +39,12 @@ const RA: u32 = 31;
 /// The MIPS decoder: its byte order, word size, release, and the GOT
 /// around the address `_gp` stands for.
 #[derive(Clone, Debug)]
-pub(crate) struct Decoder {
+pub(crate) struct Decoder<'a> {
     big: bool,
     wide: bool,
     /// Release 6, with compact branches in opcodes it reuses.
     r6: bool,
-    got: Got,
+    got: Got<'a>,
     state: State,
 }
 
@@ -76,17 +74,17 @@ struct State {
 /// The GOT as the file holds it, around the address `_gp` stands for: its
 /// local entries hold the addresses of pages and of local data.
 #[derive(Clone, Debug, Default)]
-pub(crate) struct Got {
+pub(crate) struct Got<'a> {
     pub(crate) gp: Option<u64>,
     /// The other values `$gp` takes in a binary linked with several GOTs,
     /// as the known functions' `$gp` setups compute them; none is recorded.
-    others: Arc<[u64]>,
-    /// The bytes of each segment within `$gp`'s reach, by address.
-    pieces: Arc<[(u64, Box<[u8]>)]>,
+    others: Vec<u64>,
+    /// The image's bytes within `$gp`'s reach, by address.
+    pieces: Vec<(u64, &'a [u8])>,
 }
 
-impl Decoder {
-    pub(crate) fn new(image: &crate::Binary<'_>, arch: crate::Arch) -> Self {
+impl<'a> Decoder<'a> {
+    pub(crate) fn new(image: &'a crate::Binary<'_>, arch: crate::Arch) -> Self {
         let big = arch.big_endian();
         let entries = image.seeds.iter().map(|seed| seed.addr);
         let starts = image.extents.iter().map(|range| range.start);
@@ -116,7 +114,7 @@ impl Decoder {
     }
 }
 
-impl Decode for Decoder {
+impl Decode<'_> for Decoder<'_> {
     fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
         let Some(word) = self.word(bytes, 0) else {
             return Insn::new(4, Flow::Invalid);
@@ -185,23 +183,19 @@ impl Decode for Decoder {
     }
 }
 
-impl Got {
+impl<'a> Got<'a> {
     /// The GOT `$gp` reaches, from the segments, when `gp` is known.
-    /// Overlapping segments are read as `memory` reads them, so the copy is
-    /// never more than the 64 KiB `$gp` reaches, however many a file stacks.
-    pub(crate) fn new(gp: Option<u64>, memory: &Memory<'_>) -> Self {
+    /// Overlapping segments are read as `memory` reads them: each address
+    /// once, however many segments a file stacks there.
+    pub(crate) fn new(gp: Option<u64>, memory: &Memory<'a>) -> Self {
         let Some(gp) = gp else {
             return Self::default();
         };
         let (start, end) = (gp.saturating_sub(0x8000), gp.saturating_add(0x8000));
-        let pieces = memory
-            .within(start, end)
-            .map(|(from, bytes)| (from, bytes.into()))
-            .collect();
         Self {
             gp: Some(gp),
-            others: Arc::default(),
-            pieces,
+            others: Vec::new(),
+            pieces: memory.within(start, end).collect(),
         }
     }
 
@@ -257,7 +251,7 @@ impl Got {
     }
 }
 
-impl Decoder {
+impl Decoder<'_> {
     /// The bound a Release 6 unsigned compact branch puts on an index, when it
     /// compares it with a small constant: `bltuc $s3, $v0, default` with `$s3`
     /// 10 leaves `$v0` at most 10, `bgeuc $v0, $s3, default` at most 9.
@@ -732,7 +726,7 @@ mod tests {
     use super::*;
 
     /// A decoder of big-endian 32-bit code, of Release 6 when `r6`.
-    fn decoder(r6: bool, got: &Got) -> Decoder {
+    fn decoder<'a>(r6: bool, got: &Got<'a>) -> Decoder<'a> {
         Decoder {
             big: true,
             wide: false,
@@ -914,7 +908,7 @@ mod tests {
     }
 
     /// Each instruction of `words` at `addr` on, in order, with `got`.
-    fn insns(words: &[u32], addr: u64, got: &Got) -> Vec<Insn> {
+    fn insns(words: &[u32], addr: u64, got: &Got<'_>) -> Vec<Insn> {
         let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_be_bytes()).collect();
         let mut decoder = decoder(false, got);
         let mut out = Vec::new();
@@ -968,8 +962,8 @@ mod tests {
         let gp = 0x2_7ff0;
         let got = Got {
             gp: Some(gp),
-            pieces: vec![(gp - 0x7ff0, vec![0, 1, 0, 0].into())].into(),
-            others: Arc::default(),
+            pieces: vec![(gp - 0x7ff0, &[0, 1, 0, 0])],
+            others: Vec::new(),
         };
         let code = [
             0x2c81_0010, // sltiu $at, $a0, 16
@@ -1044,8 +1038,8 @@ mod tests {
         // The same with the GOT entry known: a page, so a direct call.
         let got = Got {
             gp: Some(0x2_7ff0),
-            pieces: vec![(0x2_0018, vec![0, 1, 0, 0].into())].into(),
-            others: Arc::default(),
+            pieces: vec![(0x2_0018, &[0, 1, 0, 0])],
+            others: Vec::new(),
         };
         let words = [0x8f99_8028, 0x2739_0008, 0x0320_f809, 0];
         let calls: Vec<Flow> = insns(&words, 0x1000, &got)

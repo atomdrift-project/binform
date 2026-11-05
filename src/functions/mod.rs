@@ -438,7 +438,7 @@ impl Runs {
 
 struct Work<'a> {
     memory: Memory<'a>,
-    decoder: Decoder,
+    decoder: Decoder<'a>,
     /// Instructions left to decode.
     budget: usize,
     table_entries: usize,
@@ -596,9 +596,9 @@ struct Explored {
     unresolved: u64,
 }
 
-impl Work<'_> {
+impl<'a> Work<'a> {
     /// Decode one instruction, or `None` when the budget is spent.
-    fn decode(&mut self, bytes: &[u8], addr: u64) -> Option<Insn> {
+    fn decode(&mut self, bytes: &'a [u8], addr: u64) -> Option<Insn> {
         if self.budget == 0 {
             self.truncated = true;
             return None;
@@ -660,7 +660,7 @@ impl Work<'_> {
     /// sweep steps over them as data. A linear decode finds them; where it
     /// strays into a pool it resyncs within a few instructions, and a word
     /// another `l32r` names is skipped so the stray is brief.
-    fn collect_literals(&mut self, base: u64, bytes: &[u8]) {
+    fn collect_literals(&mut self, base: u64, bytes: &'a [u8]) {
         self.decoder.reset();
         let mut offset = 0_usize;
         while let Some(rest) = bytes.get(offset..).filter(|rest| !rest.is_empty()) {
@@ -707,7 +707,7 @@ impl Work<'_> {
     }
 
     /// Sweep the code segment at `base`; false when the budget ran out.
-    fn sweep_segment(&mut self, base: u64, bytes: &[u8], most: usize) -> bool {
+    fn sweep_segment(&mut self, base: u64, bytes: &'a [u8], most: usize) -> bool {
         let step = usize::try_from(self.decoder.alignment()).unwrap_or(1);
         let mode = self.decoder.sweep_mode();
         // Pools found in a pass before this one (sets whose literals sit

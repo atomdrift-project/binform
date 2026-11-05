@@ -24,14 +24,14 @@ const PC: u32 = 15;
 const CLOBBERED: &[u32] = &[0, 1, 2, 3, 12, 14];
 
 pub(crate) struct Arm<'a> {
-    decoder: Decoder,
+    decoder: Decoder<'a>,
     code: &'a [u8],
     /// Instructions left in the current Thumb `it` block.
     it: u32,
 }
 
-impl Arm<'_> {
-    pub(crate) fn new(bin: &Binary<'_>) -> Self {
+impl<'a> Arm<'a> {
+    pub(crate) fn new(bin: &'a Binary<'_>) -> Self {
         Self {
             decoder: Decoder::new(bin, crate::Arch::Arm),
             code: &[],

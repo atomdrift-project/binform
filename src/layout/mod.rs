@@ -62,6 +62,12 @@ impl std::error::Error for Error {}
 /// first slice of an instruction set binform decodes, else its first slice.
 /// A binary of an instruction set binform does not decode has its layout
 /// and no [`Binary::arch`].
+///
+/// # Errors
+///
+/// An [`Error`] when the file's first header cannot be read: too short,
+/// no known magic number, or a kind of file that is no executable. A
+/// damaged table further in is read as far as it goes instead.
 pub fn parse(bytes: &[u8]) -> Result<Binary<'_>, Error> {
     let mut bin = match bytes.get(..4) {
         Some(b"\x7fELF") => elf_image::binary(bytes, &elf::parse(bytes)?),

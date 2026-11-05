@@ -315,7 +315,7 @@ fn step(state: &mut Decoder, h: u32, z: u32, x: u32) -> Note {
     }
 }
 
-impl Decode for Decoder {
+impl Decode<'_> for Decoder {
     fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
         decode(self, bytes, addr)
     }

@@ -24,12 +24,12 @@ const CLOBBERED: &[u32] = &[
 ];
 
 pub(crate) struct Arm64<'a> {
-    decoder: Decoder,
+    decoder: Decoder<'a>,
     code: &'a [u8],
 }
 
-impl Arm64<'_> {
-    pub(crate) fn new(bin: &Binary<'_>) -> Self {
+impl<'a> Arm64<'a> {
+    pub(crate) fn new(bin: &'a Binary<'_>) -> Self {
         Self {
             decoder: Decoder::new(bin, crate::Arch::Arm64),
             code: &[],

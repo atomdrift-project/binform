@@ -342,12 +342,9 @@ pub(super) fn macho(
         let writable = (section.code && !table.is_empty())
             .then(|| writable(&mut data, &mut budget))
             .flatten();
-        let patched = match writable {
-            Some(data) => data,
-            None => {
-                linked.push(None);
-                continue;
-            }
+        let Some(patched) = writable else {
+            linked.push(None);
+            continue;
         };
         let r = Reader::new(table, false);
         let mut addend = 0_i64;
