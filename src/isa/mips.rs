@@ -22,8 +22,9 @@
 
 use std::sync::Arc;
 
-use crate::Segment;
-use crate::isa::{Decode, Extend, Flow, Insn, Mem, Note, Regs, relative, sext, u32_at, uint};
+use crate::isa::{
+    Decode, Extend, Flow, Insn, Mem, Memory, Note, Regs, relative, sext, u32_at, uint,
+};
 
 /// `$zero`.
 const ZERO: u32 = 0;
@@ -89,12 +90,13 @@ impl Decoder {
         let big = arch.big_endian();
         let entries = image.seeds.iter().map(|seed| seed.addr);
         let starts = image.extents.iter().map(|range| range.start);
-        let got = Got::new(image.got, &image.segments);
+        let memory = Memory::new(&image.segments);
+        let got = Got::new(image.got, &memory);
         Self {
             big,
             wide: arch.address_width() == 8,
             r6: arch.mips_r6(),
-            got: got.learn(big, entries.chain(starts), &image.segments),
+            got: got.learn(big, entries.chain(starts), &memory),
             state: State::default(),
         }
     }
@@ -185,22 +187,16 @@ impl Decode for Decoder {
 
 impl Got {
     /// The GOT `$gp` reaches, from the segments, when `gp` is known.
-    pub(crate) fn new(gp: Option<u64>, segments: &[Segment<'_>]) -> Self {
+    /// Overlapping segments are read as `memory` reads them, so the copy is
+    /// never more than the 64 KiB `$gp` reaches, however many a file stacks.
+    pub(crate) fn new(gp: Option<u64>, memory: &Memory<'_>) -> Self {
         let Some(gp) = gp else {
             return Self::default();
         };
         let (start, end) = (gp.saturating_sub(0x8000), gp.saturating_add(0x8000));
-        let pieces = segments
-            .iter()
-            .filter_map(|segment| {
-                let len = u64::try_from(segment.bytes.len()).ok()?;
-                let from = start.max(segment.addr);
-                let to = end.min(segment.addr.checked_add(len)?);
-                let at = usize::try_from(from.checked_sub(segment.addr)?).ok()?;
-                let n = usize::try_from(to.checked_sub(from)?).ok()?;
-                let bytes = segment.bytes.get(at..at.checked_add(n)?)?;
-                (n > 0).then(|| (from, bytes.into()))
-            })
+        let pieces = memory
+            .within(start, end)
+            .map(|(from, bytes)| (from, bytes.into()))
             .collect();
         Self {
             gp: Some(gp),
@@ -216,14 +212,11 @@ impl Got {
         mut self,
         big: bool,
         entries: impl Iterator<Item = u64>,
-        segments: &[Segment<'_>],
+        memory: &Memory<'_>,
     ) -> Self {
         let mut counts: std::collections::HashMap<u64, u32> = std::collections::HashMap::new();
         for entry in entries {
-            let Some(code) = segments.iter().filter(|s| s.executable).find_map(|s| {
-                let at = usize::try_from(entry.checked_sub(s.addr)?).ok()?;
-                s.bytes.get(at..)
-            }) else {
+            let Some(code) = memory.code(entry) else {
                 continue;
             };
             // The setup is within the first eight instructions.

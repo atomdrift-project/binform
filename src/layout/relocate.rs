@@ -186,8 +186,15 @@ impl ImportSlots {
     }
 }
 
+/// The bytes an object's sections may copy to be linked: a real object's
+/// sections are disjoint, so no more than the file holds (twice over), and
+/// never past [`limits::LINKED_BYTES`].
+fn link_budget(bytes: &[u8]) -> usize {
+    bytes.len().saturating_mul(2).min(limits::LINKED_BYTES)
+}
+
 /// A section's bytes, copied the first time a relocation patches them,
-/// while the copies stay within [`limits::LINKED_BYTES`].
+/// while the copies stay within the [`link_budget`].
 fn writable<'s>(bytes: &'s mut Cow<'_, [u8]>, budget: &mut usize) -> Option<&'s mut [u8]> {
     if let Cow::Borrowed(borrowed) = bytes {
         *budget = budget.checked_sub(borrowed.len())?;
@@ -239,7 +246,7 @@ pub(super) fn layout<'a>(bytes: &'a [u8], elf: &Elf, arch: Arch) -> Layout<'a> {
     // RISC-V's PC-relative low parts name the `auipc` their high part
     // fixed: its place, and the `S + A - P` it used.
     let mut high = HashMap::new();
-    let mut budget = limits::LINKED_BYTES;
+    let mut budget = link_budget(bytes);
     for &(target, ref relocs) in &elf.relocations {
         let Some(place_base) = addrs.get(target).copied() else {
             continue;
@@ -320,7 +327,7 @@ pub(super) fn macho(
         .max()
         .unwrap_or(0);
     let mut slots = ImportSlots::new(end);
-    let mut budget = limits::LINKED_BYTES;
+    let mut budget = link_budget(bytes);
     // Sections may all name one table: they share a bound on entries read.
     let mut relocations = limits::RELOCATIONS;
     let mut linked = Vec::with_capacity(sections.len());

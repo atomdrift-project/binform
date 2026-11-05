@@ -652,3 +652,37 @@ fn x86_64_inferred_noreturn() {
     assert_eq!(function(&recovery.functions, 0x1000).size, 5);
     assert_eq!(function(&recovery.functions, 0x1030).size, 6);
 }
+
+/// A jump table's cases cost the instruction budget, as many jumps would:
+/// one jump that reads hundreds of cases, in code many functions share,
+/// cannot make recovery do hundreds of times the work its limits allow.
+#[test]
+fn jump_table_cases_spend_the_budget() {
+    let mut code = vec![0xff, 0x24, 0xc5, 0x00, 0x20, 0x00, 0x00]; // jmp [rax*8 + 0x2000]
+    code.push(0xc3); // 0x1007 ret
+    let table: Vec<u8> = std::iter::repeat_n(0x1007_u64.to_le_bytes(), 300)
+        .flatten()
+        .collect();
+    let image = image(
+        Arch::X86_64,
+        vec![segment(0x1000, &code, true), segment(0x2000, &table, false)],
+        vec![entry(0x1000)],
+    );
+    let cases = |limits: &crate::Limits| {
+        let (recovery, _) = crate::functions::recover(&image, limits);
+        let jumper = recovery.function(0x1000).map_or(0, |f| {
+            f.refs.iter().filter(|r| r.kind == RefKind::Case).count()
+        });
+        (jumper, recovery.truncated)
+    };
+    assert_eq!(cases(&crate::Limits::DEFAULT), (300, false));
+    let tight = crate::Limits {
+        instructions: 100,
+        ..crate::Limits::DEFAULT
+    };
+    let (found, truncated) = cases(&tight);
+    assert!(
+        found < 100 && truncated,
+        "{found} cases, truncated {truncated}"
+    );
+}

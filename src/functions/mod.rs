@@ -203,6 +203,8 @@ pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Recovery, Vec<Det
 
     let mut functions = Vec::new();
     let mut runs = Runs::default();
+    // Each function's own runs.
+    let mut decoded = HashMap::new();
     let (mut invalid, mut unresolved) = (0_u64, 0_u64);
     let mut queue: Vec<u64> = work.entries.keys().rev().copied().collect();
     let mut scanned = false;
@@ -262,9 +264,10 @@ pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Recovery, Vec<Det
                 noted.insert(pointer);
             }
         }
-        for (start, end) in explored.runs {
+        for &(start, end) in &explored.runs {
             runs.insert(start, end);
         }
+        decoded.insert(explored.function.entry, explored.runs);
         targets.extend(
             explored
                 .function
@@ -329,6 +332,7 @@ pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Recovery, Vec<Det
         unresolved,
         truncated: work.truncated,
         stubs,
+        runs: decoded,
     };
     (recovered, details)
 }
@@ -363,7 +367,8 @@ fn data_pointers(image: &Binary<'_>, arch: Arch, work: &Work<'_>, runs: &Runs) -
     for &(_, value) in &image.rebased {
         candidate(value);
     }
-    for segment in image.segments.iter().filter(|segment| !segment.executable) {
+    // Each byte once, however many segments claim it.
+    for segment in work.memory.spans().filter(|span| !span.executable) {
         // Words aligned in the address space; a segment that ends the
         // address space has none past its last aligned one.
         let skip = segment
@@ -477,6 +482,8 @@ struct Walk {
     /// that found them.
     pending: Vec<(u64, Tracker)>,
     refs: Vec<Ref>,
+    /// The code addresses `refs` reach, to ask of in constant time.
+    referenced: HashSet<u64>,
     calls: Vec<u64>,
     mains: Vec<u64>,
     pointers: Vec<u64>,
@@ -497,6 +504,7 @@ impl Walk {
             leaders: BTreeSet::from([entry]),
             pending: Vec::new(),
             refs: Vec::new(),
+            referenced: HashSet::new(),
             calls: Vec::new(),
             mains: Vec::new(),
             pointers: Vec::new(),
@@ -509,6 +517,9 @@ impl Walk {
     }
 
     fn refer(&mut self, from: u64, to: Dest, kind: RefKind) {
+        if let Dest::Code(to) = to {
+            self.referenced.insert(to);
+        }
         self.refs.push(Ref::new(from, to, kind));
     }
 }
@@ -624,10 +635,12 @@ impl Work<'_> {
     /// (a packer's payload kept in `.text`) are skipped: what decodes there
     /// is noise, and its calls go nowhere real.
     fn sweep(&mut self, most: usize) {
+        // Each byte once, however many segments claim it.
         let segments: Vec<(u64, &[u8])> = self
             .memory
-            .code_segments()
-            .map(|segment| (segment.addr, segment.bytes))
+            .spans()
+            .filter(|span| span.executable)
+            .map(|span| (span.addr, span.bytes))
             .collect();
         if self.decoder.literals_behind() {
             for &(base, bytes) in &segments {
@@ -1010,7 +1023,7 @@ impl Work<'_> {
                     return;
                 }
                 self.entries.remove(&addr);
-                if walk.refs.iter().any(|r| r.to == Dest::Code(addr)) {
+                if walk.referenced.contains(&addr) {
                     walk.leaders.insert(addr);
                 }
             }
@@ -1179,7 +1192,15 @@ impl Work<'_> {
             | Flow::JumpRegister(_)
             | Flow::JumpAdd { .. }
             | Flow::JumpTable { .. } => {
-                let targets = self.table_targets(addr, flow, tracker);
+                let mut targets = self.table_targets(addr, flow, tracker);
+                // Each case is a reference and a block to queue: charged as
+                // an instruction, so a table read by one jump costs what
+                // its cases would.
+                if targets.len() > self.budget {
+                    targets.truncate(self.budget);
+                    self.truncated = true;
+                }
+                self.budget = self.budget.saturating_sub(targets.len());
                 walk.cases
                     .insert(addr, u32::try_from(targets.len()).unwrap_or(u32::MAX));
                 if targets.is_empty() {

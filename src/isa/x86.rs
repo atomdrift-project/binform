@@ -204,6 +204,7 @@ fn is_immediate(kind: OpKind) -> bool {
             | OpKind::Immediate16
             | OpKind::Immediate32
             | OpKind::Immediate32to64
+            | OpKind::Immediate64
     )
 }
 

@@ -146,10 +146,12 @@ pub(super) fn sleb128(bytes: &[u8], at: &mut usize) -> Option<u64> {
     })
 }
 
-/// A LEB128 number's bits and how many it has.
+/// A LEB128 number's bits and how many it has. One longer than
+/// [`limits::LEB128`] bytes is none: else every start within a long run of
+/// continuation bytes would read to its end.
 fn leb128(bytes: &[u8], at: &mut usize) -> Option<(u64, u32)> {
     let (mut value, mut shift) = (0_u64, 0_u32);
-    loop {
+    for _ in 0..limits::LEB128 {
         let byte = *bytes.get(*at)?;
         *at = at.checked_add(1)?;
         value |= u64::from(byte & 0x7f).checked_shl(shift).unwrap_or(0);
@@ -158,6 +160,7 @@ fn leb128(bytes: &[u8], at: &mut usize) -> Option<(u64, u32)> {
             return Some((value, shift));
         }
     }
+    None
 }
 
 #[cfg(test)]
@@ -200,6 +203,11 @@ mod tests {
             uleb128(&[long.as_slice(), &[1]].concat(), &mut at),
             Some(u64::MAX)
         );
+        // Longer than any encoder pads one.
+        let endless = [[0x80; limits::LEB128].as_slice(), &[1]].concat();
+        assert_eq!(uleb128(&endless, &mut 0), None);
+        // As long as may be: its one bit is past the 64th.
+        assert_eq!(uleb128(&endless, &mut 1), Some(0));
     }
 
     #[test]

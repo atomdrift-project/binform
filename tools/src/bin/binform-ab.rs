@@ -39,6 +39,10 @@ use binform::diagnostics::{is_code, named};
 use binform::{Arch, Dest, RefKind};
 use serde_json::{Value, json};
 
+/// The most bytes a `.zst` input decompresses to: well past any binary
+/// worth comparing, short of what a small file can claim.
+const MAX_DECOMPRESSED: u64 = 1 << 30;
+
 const USAGE: &str = "usage: binform-ab [functions|layout] [--rizin PATH] [--script CMDS] \
 [--timeout SECS] [--jobs N] [--save DIR] PATH...";
 
@@ -172,18 +176,43 @@ impl Input {
             });
         }
         static NEXT: AtomicUsize = AtomicUsize::new(0);
-        let bytes = zstd::decode_all(bytes.as_slice()).ok()?;
+        // A compressed file may claim any size: read at most one byte past
+        // the limit, and refuse it if that byte arrives.
+        let mut decoder = zstd::Decoder::new(bytes.as_slice()).ok()?;
+        let mut bytes = Vec::new();
+        decoder
+            .by_ref()
+            .take(MAX_DECOMPRESSED + 1)
+            .read_to_end(&mut bytes)
+            .ok()?;
+        if bytes.len() as u64 > MAX_DECOMPRESSED {
+            eprintln!(
+                "binform-ab: {}: decompresses past {MAX_DECOMPRESSED} bytes",
+                path.display()
+            );
+            return None;
+        }
         let temporary = std::env::temp_dir().join(format!(
             "binform-ab-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::write(&temporary, &bytes).ok()?;
-        Some(Self {
+        // The name is predictable and the directory may be shared: create
+        // the file afresh, never through a link or over a file another user
+        // planted, and readable by no one else.
+        let mut file = std::fs::OpenOptions::new();
+        file.write(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut file, 0o600);
+        let mut file = file.open(&temporary).ok()?;
+        // From here the file is ours, and dropping `input` removes it.
+        let input = Self {
             path: path.to_path_buf(),
             bytes,
             temporary: Some(temporary),
-        })
+        };
+        std::io::Write::write_all(&mut file, &input.bytes).ok()?;
+        Some(input)
     }
 
     /// The file rizin reads.
@@ -212,6 +241,11 @@ fn walk(path: &Path, files: &mut Vec<PathBuf>) {
             return;
         };
         for entry in entries.flatten() {
+            // A link to a directory may lead back to an ancestor: follow
+            // links named on the command line, not those found inside.
+            if entry.file_type().is_ok_and(|t| t.is_symlink()) && entry.path().is_dir() {
+                continue;
+            }
             walk(&entry.path(), files);
         }
     } else if path.is_file() {

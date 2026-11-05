@@ -116,9 +116,7 @@ impl<'a> Tracker<'a> for Arm<'a> {
             }
         };
         if conditional {
-            let mut ran = state.clone();
-            track(&mut ran);
-            state.meet(&ran);
+            state.maybe(track);
         } else {
             track(state);
         }

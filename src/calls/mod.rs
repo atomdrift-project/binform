@@ -11,8 +11,12 @@
 //! arrive from elsewhere (the entry, a branch or jump target, a landing pad)
 //! up to a jump, return or trap, where it skips to the next such place. At
 //! each of those places the value model is reset, so a value is used only
-//! where it holds on every path the recovered edges show. Work is linear in
-//! the size of the recovered functions.
+//! where it holds on every path the recovered edges show. A function's walk
+//! decodes the code recovery decoded in it, and code no function decoded
+//! that it runs straight into (a call after one that does not return), once
+//! for all functions; it skips the rest of its span (other functions' code,
+//! or data). Work is linear in what recovery decoded and the code, however
+//! many functions overlap, and records are kept one per call site.
 
 mod arm;
 mod arm64;
@@ -24,8 +28,8 @@ mod x86;
 use crate::isa::{Flow, Insn, Memory};
 use crate::{Arch, Binary, Dest, Function, Recovery, RefKind};
 use state::{State, Val};
-use std::cmp::Reverse;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::hash_map::Entry;
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::iter::once;
 use std::ops::RangeInclusive;
 
@@ -129,16 +133,78 @@ fn run<'a, T: Tracker<'a>>(
 ) -> Vec<Call> {
     let memory = Memory::for_arch(&bin.segments, arch);
     let targets = Targets::new(bin, funcs);
-    let mut found = Vec::new();
+    let mut shared = Shared::new(funcs);
     for function in &funcs.functions {
-        walk(&memory, &targets, funcs, function, &mut tracker, &mut found);
+        walk(
+            &memory,
+            &targets,
+            funcs,
+            function,
+            &mut tracker,
+            &mut shared,
+        );
     }
-    // Recovered functions can overlap, so one instruction may be walked from
-    // several of them; an address is one call site, so keep a single record
-    // per address — the one whose arguments the richest walk resolved.
-    found.sort_by_cached_key(|call| (call.addr, Reverse(richness(call))));
-    found.dedup_by_key(|call| call.addr);
+    let mut found: Vec<Call> = shared.found.into_values().collect();
+    found.sort_unstable_by_key(|call| call.addr);
     found
+}
+
+/// What the walks of a binary's functions share.
+struct Shared {
+    /// The code some function decoded, as sorted, disjoint ranges.
+    decoded: Vec<(u64, u64)>,
+    /// The addresses of code no function decoded that a walk has stepped.
+    walked: HashSet<u64>,
+    /// The call sites found, by address.
+    found: HashMap<u64, Call>,
+}
+
+impl Shared {
+    fn new(funcs: &Recovery) -> Self {
+        let mut runs: Vec<(u64, u64)> = funcs.runs.values().flatten().copied().collect();
+        runs.sort_unstable();
+        let mut decoded: Vec<(u64, u64)> = Vec::with_capacity(runs.len());
+        for (start, end) in runs {
+            match decoded.last_mut() {
+                Some(last) if last.1 >= start => last.1 = last.1.max(end),
+                _ => decoded.push((start, end)),
+            }
+        }
+        Self {
+            decoded,
+            walked: HashSet::new(),
+            found: HashMap::new(),
+        }
+    }
+
+    /// Whether a walk may step `addr`, which is not its function's code:
+    /// only when no function decoded it and no walk has stepped it, so each
+    /// such address costs one step for all walks.
+    fn adopt(&mut self, addr: u64) -> bool {
+        let below = self.decoded.partition_point(|&(start, _)| start <= addr);
+        let decoded = below
+            .checked_sub(1)
+            .and_then(|i| self.decoded.get(i))
+            .is_some_and(|&(_, end)| addr < end);
+        !decoded && self.walked.insert(addr)
+    }
+
+    /// Record `call`. Recovered functions can overlap, so one instruction
+    /// may be walked from several of them; an address is one call site, so
+    /// a single record is kept per address: the one whose arguments the
+    /// richest walk resolved, the first of those equally rich.
+    fn record(&mut self, call: Call) {
+        match self.found.entry(call.addr) {
+            Entry::Vacant(slot) => {
+                slot.insert(call);
+            }
+            Entry::Occupied(mut slot) => {
+                if richness(&call) > richness(slot.get()) {
+                    slot.insert(call);
+                }
+            }
+        }
+    }
 }
 
 /// How much a site's arguments resolved, for choosing between records of the
@@ -164,7 +230,7 @@ fn walk<'a, T: Tracker<'a>>(
     funcs: &Recovery,
     function: &Function,
     tracker: &mut T,
-    out: &mut Vec<Call>,
+    shared: &mut Shared,
 ) {
     let joins = joins(memory, targets, funcs, function);
     let Some(&start) = joins.first() else {
@@ -176,10 +242,34 @@ fn walk<'a, T: Tracker<'a>>(
     // Every block lies within `size` bytes of the lowest, and no join lies
     // below that block.
     let end = start.saturating_add(function.size);
+    // What recovery decoded in the function, where it says: a recovery
+    // built by hand walks the whole span.
+    let span = [(start, end)];
+    let runs = funcs
+        .runs
+        .get(&function.entry)
+        .map_or(span.as_slice(), Vec::as_slice);
+    let mut runs = runs.iter().copied().peekable();
     tracker.begin(code, start);
     let mut state = State::new(memory, tracker.sp(), tracker.pointer());
     let mut addr = start;
+    // Whether the walk came to `addr` from the instruction before it.
+    let mut ran_on = false;
     while addr < end {
+        while runs.next_if(|&(_, run_end)| run_end <= addr).is_some() {}
+        let own = runs.peek().is_some_and(|&(run_start, _)| run_start <= addr);
+        if !own && !(ran_on && shared.adopt(addr)) {
+            // Skip to the function's next code, where control arrives from
+            // elsewhere.
+            let Some(&(run_start, _)) = runs.peek() else {
+                break;
+            };
+            addr = run_start;
+            ran_on = false;
+            state.reset();
+            tracker.reset();
+            continue;
+        }
         if joins.contains(&addr) {
             state.reset();
             tracker.reset();
@@ -191,10 +281,11 @@ fn walk<'a, T: Tracker<'a>>(
             Step::stop(1)
         };
         let next = addr.saturating_add(u64::from(step.len.max(1)));
+        ran_on = !matches!(step.then, Then::Barrier);
         addr = match step.then {
             Then::Next => next,
             Then::Site(site) => {
-                out.push(targets.resolve(addr, site));
+                shared.record(targets.resolve(addr, site));
                 next
             }
             Then::Barrier => match joins.range(next..).next() {

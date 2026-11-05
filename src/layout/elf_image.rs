@@ -387,16 +387,23 @@ fn global_pointer(
 }
 
 /// An ELF file's import slots: the dynamic relocations against undefined
-/// symbols.
+/// symbols. Every relocation may name the same long symbol: each copies its
+/// name, so the slots stop once [`limits::NAME_BYTES`] are copied.
 fn slots(elf: &Elf) -> Vec<Slot> {
+    let mut names = limits::NAME_BYTES;
     elf.dynamic_relocations
         .iter()
         .filter(|reloc| reloc.symbol != 0)
         .filter_map(|reloc| {
             let symbol = elf.dynamic_symbols.get(reloc.symbol)?;
-            (symbol.place == Place::Undefined && !symbol.name.is_empty()).then(|| Slot {
-                slot: reloc.offset,
-                name: symbol.name.clone(),
+            (symbol.place == Place::Undefined && !symbol.name.is_empty())
+                .then_some((reloc.offset, symbol.name.as_str()))
+        })
+        .map_while(|(slot, name)| {
+            names = names.checked_sub(name.len())?;
+            Some(Slot {
+                slot,
+                name: name.to_owned(),
                 import: None,
             })
         })

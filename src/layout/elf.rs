@@ -654,6 +654,8 @@ impl Elf {
         // Entries chain by relative offsets; every one visited, file or
         // version, counts against one budget, so no chain runs long.
         let mut budget = limits::TABLE;
+        // Every version may name the same long file: name bytes copied.
+        let mut names = limits::NAME_BYTES;
         for _ in 0..count {
             let need = r.at(at);
             let (Some(version_count), Some([file, aux, next])) =
@@ -662,6 +664,10 @@ impl Elf {
                 break;
             };
             let name = string(r, strings, file);
+            let Some(left) = names.checked_sub(name.len()) else {
+                return files;
+            };
+            names = left;
             let mut version = at.saturating_add(u64::from(aux));
             for _ in 0..version_count {
                 budget = budget.saturating_sub(1);
@@ -669,6 +675,10 @@ impl Elf {
                 let (Some(index), Some(next_version)) = (aux.u16(6), aux.u32(12)) else {
                     break;
                 };
+                let Some(left) = names.checked_sub(name.len()) else {
+                    return files;
+                };
+                names = left;
                 files.insert(index & 0x7fff, name.clone());
                 if next_version == 0 || budget == 0 {
                     break;

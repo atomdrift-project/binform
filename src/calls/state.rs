@@ -76,6 +76,9 @@ pub(crate) struct State<'a> {
     sp: u32,
     /// Bytes in a pointer.
     pointer: u8,
+    /// Whether the instruction being modelled may not run: see
+    /// [`State::maybe`].
+    conditional: bool,
 }
 
 impl<'a> State<'a> {
@@ -87,6 +90,7 @@ impl<'a> State<'a> {
             memory,
             sp,
             pointer,
+            conditional: false,
         };
         state.reset();
         state
@@ -136,20 +140,22 @@ impl<'a> State<'a> {
         self.set(self.sp, sp);
     }
 
-    /// Keep only what both `self` and `other` agree on: the state after an
-    /// instruction that may or may not run, `self` the one and `other` the
-    /// other.
-    pub(crate) fn meet(&mut self, other: &Self) {
-        let sp = self.get(self.sp);
-        for (mine, theirs) in self.regs.iter_mut().zip(&other.regs) {
-            if mine != theirs {
+    /// Model `step`, an instruction that may or may not run, keeping only
+    /// what holds either way: a register it changes is unknown, as is a
+    /// frame slot it changes (what it forgets is forgotten either way, and
+    /// [`State::store`] keeps only what was there already). Done in place,
+    /// a conditional instruction costs what an unconditional one does,
+    /// however full the frame.
+    pub(crate) fn maybe(&mut self, step: impl FnOnce(&mut Self)) {
+        let (regs, sp) = (self.regs, self.get(self.sp));
+        self.conditional = true;
+        step(self);
+        self.conditional = false;
+        for (mine, before) in self.regs.iter_mut().zip(&regs) {
+            if mine != before {
                 *mine = Val::Unknown;
             }
         }
-        self.bytes
-            .retain(|off, byte| other.bytes.get(off) == Some(byte));
-        self.pointers
-            .retain(|off, stored| other.pointers.get(off) == Some(stored));
         if let (Val::Unknown, Val::Stack(off)) = (self.get(self.sp), sp) {
             self.moved(off);
         }
@@ -159,17 +165,31 @@ impl<'a> State<'a> {
     /// A stack pointer stored to other than a pointer's width leaves bytes
     /// the walk cannot tell.
     pub(crate) fn store(&mut self, off: i64, val: Val, width: u8) {
+        // A store that may not run leaves only what it would not change.
+        let (before, pointer) = if self.conditional {
+            let mut before = [None; 8];
+            for (at, byte) in offsets(off).zip(before.iter_mut().take(width.into())) {
+                *byte = self.bytes.get(&at).copied();
+            }
+            (before, self.pointers.get(&off).copied())
+        } else {
+            ([None; 8], None)
+        };
         self.forget(off, width.into());
         if self.bytes.len().saturating_add(self.pointers.len()) >= MAX_FRAME {
             return;
         }
+        let conditional = self.conditional;
         match val {
             Val::Int(n) => {
-                for (at, byte) in (off..).zip(n.to_le_bytes().into_iter().take(width.into())) {
-                    self.bytes.insert(at, byte);
+                let bytes = n.to_le_bytes().into_iter().zip(before);
+                for (at, (byte, before)) in offsets(off).zip(bytes.take(width.into())) {
+                    if !conditional || before == Some(byte) {
+                        self.bytes.insert(at, byte);
+                    }
                 }
             }
-            Val::Stack(_) if width == self.pointer => {
+            Val::Stack(_) if width == self.pointer && (!conditional || pointer == Some(val)) => {
                 self.pointers.insert(off, val);
             }
             Val::Stack(_) | Val::Unknown => {}
@@ -222,7 +242,7 @@ impl<'a> State<'a> {
             return Val::Unknown;
         }
         let mut word = [0; 8];
-        for (at, byte) in (off..).zip(word.iter_mut().take(width.into())) {
+        for (at, byte) in offsets(off).zip(word.iter_mut().take(width.into())) {
             match self.bytes.get(&at) {
                 Some(&known) => *byte = known,
                 None => return Val::Unknown,
@@ -245,7 +265,7 @@ impl<'a> State<'a> {
             Val::Stack(off) => Value::Mem {
                 addr: None,
                 bytes: trim(
-                    (off..)
+                    offsets(off)
                         .take(MAX_POINTED)
                         .map(|at| self.bytes.get(&at).copied())
                         .collect(),
@@ -268,6 +288,12 @@ impl<'a> State<'a> {
             bytes: trim(bytes),
         })
     }
+}
+
+/// The frame offsets from `off` up, ending at the top of their range rather
+/// than wrapping past it.
+fn offsets(off: i64) -> impl Iterator<Item = i64> {
+    std::iter::successors(Some(off), |at| at.checked_add(1))
 }
 
 /// Swap the bytes of each 16-bit half: `rev16`, which puts a port in network

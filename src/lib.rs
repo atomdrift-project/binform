@@ -46,7 +46,7 @@ mod syscalls;
 mod tests;
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ops::Range;
 
 pub use calls::{Call, Target, Value, calls};
@@ -543,6 +543,11 @@ impl Binary<'_> {
     #[must_use]
     pub fn syscall(&self, number: u64) -> Option<&'static str> {
         match (self.format, self.arch) {
+            // Linux reads the number as an `int` on these: the high half of
+            // the register is ignored, and may hide the call from a lookup.
+            (Format::Elf, Some(arch @ (Arch::X86_64 | Arch::Arm64))) => {
+                syscalls::name(arch, number & 0xffff_ffff)
+            }
             (Format::Elf, Some(arch)) => syscalls::name(arch, number),
             _ => None,
         }
@@ -561,7 +566,9 @@ impl Binary<'_> {
     }
 
     /// The import whose address the loader writes to `slot`, and its index
-    /// in [`imports`](Self::imports).
+    /// in [`imports`](Self::imports). `None` for a slot two different
+    /// imports claim, as only the loader that runs the file can tell which
+    /// of them it holds.
     #[must_use]
     pub fn import(&self, slot: u64) -> Option<(usize, &Import)> {
         let at = self.slots.binary_search_by_key(&slot, |s| s.slot).ok()?;
@@ -571,16 +578,46 @@ impl Binary<'_> {
 
     /// Sort the slots by address and point each at its import: the one
     /// whose own slot it is, else the first of its name.
+    ///
+    /// A slot two different imports claim is contested, and names none:
+    /// which one the loader leaves there depends on the loader (glibc
+    /// applies `DT_JMPREL` after `DT_RELA`, musl before; Windows skips a
+    /// bound import table), so a file could name a harmless import where a
+    /// loader writes another. It stays a slot, so what it holds in the
+    /// file is never taken for a call's target.
     pub(crate) fn index_slots(&mut self) {
+        /// What makes two imports the same function.
+        fn identity(import: &Import) -> (&str, Option<&str>, Option<u16>) {
+            (
+                import.name.as_str(),
+                import.library.as_deref(),
+                import.ordinal,
+            )
+        }
         let mut by_slot = HashMap::new();
         let mut by_name = HashMap::new();
+        let mut contested = HashSet::new();
         for (i, import) in self.imports.iter().enumerate() {
             if let Some(slot) = import.slot {
-                by_slot.entry(slot).or_insert(i);
+                let first = *by_slot.entry(slot).or_insert(i);
+                if self.imports.get(first).map(identity) != Some(identity(import)) {
+                    contested.insert(slot);
+                }
             }
             by_name.entry(import.name.as_str()).or_insert(i);
         }
+        let mut names: HashMap<u64, &str> = HashMap::new();
+        for slot in &self.slots {
+            if *names.entry(slot.slot).or_insert(&slot.name) != slot.name {
+                contested.insert(slot.slot);
+            }
+        }
         for slot in &mut self.slots {
+            if contested.contains(&slot.slot) {
+                slot.name.clear();
+                slot.import = None;
+                continue;
+            }
             slot.import = by_slot
                 .get(&slot.slot)
                 .or_else(|| by_name.get(slot.name.as_str()))
@@ -847,6 +884,9 @@ pub struct Recovery {
     pub truncated: bool,
     /// Each stub's entry, and the import slot it only jumps through.
     pub(crate) stubs: BTreeMap<u64, u64>,
+    /// Each function's entry, and the address ranges of the instructions
+    /// recovery decoded in it, in order: what [`calls`] walks.
+    pub(crate) runs: HashMap<u64, Vec<(u64, u64)>>,
 }
 
 impl Recovery {

@@ -26,6 +26,11 @@ pub struct Diagnostic {
 #[must_use]
 pub fn recover(bin: &Binary<'_>, limits: &Limits) -> (Recovery, Vec<Diagnostic>) {
     let (functions, details) = crate::functions::recover(bin, limits);
+    let padded: std::collections::HashSet<u64> = bin
+        .handlers
+        .iter()
+        .map(|handler| handler.function)
+        .collect();
     let diagnostics = functions
         .functions
         .iter()
@@ -42,7 +47,7 @@ pub fn recover(bin: &Binary<'_>, limits: &Limits) -> (Recovery, Vec<Diagnostic>)
                 edges,
                 thunk,
                 found: found.names().collect(),
-                padded: bin.handlers.iter().any(|h| h.function == f.entry),
+                padded: padded.contains(&f.entry),
             },
         )
         .collect();

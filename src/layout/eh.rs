@@ -63,11 +63,19 @@ pub(super) fn eh_frame(
         let end = at.checked_add(header)?.checked_add(length)?;
         (end <= r.bytes.len() as u64).then_some((end, fde))
     };
+    // Each CIE parsed once: every FDE may name the same one, and a CIE
+    // can be made slow to parse (gimli reads each augmentation letter).
+    let mut cies = HashMap::new();
+    let mut cie = |section: &EhFrame<_>, bases: &BaseAddresses, offset: EhFrameOffset| {
+        cies.entry(offset)
+            .or_insert_with(|| section.cie_from_offset(bases, offset))
+            .clone()
+    };
     let mut extents = Vec::new();
     let mut at = 0;
     while let Some((end, fde)) = record(at) {
         let offset = EhFrameOffset(usize::try_from(at).unwrap_or(usize::MAX));
-        if fde && let Ok(fde) = eh_frame.fde_from_offset(&bases, offset, EhFrame::cie_from_offset) {
+        if fde && let Ok(fde) = eh_frame.fde_from_offset(&bases, offset, &mut cie) {
             let function = fde.initial_address();
             extents.push(function..function.saturating_add(fde.len()));
             let lsda = match fde.lsda() {

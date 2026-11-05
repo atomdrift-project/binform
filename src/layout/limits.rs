@@ -37,6 +37,10 @@ pub(super) const IMPORTS: usize = 1 << 18;
 /// tables hold well under a megabyte of names.
 pub(super) const NAME_BYTES: usize = 32 << 20;
 
+/// The longest LEB128 number read, in bytes: ten hold 64 bits, and
+/// encoders pad one to a few more at most.
+pub(super) const LEB128: usize = 32;
+
 /// The longest name read: symbol, section, library or function.
 pub(super) const NAME_LEN: usize = 1 << 12;
 

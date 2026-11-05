@@ -209,6 +209,26 @@ fn x86_64_connect_sockaddr_spilled_and_reloaded() {
     assert_eq!(connect.args[2], Value::Int(16));
 }
 
+/// Linux takes the low 32 bits of the number on x86-64 and arm64: a high
+/// half set does not hide the call's name.
+#[test]
+fn syscall_names_ignore_the_high_half_where_linux_does() {
+    #[rustfmt::skip]
+    let (bin, calls) = walk(Arch::X86_64, 0x1000, 0x1000, vec![
+        0x48, 0xb8, 0x29, 0, 0, 0, 1, 0, 0, 0, // mov rax, 0x1_0000_0029  ; socket
+        0x0f, 0x05,                         // syscall
+        0xc3,                               // ret
+    ]);
+    let socket = syscall(&calls);
+    assert_eq!(socket.target, Target::Syscall(Some(0x1_0000_0029)));
+    assert_eq!(bin.syscall(0x1_0000_0029), Some("socket"));
+    let arm64 = image(Arch::Arm64, 0x1000, Vec::new());
+    assert_eq!(arm64.syscall(0xffff_ffff_0000_00c6), Some("socket"));
+    // Elsewhere, the whole register is the number.
+    let mips = image(Arch::Mips, 0x1000, Vec::new());
+    assert_eq!(mips.syscall(0x1_0000_0000 + 4183), None);
+}
+
 /// 32-bit x86 `int 0x80`: `write(1, buf, 4)` with the buffer in an `ebp`
 /// frame below the saved `ebp`, at a negative displacement.
 #[test]
@@ -303,6 +323,47 @@ fn arm_ldm_overwrites_its_registers() {
         ]),
     );
     assert_eq!(syscall(&calls).target, Target::Syscall(None));
+}
+
+/// A store that may not run keeps a frame byte only where it would write
+/// what is there already; elsewhere the byte is unknown.
+#[test]
+fn arm_conditional_store_keeps_what_it_would_not_change() {
+    let (_, calls) = walk(
+        Arch::Arm,
+        0x1000,
+        0x1000,
+        code(&[
+            0xe3a01005, // mov   r1, #5
+            0xe3a02006, // mov   r2, #6
+            0xe58d1000, // str   r1, [sp]
+            0xe58d2004, // str   r2, [sp, #4]
+            0x158d1000, // strne r1, [sp]       ; the same: kept
+            0x158d1004, // strne r1, [sp, #4]   ; 5 over 6: the low byte unknown
+            0x158d1008, // strne r1, [sp, #8]   ; over nothing: unknown
+            0xe1a0100d, // mov   r1, sp
+            0xe3a07004, // mov   r7, #4
+            0xef000000, // svc   #0
+            0xe12fff1e, // bx    lr
+        ]),
+    );
+    let known = |b: u8| Some(b);
+    assert_eq!(
+        syscall(&calls).args[1],
+        Value::Mem {
+            addr: None,
+            bytes: vec![
+                known(5),
+                known(0),
+                known(0),
+                known(0),
+                None,
+                known(0),
+                known(0),
+                known(0)
+            ],
+        }
+    );
 }
 
 /// Thumb `connect(fd, &sockaddr, 16)`, the sockaddr stored through `sp` and
@@ -549,6 +610,62 @@ fn calls_reach_imports_through_slots_and_stubs() {
     );
 }
 
+/// A slot two different imports claim names neither: which the loader
+/// leaves there depends on the loader, so a decoy (an `exit` that would end
+/// the caller's block, a harmless name for `connect`) cannot pass for it.
+/// The same import claiming a slot twice is no contest.
+#[test]
+fn contested_slots_name_no_import() {
+    #[rustfmt::skip]
+    let mut bin = image(Arch::X86_64, 0x1000, vec![
+        0xff, 0x15, 0xfa, 0x1f, 0x00, 0x00, // call [rip+0x1ffa]            ; 0x3000
+        0xff, 0x15, 0xfc, 0x1f, 0x00, 0x00, // call [rip+0x1ffc]            ; 0x3008
+        0xc3,                               // ret
+    ]);
+    let import = |name: &str, library: &str, slot: u64| Import {
+        name: name.into(),
+        library: Some(library.into()),
+        slot: Some(slot),
+        ..Default::default()
+    };
+    bin.imports = vec![
+        import("connect", "libc.so.6", 0x3000),
+        import("exit", "decoy.so", 0x3000),
+        import("puts", "libc.so.6", 0x3008),
+    ];
+    let slot = |slot: u64, name: &str| Slot {
+        slot,
+        name: name.into(),
+        import: None,
+    };
+    bin.slots = vec![
+        slot(0x3000, "connect"),
+        slot(0x3000, "exit"),
+        // GLOB_DAT and JUMP_SLOT of one symbol.
+        slot(0x3008, "puts"),
+        slot(0x3008, "puts"),
+    ];
+    bin.index_slots();
+    assert!(bin.import(0x3000).is_none());
+    assert!(
+        bin.slots
+            .iter()
+            .all(|s| s.slot != 0x3000 || s.name.is_empty())
+    );
+    assert_eq!(bin.import(0x3008).map(|(i, _)| i), Some(2));
+    let targets: Vec<Target> = calls(&bin, &one(0x1000, 0xd, Vec::new()))
+        .iter()
+        .map(|c| c.target)
+        .collect();
+    assert_eq!(targets, [Target::Unknown, Target::Import(2)]);
+
+    // By name alone, as an ELF file's relocations name them.
+    bin.imports.iter_mut().for_each(|i| i.slot = None);
+    bin.slots = vec![slot(0x3000, "exit"), slot(0x3000, "connect")];
+    bin.index_slots();
+    assert!(bin.import(0x3000).is_none());
+}
+
 /// The walk resets where control may arrive from elsewhere (a branch
 /// target), and does not decode what no block reaches (the bytes after a
 /// return).
@@ -612,6 +729,67 @@ fn overlapping_walks_keep_the_richest_record() {
     assert_eq!(found.len(), 1, "{found:#?}");
     assert_eq!(found[0].target, Target::Addr(0x2000));
     assert_eq!(found[0].args, [Value::Int(5)]);
+}
+
+/// Where recovery says what it decoded, a walk leaves code another function
+/// decoded to that function, whose walk starts afresh at its entry: the
+/// value the first function's path left is not one every path gives.
+#[test]
+fn walks_leave_other_functions_code_to_them() {
+    #[rustfmt::skip]
+    let bin = image(Arch::X86_64, 0x1000, vec![
+        0xbf, 0x05, 0x00, 0x00, 0x00,       // mov  edi, 5
+        0xe8, 0xf6, 0x0f, 0x00, 0x00,       // call 0x2000                  ; another entry
+        0xc3,                               // ret
+    ]);
+    let mut funcs = Recovery {
+        functions: vec![
+            Function {
+                entry: 0x1000,
+                size: 11,
+                ..Default::default()
+            },
+            Function {
+                entry: 0x1005,
+                size: 6,
+                ..Default::default()
+            },
+        ],
+        ..Default::default()
+    };
+    funcs.runs.insert(0x1000, vec![(0x1000, 0x1005)]);
+    funcs.runs.insert(0x1005, vec![(0x1005, 0x100b)]);
+    let found = calls(&bin, &funcs);
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].target, Target::Addr(0x2000));
+    assert_eq!(found[0].args, []);
+}
+
+/// Code no function decoded that a walk runs straight into (a call after
+/// one recovery took not to return, as Go's `deferreturn` follows a panic)
+/// is walked on from the code before it.
+#[test]
+fn walks_run_on_into_code_no_function_decoded() {
+    #[rustfmt::skip]
+    let bin = image(Arch::X86_64, 0x1000, vec![
+        0xe8, 0xfb, 0x0f, 0x00, 0x00,       // call 0x2000                  ; never returns
+        0xbf, 0x09, 0x00, 0x00, 0x00,       // mov  edi, 9                  ; not decoded
+        0xe8, 0xf1, 0x1f, 0x00, 0x00,       // call 0x3000
+        0xc3,                               // ret
+    ]);
+    let mut funcs = one(0x1000, 0x10, Vec::new());
+    funcs.runs.insert(0x1000, vec![(0x1000, 0x1005)]);
+    let found: Vec<(u64, Target, Vec<Value>)> = calls(&bin, &funcs)
+        .into_iter()
+        .map(|c| (c.addr, c.target, c.args))
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (0x1000, Target::Addr(0x2000), Vec::new()),
+            (0x100a, Target::Addr(0x3000), vec![Value::Int(9)]),
+        ]
+    );
 }
 
 /// The calls of a fixture, recovered as a consumer would.

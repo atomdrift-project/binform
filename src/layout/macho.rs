@@ -219,6 +219,9 @@ pub(super) fn parse(bytes: &[u8]) -> Result<MachO, Error> {
         chained_fixups: None,
     };
     let (mut main, mut thread) = (None, None);
+    // The last symbol table commands, read once the commands are: a file
+    // may repeat them, and reading each would read the tables as often.
+    let (mut symtab, mut dysymtab) = (None, None);
     let mut at: u64 = if is_64 { 32 } else { 28 };
     let end = at.saturating_add(u64::from(sizeofcmds));
     // A (file offset, size) pair at `field` in the command; `None` for an
@@ -243,15 +246,8 @@ pub(super) fn parse(bytes: &[u8]) -> Result<MachO, Error> {
         let c = Reader::new(file_range(bytes, at, u64::from(size)), big);
         match cmd {
             LC_SEGMENT | LC_SEGMENT_64 => macho.read_segment(&c, size, cmd == LC_SEGMENT_64),
-            LC_SYMTAB => macho.read_symbols(&r, &c),
-            // The indirect symbol table.
-            LC_DYSYMTAB => {
-                if let (Some(offset), Some(count)) = (c.u32(56), c.u32(60)) {
-                    macho.indirect = read::table(u64::from(offset), 4, u64::from(count))
-                        .map_while(|at| r.u32(at))
-                        .collect();
-                }
-            }
+            LC_SYMTAB if c.u32s([8, 12, 16, 20]).is_some() => symtab = Some(c),
+            LC_DYSYMTAB => dysymtab = c.u32(56).zip(c.u32(60)).or(dysymtab),
             LC_DYLD_INFO | LC_DYLD_INFO_ONLY => {
                 // Bind at 16, weak bind at 24 (by name alone, no library),
                 // lazy bind at 32; the export trie at 40.
@@ -279,6 +275,15 @@ pub(super) fn parse(bytes: &[u8]) -> Result<MachO, Error> {
             _ => {}
         }
         at = at.saturating_add(u64::from(size));
+    }
+    if let Some(c) = symtab {
+        macho.read_symbols(&r, &c);
+    }
+    // The indirect symbol table.
+    if let Some((offset, count)) = dysymtab {
+        macho.indirect = read::table(u64::from(offset), 4, u64::from(count))
+            .map_while(|at| r.u32(at))
+            .collect();
     }
     // dyld prefers LC_MAIN, an offset from the start of `__TEXT`.
     macho.entry = match (main, thread) {
@@ -431,10 +436,13 @@ pub(super) fn exports_trie(trie: &[u8]) -> Vec<(String, Exported)> {
     let mut out = Vec::new();
     let mut visited = HashSet::new();
     let mut stack = vec![(0_usize, Vec::new())];
-    // Name bytes built: each child copies its parent's prefix, so a chain of
-    // terminal nodes costs the square of its length. Real names are short,
-    // and a real trie's total well under a megabyte.
+    // Name bytes scanned and built: each child copies its parent's prefix,
+    // so a chain of terminal nodes costs the square of its length, and
+    // nodes may share one long list of edges. Real names are short, and a
+    // real trie's total well under a megabyte.
     let mut budget = limits::NAME_BYTES;
+    // Nodes queued: many parents may name one child before it is visited.
+    let mut queued = 0_usize;
     let cstr = |at: usize| Reader::new(trie, false).cstr(at as u64);
     while let Some((node, prefix)) = stack.pop() {
         if !visited.insert(node) || visited.len() > limits::TRIE_NODES {
@@ -453,9 +461,18 @@ pub(super) fn exports_trie(trie: &[u8]) -> Vec<(String, Exported)> {
             } else {
                 // The library's ordinal, then the name it exports there
                 // (empty for the same name).
-                read::uleb128(trie, &mut at).map(|ordinal| Exported::Reexport {
-                    ordinal,
-                    name: String::from_utf8_lossy(cstr(at)).into_owned(),
+                read::uleb128(trie, &mut at).and_then(|ordinal| {
+                    let name = cstr(at);
+                    let Some(left) = budget.checked_sub(name.len()) else {
+                        // Spent: no later name is read either.
+                        budget = 0;
+                        return None;
+                    };
+                    budget = left;
+                    Some(Exported::Reexport {
+                        ordinal,
+                        name: String::from_utf8_lossy(name).into_owned(),
+                    })
                 })
             };
             if let Some(exported) = exported {
@@ -473,6 +490,10 @@ pub(super) fn exports_trie(trie: &[u8]) -> Vec<(String, Exported)> {
             else {
                 break;
             };
+            let Some(left) = budget.checked_sub(len) else {
+                return out;
+            };
+            budget = left;
             let edge = trie.get(at..at.saturating_add(len)).unwrap_or_default();
             at = at.saturating_add(len).saturating_add(1);
             let Some(child) = read::uleb128(trie, &mut at) else {
@@ -482,12 +503,17 @@ pub(super) fn exports_trie(trie: &[u8]) -> Vec<(String, Exported)> {
             if size > limits::NAME_LEN || size > budget {
                 continue;
             }
+            let Ok(child) = usize::try_from(child) else {
+                continue;
+            };
+            if visited.contains(&child) || queued >= limits::TRIE_NODES {
+                continue;
+            }
+            queued = queued.saturating_add(1);
             budget = budget.saturating_sub(size);
             let mut name = prefix.clone();
             name.extend_from_slice(edge);
-            if let Ok(child) = usize::try_from(child) {
-                stack.push((child, name));
-            }
+            stack.push((child, name));
         }
     }
     out
@@ -514,6 +540,7 @@ pub(super) fn bound_ordinals<'a>(bytes: &'a [u8], macho: &MachO) -> Vec<(String,
     // Name bytes looked at: every bind and import entry may name the same
     // long string, which costs a hash each time.
     let mut budget = limits::NAME_BYTES;
+    // Whether any budget is left.
     let mut record = |name: &'a [u8], ordinal: i64| {
         budget = budget.saturating_sub(name.len());
         if budget > 0
@@ -523,9 +550,12 @@ pub(super) fn bound_ordinals<'a>(bytes: &'a [u8], macho: &MachO) -> Vec<(String,
         {
             out.push((String::from_utf8_lossy(name).into_owned(), ordinal));
         }
+        budget > 0
     };
     for &(offset, size) in &macho.binds {
-        bind_opcodes(file_range(bytes, offset, size), &mut record);
+        bind_opcodes(file_range(bytes, offset, size), &mut |name, ordinal| {
+            record(name, ordinal);
+        });
     }
     if let Some((offset, size)) = macho.chained_fixups {
         chained_imports(file_range(bytes, offset, size), macho.big, &mut record);
@@ -609,8 +639,8 @@ fn bind_opcodes<'a>(stream: &'a [u8], record: &mut impl FnMut(&'a [u8], i64)) {
 
 /// The (symbol, library ordinal) of each entry of a chained-fixup import
 /// table (`dyld_chained_fixups_header`), in any of its three formats. A
-/// compressed symbol table is not read.
-fn chained_imports<'a>(data: &'a [u8], big: bool, record: &mut impl FnMut(&'a [u8], i64)) {
+/// compressed symbol table is not read. `record` says whether to go on.
+fn chained_imports<'a>(data: &'a [u8], big: bool, record: &mut impl FnMut(&'a [u8], i64) -> bool) {
     let r = Reader::new(data, big);
     // imports_offset, symbols_offset, imports_count, imports_format,
     // symbols_format.
@@ -643,7 +673,11 @@ fn chained_imports<'a>(data: &'a [u8], big: bool, record: &mut impl FnMut(&'a [u
         let Some((ordinal, name)) = entry else {
             break;
         };
-        record(r.cstr(u64::from(symbols).saturating_add(name)), ordinal);
+        // Once the names budget is spent, reading more costs and keeps
+        // nothing.
+        if !record(r.cstr(u64::from(symbols).saturating_add(name)), ordinal) {
+            break;
+        }
     }
 }
 
@@ -947,6 +981,7 @@ mod tests {
             let mut found = Vec::new();
             chained_imports(&data, false, &mut |name, ordinal| {
                 found.push((String::from_utf8_lossy(name).into_owned(), ordinal));
+                true
             });
             found
         };

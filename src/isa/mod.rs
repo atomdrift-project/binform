@@ -622,8 +622,17 @@ impl Decoder {
 
     /// Decode the instruction at the start of `bytes`, mapped at `addr`,
     /// and carry what it leaves in registers on as [`Decode`] says.
+    ///
+    /// No instruction is empty: every walk steps on by lengths, and one of
+    /// zero would hold it at the same address for good. A decoder that
+    /// reports one has its bytes taken as invalid, a unit of alignment long.
     pub(crate) fn decode(&mut self, bytes: &[u8], addr: u64) -> Insn {
-        each!(&mut self.isa, d => d.advance(bytes, addr))
+        let insn = each!(&mut self.isa, d => d.advance(bytes, addr));
+        if insn.len == 0 {
+            let unit = u32::try_from(self.alignment()).unwrap_or(1).max(1);
+            return Insn::new(unit, Flow::Invalid);
+        }
+        insn
     }
 
     /// Whether a GOT slot of a function of the binary holds its address in
@@ -891,6 +900,9 @@ impl<T: Copy, const N: usize> Regs<T, N> {
 pub(crate) struct Memory<'a> {
     /// Sorted by address.
     segments: Vec<Span<'a>>,
+    /// Which segment holds each address: sorted, disjoint runs, each from
+    /// its address to the next run's, of `segments[index]` or of nothing.
+    views: Vec<(u64, Option<usize>)>,
     /// Words are stored most significant byte first.
     big: bool,
     /// Cleared from a code address before it is looked up: bit 0, which
@@ -918,8 +930,10 @@ impl<'a> Memory<'a> {
             })
             .collect();
         segments.sort_by_key(|segment| segment.addr);
+        let views = views(&segments);
         Self {
             segments,
+            views,
             big: false,
             code_mask: !0,
         }
@@ -938,19 +952,68 @@ impl<'a> Memory<'a> {
     /// The bytes from `addr` to the end of its segment, and whether they are
     /// code.
     pub(crate) fn at(&self, addr: u64) -> Option<(&'a [u8], bool)> {
-        let end = self
-            .segments
-            .partition_point(|segment| segment.addr <= addr);
-        // Overlapping segments (a malformed header can declare them) fall
-        // back to the nearest one below that still contains `addr`.
-        self.segments.get(..end)?.iter().rev().find_map(|segment| {
-            let offset = usize::try_from(addr.checked_sub(segment.addr)?).ok()?;
-            let bytes = segment
-                .bytes
-                .get(offset..)
-                .filter(|bytes| !bytes.is_empty())?;
-            Some((bytes, segment.executable))
-        })
+        let view = self
+            .views
+            .partition_point(|&(start, _)| start <= addr)
+            .checked_sub(1)?;
+        let (_, index) = *self.views.get(view)?;
+        let segment = self.segments.get(index?)?;
+        let offset = usize::try_from(addr.checked_sub(segment.addr)?).ok()?;
+        let bytes = segment
+            .bytes
+            .get(offset..)
+            .filter(|bytes| !bytes.is_empty())?;
+        Some((bytes, segment.executable))
+    }
+
+    /// The mapped bytes, each address once: disjoint runs in address
+    /// order, each from the segment [`Memory::at`] reads it from. Walks
+    /// over them cost the bytes mapped, however many segments overlap.
+    pub(crate) fn spans(&self) -> impl Iterator<Item = Span<'a>> {
+        self.spans_from(0)
+    }
+
+    /// The spans from the one in `self.views[first]` on.
+    fn spans_from(&self, first: usize) -> impl Iterator<Item = Span<'a>> {
+        let views = self.views.get(first..).unwrap_or_default();
+        let nexts = views.iter().skip(1).map(|&(at, _)| Some(at)).chain([None]);
+        let segments = &self.segments;
+        views
+            .iter()
+            .zip(nexts)
+            .filter_map(move |(&(at, index), next)| {
+                let segment = segments.get(index?)?;
+                let offset = usize::try_from(at.checked_sub(segment.addr)?).ok()?;
+                let bytes = segment.bytes.get(offset..)?;
+                // A view runs to the next one's start, within its segment.
+                let len = next
+                    .and_then(|next| usize::try_from(next.checked_sub(at)?).ok())
+                    .unwrap_or(usize::MAX);
+                Some(Span {
+                    addr: at,
+                    bytes: bytes.get(..len.min(bytes.len()))?,
+                    executable: segment.executable,
+                })
+            })
+    }
+
+    /// The mapped bytes from `start` up to `end`, as [`Memory::spans`]
+    /// gives them.
+    pub(crate) fn within(&self, start: u64, end: u64) -> impl Iterator<Item = (u64, &'a [u8])> {
+        let first = self
+            .views
+            .partition_point(|&(at, _)| at <= start)
+            .saturating_sub(1);
+        self.spans_from(first)
+            .take_while(move |span| span.addr < end)
+            .filter_map(move |span| {
+                let from = span.addr.max(start);
+                let skip = usize::try_from(from.checked_sub(span.addr)?).ok()?;
+                let len = usize::try_from(end.checked_sub(from)?).unwrap_or(usize::MAX);
+                let bytes = span.bytes.get(skip..)?;
+                let bytes = bytes.get(..len.min(bytes.len()))?;
+                (!bytes.is_empty()).then_some((from, bytes))
+            })
     }
 
     /// The code from `addr` to the end of its segment, when `addr` is in
@@ -975,10 +1038,52 @@ impl<'a> Memory<'a> {
     pub(crate) fn big_endian(&self) -> bool {
         self.big
     }
+}
 
-    pub(crate) fn code_segments(&self) -> impl Iterator<Item = &Span<'a>> {
-        self.segments.iter().filter(|segment| segment.executable)
+/// Which of `segments` (sorted by address) holds each address, as
+/// [`Memory::views`] records it. Where segments overlap, as a malformed
+/// header can make them, the one that starts last holds the address, of
+/// those listed last when several start together: resolved once here, so a
+/// lookup costs one binary search however many segments a file stacks.
+fn views(segments: &[Span<'_>]) -> Vec<(u64, Option<usize>)> {
+    // Where each segment ends; one that reaches the top of the address
+    // space never does.
+    let mut ends: Vec<(u64, usize)> = segments
+        .iter()
+        .enumerate()
+        .filter_map(|(i, segment)| {
+            let len = u64::try_from(segment.bytes.len()).ok()?;
+            Some((segment.addr.checked_add(len)?, i))
+        })
+        .collect();
+    ends.sort_unstable();
+    let mut ends = ends.into_iter().peekable();
+    let mut starts = segments
+        .iter()
+        .enumerate()
+        .map(|(i, segment)| (segment.addr, i))
+        .peekable();
+    let mut open = std::collections::BTreeSet::new();
+    let mut views: Vec<(u64, Option<usize>)> = Vec::new();
+    loop {
+        let at = match (starts.peek(), ends.peek()) {
+            (Some(&(start, _)), Some(&(end, _))) => start.min(end),
+            (Some(&(start, _)), None) => start,
+            (None, Some(&(end, _))) => end,
+            (None, None) => break,
+        };
+        while let Some((_, i)) = ends.next_if(|&(end, _)| end == at) {
+            open.remove(&i);
+        }
+        while let Some((_, i)) = starts.next_if(|&(start, _)| start == at) {
+            open.insert(i);
+        }
+        let top = open.last().copied();
+        if views.last().map(|&(_, index)| index) != Some(top) {
+            views.push((at, top));
+        }
     }
+    views
 }
 
 #[cfg(test)]
@@ -1050,6 +1155,73 @@ mod tests {
         assert!(memory.at(0xfff).is_none());
         assert!(memory.is_code(0x10ff));
         assert!(!memory.is_code(0x1080));
+    }
+
+    #[test]
+    fn nested_segments_resume_the_one_below_where_they_end() {
+        let (outer, middle, inner) = ([1_u8; 0x100], [2_u8; 0x40], [3_u8; 0x10]);
+        let segments = [
+            segment(0x1000, &outer, true),
+            segment(0x1020, &middle, false),
+            segment(0x1030, &inner, true),
+            // Starts with the outer one but is listed later: it shows.
+            segment(0x1000, &[4_u8; 8], false),
+        ];
+        let memory = Memory::new(&segments);
+        let at = |addr| memory.at(addr).map(|(b, x)| (b[0], b.len(), x));
+        assert_eq!(at(0x1000), Some((4, 8, false)));
+        assert_eq!(at(0x1008), Some((1, 0xf8, true)));
+        assert_eq!(at(0x1020), Some((2, 0x40, false)));
+        assert_eq!(at(0x1035), Some((3, 0xb, true)));
+        assert_eq!(at(0x1040), Some((2, 0x20, false)));
+        assert_eq!(at(0x1060), Some((1, 0xa0, true)));
+        assert_eq!(at(0x1100), None);
+
+        // Each address once, from the segment that shows there.
+        let runs: Vec<(u64, u8, usize)> = memory
+            .within(0x1004, 0x1048)
+            .map(|(addr, bytes)| (addr, bytes[0], bytes.len()))
+            .collect();
+        assert_eq!(
+            runs,
+            [
+                (0x1004, 4, 4),
+                (0x1008, 1, 0x18),
+                (0x1020, 2, 0x10),
+                (0x1030, 3, 0x10),
+                (0x1040, 2, 8),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_segment_reaching_the_top_of_the_address_space_holds_it() {
+        let bytes = [5_u8; 0x10];
+        let segments = [segment(u64::MAX - 0xf, &bytes, false)];
+        let memory = Memory::new(&segments);
+        assert_eq!(memory.at(u64::MAX).map(|(b, _)| b.len()), Some(1));
+        assert_eq!(memory.within(u64::MAX - 1, u64::MAX).count(), 1);
+    }
+
+    /// A header can stack a segment per section: a lookup that misses all
+    /// of them, or falls through all of them to one below, stays cheap.
+    #[test]
+    fn stacked_segments_cost_one_search() {
+        let (base, tiny) = ([1_u8; 0x10_0000], [2_u8; 1]);
+        let mut segments = vec![segment(0, &base, true)];
+        segments.extend((1..=0x1_0000).map(|i| segment(i * 8, &tiny, false)));
+        let memory = Memory::new(&segments);
+        for i in 0..0x1_0000_u64 {
+            assert!(memory.is_code(0x8_0001 + i));
+            assert!(memory.at(0x20_0000 + i).is_none());
+        }
+        assert_eq!(
+            memory
+                .within(0, 0x10_0000)
+                .map(|(_, b)| b.len())
+                .sum::<usize>(),
+            0x10_0000
+        );
     }
 
     #[test]
@@ -1183,12 +1355,15 @@ mod tests {
                 let mut decoder = Decoder::new(&image, arch);
                 for at in 0..buffer.len() {
                     let addr = base + at as u64;
-                    for len in 1..=8 {
+                    // Up to the longest encodings: m68k's 22 bytes, x86's 15.
+                    for len in 1..=24 {
                         let Some(bytes) = buffer.get(at..at + len) else {
                             break;
                         };
                         for addr in [addr, addr | 1] {
-                            let insn = decoder.decode(bytes, addr);
+                            // The decoder itself, not `decode`, which mends
+                            // an empty instruction.
+                            let insn = each!(&mut decoder.isa, d => d.advance(bytes, addr));
                             assert!(insn.len > 0, "{arch:?} {bytes:02x?} at {addr:#x}");
                             decoder.starts_frame(bytes);
                             decoder.literal(bytes, addr);
