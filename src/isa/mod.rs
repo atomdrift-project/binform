@@ -886,12 +886,15 @@ impl<T: Copy, const N: usize> Regs<T, N> {
         }
     }
 
-    /// Forget each register whose bit is set in `mask`.
-    pub(crate) fn forget(&mut self, mask: u64) {
-        for (reg, slot) in self.0.iter_mut().enumerate().take(64) {
-            if mask >> reg & 1 != 0 {
+    /// Forget each register whose bit is set in `mask`: by the bits set,
+    /// as a mask names a register or two, not by every register.
+    pub(crate) fn forget(&mut self, mut mask: u64) {
+        while mask != 0 {
+            let reg = usize::try_from(mask.trailing_zeros()).unwrap_or(usize::MAX);
+            if let Some(slot) = self.0.get_mut(reg) {
                 *slot = None;
             }
+            mask &= mask.wrapping_sub(1);
         }
     }
 }

@@ -29,7 +29,7 @@ use crate::isa::{Flow, Insn, Memory};
 use crate::{Arch, Binary, Dest, Function, Recovery, RefKind};
 use state::{State, Val};
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::iter::once;
 use std::ops::RangeInclusive;
 
@@ -255,6 +255,8 @@ fn walk<'a, T: Tracker<'a>>(
     let mut addr = start;
     // Whether the walk came to `addr` from the instruction before it.
     let mut ran_on = false;
+    // The walk only moves forward: the joins not yet passed.
+    let mut joins = joins.iter().copied().peekable();
     while addr < end {
         while runs.next_if(|&(_, run_end)| run_end <= addr).is_some() {}
         let own = runs.peek().is_some_and(|&(run_start, _)| run_start <= addr);
@@ -270,7 +272,8 @@ fn walk<'a, T: Tracker<'a>>(
             tracker.reset();
             continue;
         }
-        if joins.contains(&addr) {
+        while joins.next_if(|&join| join < addr).is_some() {}
+        if joins.next_if_eq(&addr).is_some() {
             state.reset();
             tracker.reset();
         }
@@ -288,10 +291,13 @@ fn walk<'a, T: Tracker<'a>>(
                 shared.record(targets.resolve(addr, site));
                 next
             }
-            Then::Barrier => match joins.range(next..).next() {
-                Some(&join) => join,
-                None => break,
-            },
+            Then::Barrier => {
+                while joins.next_if(|&join| join < next).is_some() {}
+                match joins.peek() {
+                    Some(&join) => join,
+                    None => break,
+                }
+            }
         };
     }
 }
@@ -299,13 +305,13 @@ fn walk<'a, T: Tracker<'a>>(
 /// Where control may arrive in `function` from elsewhere: its entry, its
 /// landing pads, and every branch, jump or jump-table target in its own code
 /// (a jump to another function's entry is a tail call, a jump through an
-/// import slot leaves the image).
+/// import slot leaves the image). In address order, each once.
 fn joins(
     memory: &Memory<'_>,
     targets: &Targets<'_>,
     funcs: &Recovery,
     function: &Function,
-) -> BTreeSet<u64> {
+) -> Vec<u64> {
     let entry = function.entry;
     // Recovered blocks lie within `size` bytes of the entry, either side.
     let near = entry.saturating_sub(function.size)..entry.saturating_add(function.size);
@@ -317,10 +323,14 @@ fn joins(
             Dest::Code(to) => Some(to),
             Dest::Slot { .. } => None,
         })
+        .filter(|&to| near.contains(&to))
         .filter(|&to| to == entry || funcs.function(to).is_none())
-        .filter(|&to| near.contains(&to) && memory.is_code(to));
+        .filter(|&to| memory.is_code(to));
     let pads = targets.pads.get(&entry).into_iter().flatten().copied();
-    once(entry).chain(jumps).chain(pads).collect()
+    let mut joins: Vec<u64> = once(entry).chain(jumps).chain(pads).collect();
+    joins.sort_unstable();
+    joins.dedup();
+    joins
 }
 
 /// What a raw call target resolves to, built once per [`calls`].
@@ -352,6 +362,8 @@ impl<'b> Targets<'b> {
         while matches!(args.last(), Some(Value::Unknown)) {
             args.pop();
         }
+        // Kept with the call: not the room the unknown arguments took.
+        args.shrink_to_fit();
         let target = match site.raw {
             RawTarget::Syscall(number) => Target::Syscall(number),
             RawTarget::Call(to) => self

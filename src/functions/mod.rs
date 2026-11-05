@@ -2,6 +2,7 @@
 
 pub(crate) mod table;
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::functions::table::Tracker;
@@ -350,14 +351,14 @@ fn data_pointers(image: &Binary<'_>, arch: Arch, work: &Work<'_>, runs: &Runs) -
     let big = arch.big_endian();
     let align = work.decoder.alignment();
     let mut found = BTreeSet::new();
+    // Most words are no code address: that is asked first, as it is the
+    // quickest to answer.
     let mut candidate = |value: u64| {
         if value.is_multiple_of(align)
+            && let Some(code) = work.memory.code(value)
             && !work.entries.contains_key(&value)
             && !found.contains(&value)
-            && work
-                .memory
-                .code(value)
-                .is_some_and(|code| work.decoder.starts_frame(code))
+            && work.decoder.starts_frame(code)
             && !runs.contains(value)
         {
             found.insert(value);
@@ -475,7 +476,7 @@ struct Work<'a> {
 struct Walk {
     entry: u64,
     /// Every instruction decoded, by address.
-    insns: BTreeMap<u64, Insn>,
+    insns: BTreeMap<u64, Decoded>,
     /// Block starts.
     leaders: BTreeSet<u64>,
     /// Block starts still to walk, with the register values on the path
@@ -521,6 +522,57 @@ impl Walk {
             self.referenced.insert(to);
         }
         self.refs.push(Ref::new(from, to, kind));
+    }
+}
+
+/// What a function's graph and extent need of an instruction it decoded,
+/// kept per address instead of the whole [`Insn`], which is twelve times
+/// the size: maps of these are smaller and quicker to search and grow.
+#[derive(Clone, Copy)]
+struct Decoded {
+    len: u32,
+    exit: Exit,
+    /// A conditional return or jump: it also runs on.
+    falls: bool,
+}
+
+/// How an instruction leaves its block, if it does.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Exit {
+    /// On to the next instruction: any but a transfer, and calls.
+    Next,
+    Jump,
+    Branch,
+    /// Through a table or a register: to its cases.
+    Indirect,
+    /// Out of the function: a return, a trap, a jump through a slot or to
+    /// an unknown place.
+    Leaves,
+    Invalid,
+}
+
+impl From<&Insn> for Decoded {
+    fn from(insn: &Insn) -> Self {
+        let exit = match insn.flow {
+            Flow::Next
+            | Flow::Call(_)
+            | Flow::CallSlot(_)
+            | Flow::CallIndirect
+            | Flow::CallRegister(_) => Exit::Next,
+            Flow::Jump(_) => Exit::Jump,
+            Flow::Branch(_) => Exit::Branch,
+            Flow::JumpMemory(_)
+            | Flow::JumpRegister(_)
+            | Flow::JumpAdd { .. }
+            | Flow::JumpTable { .. } => Exit::Indirect,
+            Flow::JumpSlot(_) | Flow::JumpIndirect | Flow::Return | Flow::Stop => Exit::Leaves,
+            Flow::Invalid => Exit::Invalid,
+        };
+        Self {
+            len: insn.len,
+            exit,
+            falls: insn.falls,
+        }
     }
 }
 
@@ -1008,11 +1060,26 @@ impl Work<'_> {
         // Whether the last instruction walked runs into `addr`, other than
         // by returning from a call (which may never return).
         let mut falls = false;
+        // An address, and the first function start at or past it (the top
+        // of the address space when none is). No start is added while a
+        // function is explored, so none lies between them until the walk
+        // leaves that span: one search per start passed, not one per
+        // instruction.
+        let ahead = |work: &Self, addr: u64| {
+            let start = work.entries.range(addr..).next();
+            (addr, start.map_or(u64::MAX, |(&start, _)| start))
+        };
+        let (mut from, mut next_start) = ahead(self, addr);
         loop {
-            if walk.insns.contains_key(&addr) {
+            // One search finds whether `addr` was walked and where it goes.
+            let Entry::Vacant(slot) = walk.insns.entry(addr) else {
                 return;
+            };
+            if addr < from || next_start < addr {
+                (from, next_start) = ahead(self, addr);
             }
             if addr != walk.entry
+                && next_start == addr
                 && let Some(&found) = self.entries.get(&addr)
             {
                 // Code that runs straight into a start known only from
@@ -1033,7 +1100,7 @@ impl Work<'_> {
             let Some(insn) = self.decode(bytes, addr) else {
                 return;
             };
-            walk.insns.insert(addr, insn);
+            slot.insert(Decoded::from(&insn));
             // Padding after a call that never returns runs into nothing.
             if !insn.pad {
                 falls = insn.falls || matches!(insn.flow, Flow::Next | Flow::Branch(_));
@@ -1285,6 +1352,9 @@ impl Work<'_> {
             .max()
             .unwrap_or(entry);
         walk.refs.sort_by_key(|r| (r.from, r.addr()));
+        // The references outlive the walk, in the recovery returned: not the
+        // room their vector grew to.
+        walk.refs.shrink_to_fit();
         let thunk = self.thunk(entry);
         Explored {
             function: Function {
@@ -1321,7 +1391,7 @@ impl Work<'_> {
         entry: u64,
         end: u64,
         cursor: &mut u64,
-        insns: &BTreeMap<u64, Insn>,
+        insns: &BTreeMap<u64, Decoded>,
     ) -> Option<u64> {
         self.decoder.reset();
         while *cursor < end {
@@ -1360,49 +1430,58 @@ impl Work<'_> {
             ..
         } = walk;
         let entry = *entry;
+        // The instructions in address order, each with whether a block
+        // starts there: a block's next instruction is then nearly always
+        // the next element, found without a search.
+        let mut starts = leaders.iter().copied().peekable();
+        let insns: Vec<(u64, Decoded, bool)> = insns
+            .iter()
+            .map(|(&addr, &insn)| {
+                while starts.next_if(|&leader| leader < addr).is_some() {}
+                (addr, insn, starts.next_if_eq(&addr).is_some())
+            })
+            .collect();
+        let find = |addr: u64, hint: usize| match insns.get(hint) {
+            Some(&(at, ..)) if at == addr => Some(hint),
+            _ => insns.binary_search_by_key(&addr, |&(at, ..)| at).ok(),
+        };
         let (mut blocks, mut edges, mut exits) = (0_u32, 0_u32, 0_u32);
-        for &leader in leaders {
-            if !insns.contains_key(&leader) {
-                continue;
-            }
+        let firsts = insns
+            .iter()
+            .enumerate()
+            .filter_map(|(i, &(.., leader))| leader.then_some(i));
+        for first in firsts {
             blocks = blocks.saturating_add(1);
-            let mut addr = leader;
-            while let Some(insn) = insns.get(&addr) {
+            let mut at = first;
+            while let Some(&(addr, insn, _)) = insns.get(at) {
                 // A conditional return or jump also runs into the next block.
                 let falls = u32::from(insn.falls);
-                let (out, exit) = match insn.flow {
-                    _ if ends.contains(&addr) => (0, true),
-                    Flow::Jump(_) => (1, false),
-                    Flow::Branch(_) => (2, false),
-                    Flow::JumpMemory(_)
-                    | Flow::JumpRegister(_)
-                    | Flow::JumpAdd { .. }
-                    | Flow::JumpTable { .. } => (
+                let (out, exit) = match insn.exit {
+                    Exit::Jump => (1, false),
+                    Exit::Branch => (2, false),
+                    Exit::Indirect => (
                         cases.get(&addr).copied().unwrap_or(0).saturating_add(falls),
                         true,
                     ),
-                    Flow::JumpSlot(_) | Flow::JumpIndirect | Flow::Return | Flow::Stop => {
-                        (falls, true)
-                    }
-                    Flow::Invalid => (0, true),
+                    Exit::Leaves => (falls, true),
+                    Exit::Invalid => (0, true),
+                    // A call that never returns.
+                    Exit::Next if ends.contains(&addr) => (0, true),
                     // On to the next instruction: the block ends where
                     // another starts, or the code does.
-                    Flow::Next
-                    | Flow::Call(_)
-                    | Flow::CallSlot(_)
-                    | Flow::CallIndirect
-                    | Flow::CallRegister(_) => {
+                    Exit::Next => {
                         let next = addr.wrapping_add(u64::from(insn.len));
-                        if leaders.contains(&next) && insns.contains_key(&next) {
-                            (1, false)
-                        } else if insns.contains_key(&next) {
-                            addr = next;
-                            continue;
-                        } else if next != entry && self.entries.contains_key(&next) {
+                        match find(next, at.saturating_add(1)) {
+                            Some(found) if insns.get(found).is_some_and(|&(.., leader)| leader) => {
+                                (1, false)
+                            }
+                            Some(found) => {
+                                at = found;
+                                continue;
+                            }
                             // Falls into the next function.
-                            (1, false)
-                        } else {
-                            (0, true)
+                            None if next != entry && self.entries.contains_key(&next) => (1, false),
+                            None => (0, true),
                         }
                     }
                 };
@@ -1417,15 +1496,17 @@ impl Work<'_> {
 
 /// The contiguous address ranges a function's instructions occupy. Bytes
 /// that do not decode are no instruction.
-fn runs(insns: &BTreeMap<u64, Insn>) -> Vec<(u64, u64)> {
+fn runs(insns: &BTreeMap<u64, Decoded>) -> Vec<(u64, u64)> {
     let mut runs: Vec<(u64, u64)> = Vec::new();
-    for (&addr, insn) in insns.iter().filter(|(_, insn)| insn.flow != Flow::Invalid) {
+    for (&addr, insn) in insns.iter().filter(|(_, insn)| insn.exit != Exit::Invalid) {
         let end = addr.saturating_add(u64::from(insn.len));
         match runs.last_mut() {
             Some(last) if last.1 >= addr => last.1 = last.1.max(end),
             _ => runs.push((addr, end)),
         }
     }
+    // Kept with the recovery, for the walk over calls.
+    runs.shrink_to_fit();
     runs
 }
 
