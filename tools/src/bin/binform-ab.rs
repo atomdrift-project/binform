@@ -298,10 +298,12 @@ fn compare(options: &Options, input: &Input) -> Option<Value> {
 
     let script = options
         .script
-        .clone()
+        .as_deref()
         .unwrap_or_else(|| default_script(&image));
     let started = Instant::now();
-    let rizin = run_rizin(options, input.rizin_path(), &script);
+    // Rizin's `aflj` after the script, or `None` when it failed or timed out.
+    let rizin = rizin_output(options, input.rizin_path(), &format!("{script}; aflj"))
+        .and_then(|text| serde_json::from_str::<Vec<Value>>(&text[text.find('[')?..]).ok());
     let rizin_ms = started.elapsed().as_secs_f64() * 1e3;
 
     let mut native_shape = Shape::default();
@@ -347,7 +349,7 @@ fn compare(options: &Options, input: &Input) -> Option<Value> {
         return Some(report);
     };
     if let Some(dir) = &options.save
-        && let Err(error) = save(dir, &input.name(), &script, &rows)
+        && let Err(error) = save(dir, &input.name(), script, &rows)
     {
         eprintln!("binform-ab: saving {}: {error}", input.path.display());
     }
@@ -492,23 +494,15 @@ fn save(dir: &Path, name: &str, script: &str, rows: &[Value]) -> std::io::Result
     std::fs::write(path, zstd::encode_all(text.as_bytes(), 19)?)
 }
 
-fn default_script(image: &binform::Binary<'_>) -> String {
+fn default_script(image: &binform::Binary<'_>) -> &'static str {
     let pe = image.format() == binform::Format::Pe;
-    let named = named(image);
     if pe && matches!(image.arch(), Some(Arch::X86 | Arch::X86_64)) {
-        "aa; aac".into()
-    } else if !named {
-        "aaa".into()
+        "aa; aac"
+    } else if !named(image) {
+        "aaa"
     } else {
-        "aa; aac; aap".into()
+        "aa; aac; aap"
     }
-}
-
-/// Rizin's `aflj` after `script`, or `None` when it failed or timed out.
-fn run_rizin(options: &Options, file: &Path, script: &str) -> Option<Vec<Value>> {
-    let text = rizin_output(options, file, &format!("{script}; aflj"))?;
-    let start = text.find('[')?;
-    serde_json::from_str(&text[start..]).ok()
 }
 
 /// What rizin prints for `commands`, or `None` when it failed or timed out.
@@ -785,11 +779,11 @@ fn summarize(reports: &[Value]) {
         sum("only_rizin"),
         sum("only_rizin_inside")
     );
-    let mut found: BTreeMap<String, u64> = BTreeMap::new();
+    let mut found: BTreeMap<&str, u64> = BTreeMap::new();
     for report in &compared {
         if let Some(ways) = report["only_native_found"].as_object() {
             for (how, count) in ways {
-                *found.entry(how.clone()).or_default() += count.as_u64().unwrap_or(0);
+                *found.entry(how.as_str()).or_default() += count.as_u64().unwrap_or(0);
             }
         }
     }

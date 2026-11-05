@@ -23,7 +23,7 @@ mod x86;
 
 use crate::isa::{Flow, Insn, Memory};
 use crate::{Arch, Binary, Dest, Function, Recovery, RefKind};
-use state::State;
+use state::{State, Val};
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap};
 use std::iter::once;
@@ -190,17 +190,17 @@ fn walk<'a, T: Tracker<'a>>(
         } else {
             Step::stop(1)
         };
-        if let Some(site) = step.site {
-            out.push(targets.resolve(addr, site));
-        }
         let next = addr.saturating_add(u64::from(step.len.max(1)));
-        addr = if step.barrier {
-            match joins.range(next..).next() {
+        addr = match step.then {
+            Then::Next => next,
+            Then::Site(site) => {
+                out.push(targets.resolve(addr, site));
+                next
+            }
+            Then::Barrier => match joins.range(next..).next() {
                 Some(&join) => join,
                 None => break,
-            }
-        } else {
-            next
+            },
         };
     }
 }
@@ -297,39 +297,59 @@ pub(crate) enum RawTarget {
     Indirect,
 }
 
-/// What a tracker returns for one instruction.
+/// What a tracker returns for one instruction: its length, and what comes
+/// after it.
 pub(crate) struct Step {
-    pub(crate) len: u32,
-    /// A call or syscall this instruction is.
-    pub(crate) site: Option<Site>,
-    /// Control never goes on to the next instruction (a jump, return or
-    /// trap): the walk resumes at the next join.
-    pub(crate) barrier: bool,
+    len: u32,
+    then: Then,
+}
+
+/// Where control goes after an instruction.
+enum Then {
+    /// On to the next instruction.
+    Next,
+    /// On to the next instruction, past the call or syscall this one is.
+    Site(Site),
+    /// Nowhere the walk follows (a jump, return or trap): it resumes at the
+    /// next join.
+    Barrier,
 }
 
 impl Step {
     pub(crate) const fn go(len: u32) -> Self {
         Self {
             len,
-            site: None,
-            barrier: false,
+            then: Then::Next,
         }
     }
 
     pub(crate) const fn stop(len: u32) -> Self {
         Self {
             len,
-            site: None,
-            barrier: true,
+            then: Then::Barrier,
         }
     }
 
     pub(crate) const fn site(len: u32, site: Site) -> Self {
         Self {
             len,
-            site: Some(site),
-            barrier: false,
+            then: Then::Site(site),
         }
+    }
+
+    /// A syscall whose number register holds `number`, passing `args`.
+    pub(crate) fn syscall(len: u32, number: Val, args: impl Iterator<Item = Value>) -> Self {
+        let number = match number {
+            Val::Int(n) => Some(n),
+            _ => None,
+        };
+        Self::site(
+            len,
+            Site {
+                raw: RawTarget::Syscall(number),
+                args: args.collect(),
+            },
+        )
     }
 }
 

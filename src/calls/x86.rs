@@ -76,13 +76,22 @@ impl<'a> Tracker<'a> for X86<'a> {
         }
         let mode = self.mode;
 
-        // A syscall reads the registers as they stand.
-        if let Some((nr, args)) = syscall_entry(&insn, self.bitness) {
-            let number = match mode.reg(state, nr) {
-                Val::Int(n) => Some(n),
-                _ => None,
-            };
-            let args = args.iter().map(|&r| mode.value(state, r)).collect();
+        // A syscall reads the registers as they stand: its number register,
+        // then its argument registers.
+        use Register::{EAX, EBP, EBX, ECX, EDI, EDX, ESI, R8, R9, R10, RAX, RDI, RDX, RSI};
+        let syscall = match insn.code() {
+            Code::Syscall if self.bitness == 64 => Some((RAX, [RDI, RSI, RDX, R10, R8, R9])),
+            Code::Int_imm8 if insn.immediate8() == 0x80 => {
+                Some((EAX, [EBX, ECX, EDX, ESI, EDI, EBP]))
+            }
+            _ => None,
+        };
+        if let Some((nr, args)) = syscall {
+            let step = Step::syscall(
+                len,
+                mode.reg(state, nr),
+                args.iter().map(|&r| mode.value(state, r)),
+            );
             // The kernel returns in the number register; `syscall` itself
             // leaves the return address in rcx and the flags in r11.
             mode.set(state, nr, Val::Unknown);
@@ -90,13 +99,7 @@ impl<'a> Tracker<'a> for X86<'a> {
                 mode.set(state, Register::RCX, Val::Unknown);
                 mode.set(state, Register::R11, Val::Unknown);
             }
-            return Step::site(
-                len,
-                Site {
-                    raw: RawTarget::Syscall(number),
-                    args,
-                },
-            );
+            return step;
         }
 
         match insn.flow_control() {
@@ -148,17 +151,6 @@ impl<'a> Tracker<'a> for X86<'a> {
                 Step::go(len)
             }
         }
-    }
-}
-
-/// The number register and argument registers of a syscall instruction, or
-/// `None` when `insn` is not one.
-fn syscall_entry(insn: &Instruction, bitness: u32) -> Option<(Register, [Register; 6])> {
-    use Register::{EAX, EBP, EBX, ECX, EDI, EDX, ESI, R8, R9, R10, RAX, RDI, RDX, RSI};
-    match insn.code() {
-        Code::Syscall if bitness == 64 => Some((RAX, [RDI, RSI, RDX, R10, R8, R9])),
-        Code::Int_imm8 if insn.immediate8() == 0x80 => Some((EAX, [EBX, ECX, EDX, ESI, EDI, EBP])),
-        _ => None,
     }
 }
 

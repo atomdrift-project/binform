@@ -390,6 +390,19 @@ mod tests {
         assert_eq!(flows, [Flow::Next, Flow::Next, Flow::JumpSlot(0x1_1008)]);
     }
 
+    /// A compare writes no register: `cmp x16, #0` between the load of a
+    /// slot's pointer and the jump through it leaves the slot known.
+    #[test]
+    fn compares_keep_the_slot() {
+        let mut state = State::default();
+        let words = [0xb000_0010_u32, 0xf940_0610, 0xf100_021f, 0xd61f_0200];
+        let flows: Vec<Flow> = (0_u64..)
+            .zip(words)
+            .map(|(i, word)| decode(&mut state, &word.to_le_bytes(), 0x1_0000 + 4 * i).flow)
+            .collect();
+        assert_eq!(flows[3], Flow::JumpSlot(0x1_1008));
+    }
+
     /// A call forgets the slot a caller-saved register was loaded from,
     /// and keeps a callee-saved one's: `adrp x16, page; ldr x16, [x16,
     /// #8]`, the same into x19, `bl`, then `br` each.

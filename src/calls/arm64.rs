@@ -13,9 +13,9 @@
 //! `x0..x5`; a call takes arguments in `x0..x7`.
 
 use super::state::{State, Val, rev16, word};
-use super::{RawTarget, Site, Step, Tracker, flow};
+use super::{Step, Tracker, flow};
 use crate::Binary;
-use crate::isa::Decoder;
+use crate::isa::{Decoder, sext};
 
 const SP: u32 = 31;
 /// What a call may change: `x0..x18` and the link register.
@@ -65,19 +65,9 @@ impl<'a> Tracker<'a> for Arm64<'a> {
         // `svc #0`, the Linux syscall: any other comment is no Linux
         // syscall. The number is in x8.
         if w == 0xd400_0001 {
-            let args = (0..=5).map(|r| state.value(r)).collect();
-            let number = match state.get(8) {
-                Val::Int(n) => Some(n),
-                _ => None,
-            };
+            let step = Step::syscall(insn.len, state.get(8), (0..=5).map(|r| state.value(r)));
             state.clear(0); // the kernel returns in x0.
-            return Step::site(
-                insn.len,
-                Site {
-                    raw: RawTarget::Syscall(number),
-                    args,
-                },
-            );
+            return step;
         }
         if let Some(step) = flow(state, &insn, 0..=7, CLOBBERED) {
             return step;
@@ -107,16 +97,6 @@ fn sized(value: Val, sf: bool) -> Val {
         Val::Int(_) => value.low32(),
         _ => Val::Unknown,
     }
-}
-
-/// `bits` of `w` from bit `low` up, sign-extended.
-fn signed(w: u32, low: u32, bits: u32) -> i64 {
-    let top = 32_u32.saturating_sub(low.saturating_add(bits));
-    i64::from(
-        w.wrapping_shl(top)
-            .cast_signed()
-            .wrapping_shr(top.saturating_add(low)),
-    )
 }
 
 fn track(state: &mut State<'_>, w: u32, addr: u64) {
@@ -165,7 +145,7 @@ fn track(state: &mut State<'_>, w: u32, addr: u64) {
     }
     // ADR / ADRP: `op immlo 10000 immhi Rd`, a 21-bit signed immediate.
     if w & 0x1f00_0000 == 0x1000_0000 {
-        let imm = signed(w, 5, 19).wrapping_shl(2) | i64::from(w >> 29 & 3);
+        let imm = sext(w >> 5, 19).wrapping_shl(2) | i64::from(w >> 29 & 3);
         let value = if w & 0x8000_0000 != 0 {
             (addr & !0xfff).wrapping_add_signed(imm.wrapping_shl(12))
         } else {
@@ -236,7 +216,7 @@ fn load_store(state: &mut State<'_>, w: u32, addr: u64) {
     // LDR (literal): `opc 011 V 00 imm19 Rt`, word or doubleword.
     if w & 0x3b00_0000 == 0x1800_0000 {
         if !simd && size < 2 {
-            let at = addr.wrapping_add_signed(signed(w, 5, 19).wrapping_mul(4));
+            let at = addr.wrapping_add_signed(sext(w >> 5, 19).wrapping_mul(4));
             set_zr(state, rt, state.read(at, if size == 0 { 4 } else { 8 }));
         } else if !simd && size == 2 {
             set_zr(state, rt, Val::Unknown); // LDRSW
@@ -264,7 +244,7 @@ fn load_store(state: &mut State<'_>, w: u32, addr: u64) {
             3 => Index::Pre,
             _ => Index::Offset,
         };
-        Some((signed(w, 12, 9), index, width))
+        Some((sext(w >> 12, 9), index, width))
     } else {
         None
     };
@@ -314,7 +294,7 @@ fn load_store(state: &mut State<'_>, w: u32, addr: u64) {
             3 => Index::Pre,
             _ => Index::Offset,
         };
-        let offset = signed(w, 15, 7).wrapping_mul(width.into());
+        let offset = sext(w >> 15, 7).wrapping_mul(width.into());
         let base = state.get(rn);
         let at = if index == Index::Post {
             base

@@ -123,13 +123,9 @@ impl Decode for Decoder {
             return Insn::new(4, Flow::Invalid);
         }
         let Some((flow, compact)) = self.flow(word, addr) else {
-            // `nop` (`sll $0, $0, 0`) and `ssnop`.
-            let pad = word == 0 || word == 0x40;
             let mut insn = Insn::note(4, self.step(word));
-            if pad {
-                insn.note = Note::None;
-            }
-            insn.pad = pad;
+            // `nop` (`sll $0, $0, 0`) and `ssnop`, which write only `$0`.
+            insn.pad = word == 0 || word == 0x40;
             return insn;
         };
         // A trap has no slot.
@@ -338,7 +334,7 @@ impl Decoder {
         {
             gp_dest = Some(reg);
         }
-        let written = note.writes() | self.state.indexed.map_or(0, |(sum, ..)| 1 << sum);
+        let written = writes(word, note) | self.state.indexed.map_or(0, |(sum, ..)| 1 << sum);
         let written = u32::try_from(written & 0xffff_ffff).unwrap_or(u32::MAX);
         self.state.gp_regs &= !written;
         self.state.small.forget(u64::from(written));
@@ -497,7 +493,7 @@ impl Decoder {
         };
         // A scaled index stays until its register is written.
         if let Some((reg, _)) = self.state.scaled
-            && note.writes() & (1 << reg) != 0
+            && writes(word, note) & (1 << reg) != 0
         {
             self.state.scaled = None;
         }
@@ -559,10 +555,9 @@ impl Decoder {
         let rs = (word >> 21) & 0x1f;
         let rt = (word >> 16) & 0x1f;
         let slot = addr.wrapping_add(4);
-        let wrap = |target: u64| self.wrap(target);
         // A word offset of `bits` bits from the slot (compact branches count
         // from the next instruction, the same address).
-        let offset = |bits: u32| wrap(relative(slot, word, bits, 4));
+        let offset = |bits: u32| self.wrap(relative(slot, word, bits, 4));
         let branch = offset(16);
         if self.r6 {
             let compact = match opcode {
@@ -622,7 +617,8 @@ impl Decoder {
                 },
                 // J, JAL: the low 28 bits of the slot's region.
                 2 | 3 => {
-                    let target = wrap((slot & !0x0fff_ffff) | u64::from(word & 0x03ff_ffff) << 2);
+                    let target =
+                        self.wrap((slot & !0x0fff_ffff) | u64::from(word & 0x03ff_ffff) << 2);
                     if opcode == 2 {
                         Flow::Jump(target)
                     } else {
@@ -688,6 +684,17 @@ pub(crate) fn gp_entry(
     let mask = if wide { u64::MAX } else { 0xffff_ffff };
     gps.map(|gp| gp.wrapping_sub_signed(d) & mask)
         .find(|&entry| entry <= addr && addr.wrapping_sub(entry) <= 32 && entry.is_multiple_of(4))
+}
+
+/// The registers `word` writes, by the `note` it left: those the note
+/// names, but for SLTIU, whose note is the bound it puts on `rs` and which
+/// writes `rt`.
+fn writes(word: u32, note: Note) -> u64 {
+    if word >> 26 == 0x0b {
+        1 << ((word >> 16) & 0x1f)
+    } else {
+        note.writes()
+    }
 }
 
 /// Whether `word` is an encoding releases before 6 leave reserved, or an
@@ -818,6 +825,35 @@ mod tests {
             at += insn.len as usize;
         }
         out
+    }
+
+    /// `sltiu $s3, $a0, 5` bounds `$a0` and writes `$s3`: the constant `li`
+    /// left in `$s3` is gone, and bounds no `bltuc` after it.
+    #[test]
+    fn sltiu_writes_its_target() {
+        let bytes: Vec<u8> = [0x2413_000a_u32, 0x2c93_0005, 0x1e62_0004]
+            .iter()
+            .flat_map(|w| w.to_be_bytes())
+            .collect();
+        let mut decoder = decoder(true, &Got::default());
+        let notes: Vec<Note> = (0..3)
+            .map(|i| decoder.decode(&bytes[4 * i..], 0x1000 + 4 * i as u64).note)
+            .collect();
+        assert_eq!(notes[1], Note::Compare { reg: 4, imm: 4 });
+        assert_eq!(notes[2], Note::None);
+    }
+
+    /// `sll $v0, $a0, 2` scales `$a0`; `sltiu $v0, $a1, 5` overwrites the
+    /// scaled copy, so `addu $v1, $v0, $a2; lw $t0, 0($v1)` reads no
+    /// entry of a table `$a0` indexes.
+    #[test]
+    fn sltiu_ends_a_scaled_index() {
+        let notes = insns(
+            &[0x0004_1080, 0x2ca2_0005, 0x0046_1821, 0x8c68_0000],
+            0x1000,
+            &Got::default(),
+        );
+        assert_eq!(notes[3].note, Note::Clobber(1 << 8));
     }
 
     #[test]

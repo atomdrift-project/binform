@@ -173,16 +173,13 @@ impl Cx<'_> {
             // L.RFE
             0x09 => Flow::Return,
             0x11 if rb == LR => Flow::Return,
-            0x11 => match (self.get(rb).filter(|_| rb != 0), self.state.pending.loaded) {
-                (Some(target), _) => Flow::Jump(target),
-                (None, Some((reg, slot))) if reg == rb => Flow::JumpSlot(slot),
-                _ => Flow::JumpRegister(rb),
-            },
-            0x12 => match (self.get(rb).filter(|_| rb != 0), self.state.pending.loaded) {
-                (Some(target), _) => Flow::Call(target),
-                (None, Some((reg, slot))) if reg == rb => Flow::CallSlot(slot),
-                _ => Flow::CallRegister(rb),
-            },
+            // L.JR, L.JALR
+            opcode @ (0x11 | 0x12) => Flow::through(
+                rb,
+                self.get(rb).filter(|_| rb != 0),
+                self.state.pending.loaded,
+                opcode == 0x12,
+            ),
             _ => return None,
         })
     }

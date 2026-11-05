@@ -133,18 +133,19 @@ fn image<'a>(bytes: &'a [u8], pe: &Pe<'_>, arch: Arch, layout: Binary<'a>) -> Bi
         .sections
         .iter()
         .map(|section| {
-            let raw = u64::from(section.size_of_raw_data);
+            // The loader reads from below the raw pointer, when it is
+            // unaligned: the raw data runs on from there.
+            let start = section.raw_start(pe.file_alignment);
+            let raw = u64::from(section.pointer_to_raw_data)
+                .saturating_sub(start)
+                .saturating_add(u64::from(section.size_of_raw_data));
             let size = match u64::from(section.virtual_size) {
                 0 => raw,
                 virtual_size => raw.min(virtual_size),
             };
             Segment {
                 addr: at(section.virtual_address),
-                bytes: Cow::Borrowed(file_range(
-                    bytes,
-                    u64::from(section.pointer_to_raw_data),
-                    size,
-                )),
+                bytes: Cow::Borrowed(file_range(bytes, start, size)),
                 executable: section.characteristics & (IMAGE_SCN_CNT_CODE | IMAGE_SCN_MEM_EXECUTE)
                     != 0
                     && !resources.is_some_and(|rva| {

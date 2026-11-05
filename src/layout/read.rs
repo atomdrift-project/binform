@@ -69,6 +69,15 @@ impl<'a> Reader<'a> {
         })
     }
 
+    /// The 32-bit fields at `offsets`: a header's, all there or none.
+    pub(super) fn u32s<const N: usize>(&self, offsets: [u64; N]) -> Option<[u32; N]> {
+        let mut fields = [0; N];
+        for (field, at) in fields.iter_mut().zip(offsets) {
+            *field = self.u32(at)?;
+        }
+        Some(fields)
+    }
+
     /// A pointer-sized field: eight bytes when `wide`, four otherwise.
     pub(super) fn word(&self, at: u64, wide: bool) -> Option<u64> {
         if wide {

@@ -385,14 +385,8 @@ impl Cx<'_> {
 
     /// Where a jump or call through register `reg` goes.
     fn through(&self, reg: u32, limm: Option<u32>, call: bool) -> Flow {
-        match (self.value(reg, limm), self.state.loaded) {
-            (Some((target, _)), _) if call => Flow::Call(target),
-            (Some((target, _)), _) => Flow::Jump(target),
-            (None, Some((loaded, slot))) if loaded == reg && call => Flow::CallSlot(slot),
-            (None, Some((loaded, slot))) if loaded == reg => Flow::JumpSlot(slot),
-            _ if call => Flow::CallRegister(reg),
-            _ => Flow::JumpRegister(reg),
-        }
+        let target = self.value(reg, limm).map(|(target, _)| target);
+        Flow::through(reg, target, self.state.loaded, call)
     }
 
     /// The instruction at the start of `bytes`: its length, and what it is.

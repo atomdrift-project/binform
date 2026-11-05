@@ -139,6 +139,28 @@ impl Flow {
             Self::Call(_) | Self::CallSlot(_) | Self::CallIndirect | Self::CallRegister(_)
         )
     }
+
+    /// A call, when `call`, else a jump, through register `reg`: to `target`
+    /// when the register's value is known, else through the slot `loaded`
+    /// names when the register was last loaded from it.
+    pub(crate) fn through(
+        reg: u32,
+        target: Option<u64>,
+        loaded: Option<(u32, u64)>,
+        call: bool,
+    ) -> Self {
+        let slot = loaded
+            .filter(|&(held, _)| held == reg)
+            .map(|(_, slot)| slot);
+        match (target, slot, call) {
+            (Some(to), _, true) => Self::Call(to),
+            (Some(to), _, false) => Self::Jump(to),
+            (None, Some(slot), true) => Self::CallSlot(slot),
+            (None, Some(slot), false) => Self::JumpSlot(slot),
+            (None, None, true) => Self::CallRegister(reg),
+            (None, None, false) => Self::JumpRegister(reg),
+        }
+    }
 }
 
 /// What an instruction does to registers, as far as finding a jump table
@@ -212,13 +234,13 @@ pub(crate) enum Note {
 }
 
 impl Note {
-    /// The registers the note says are written, as a mask.
+    /// The registers the note says are written, as a mask. A compare
+    /// writes none: it bounds the register it reads.
     pub(crate) fn writes(self) -> u64 {
         match self {
-            Self::None | Self::Push(_) | Self::PushRegister(_) => 0,
+            Self::None | Self::Push(_) | Self::PushRegister(_) | Self::Compare { .. } => 0,
             Self::Clobber(regs) => u64::from(regs),
-            Self::Compare { reg, .. }
-            | Self::Address { reg, .. }
+            Self::Address { reg, .. }
             | Self::Value { reg, .. }
             | Self::Fetch { reg, .. }
             | Self::Load { reg, .. }
@@ -807,15 +829,9 @@ pub(crate) fn bit(reg: u32) -> u64 {
 
 impl Pending {
     /// The registers whose earlier facts end at the instruction that noted
-    /// `note` and left `self`: those it writes (a compare writes none), and
-    /// the sum it made.
+    /// `note` and left `self`: those it writes, and the sum it made.
     pub(crate) fn written(&self, note: Note) -> u64 {
-        let writes = if matches!(note, Note::Compare { .. }) {
-            0
-        } else {
-            note.writes()
-        };
-        writes | self.indexed.map_or(0, |indexed| bit(indexed.sum))
+        note.writes() | self.indexed.map_or(0, |indexed| bit(indexed.sum))
     }
 
     /// Carry each fact `before` the instruction that left `self` into it,

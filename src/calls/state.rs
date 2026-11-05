@@ -69,9 +69,8 @@ pub(crate) struct State<'a> {
     regs: [Val; 32],
     /// Constant bytes stored to the frame, by offset from its base.
     bytes: BTreeMap<i64, u8>,
-    /// Stack pointers stored to the frame, by offset, with the store's
-    /// width.
-    pointers: BTreeMap<i64, (Val, u8)>,
+    /// Stack pointers stored to the frame, by offset: each a pointer wide.
+    pointers: BTreeMap<i64, Val>,
     memory: &'a Memory<'a>,
     /// The stack pointer's register number, in the tracker's numbering.
     sp: u32,
@@ -171,7 +170,7 @@ impl<'a> State<'a> {
                 }
             }
             Val::Stack(_) if width == self.pointer => {
-                self.pointers.insert(off, (val, width));
+                self.pointers.insert(off, val);
             }
             Val::Stack(_) | Val::Unknown => {}
         }
@@ -182,12 +181,13 @@ impl<'a> State<'a> {
     pub(crate) fn forget(&mut self, off: i64, width: u16) {
         let end = off.saturating_add(i64::from(width));
         self.bytes.extract_if(off..end, |_, _| true).for_each(drop);
-        // A stored pointer is at most eight bytes wide, so one that overlaps
-        // starts at most seven bytes before `off`.
+        // A stored pointer that overlaps starts less than a pointer's width
+        // before `off`.
+        let first = off
+            .saturating_sub(i64::from(self.pointer))
+            .saturating_add(1);
         self.pointers
-            .extract_if(off.saturating_sub(7)..end, |&at, &mut (_, w)| {
-                at.saturating_add(i64::from(w)) > off
-            })
+            .extract_if(first..end, |_, _| true)
             .for_each(drop);
     }
 
@@ -211,8 +211,12 @@ impl<'a> State<'a> {
     /// pointer a store of the same offset and width left, or the constant
     /// the known bytes there spell, zero-extended.
     pub(crate) fn load(&self, off: i64, width: u8) -> Val {
-        if let Some(&(val, w)) = self.pointers.get(&off) {
-            return if w == width { val } else { Val::Unknown };
+        if let Some(&val) = self.pointers.get(&off) {
+            return if width == self.pointer {
+                val
+            } else {
+                Val::Unknown
+            };
         }
         if width > 8 {
             return Val::Unknown;

@@ -221,11 +221,8 @@ pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Recovery, Vec<Det
                         .memory
                         .code(pointer)
                         .is_some_and(|code| work.decoder.starts_frame(code));
-                    if (frame || targets.contains(&pointer) || !runs.contains(pointer))
-                        && let Some(entry) =
-                            work.add_entry(pointer, Found::POINTER, limits.functions)
-                    {
-                        queue.push(entry);
+                    if frame || targets.contains(&pointer) || !runs.contains(pointer) {
+                        queue.extend(work.add_entry(pointer, Found::POINTER, limits.functions));
                     }
                 }
                 continue;
@@ -237,9 +234,7 @@ pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Recovery, Vec<Det
             }
             scanned = true;
             for pointer in data_pointers(image, arch, &work, &runs) {
-                if let Some(entry) = work.add_entry(pointer, Found::POINTER, limits.functions) {
-                    queue.push(entry);
-                }
+                queue.extend(work.add_entry(pointer, Found::POINTER, limits.functions));
             }
             continue;
         };
@@ -252,19 +247,13 @@ pub(crate) fn recover(image: &Binary<'_>, limits: &Limits) -> (Recovery, Vec<Det
         }
         let explored = work.explore(entry);
         for target in explored.calls {
-            if let Some(entry) = work.add_entry(target, Found::CALL, limits.functions) {
-                queue.push(entry);
-            }
+            queue.extend(work.add_entry(target, Found::CALL, limits.functions));
         }
         for main in explored.mains {
-            if let Some(entry) = work.add_entry(main, Found::MAIN, limits.functions) {
-                queue.push(entry);
-            }
+            queue.extend(work.add_entry(main, Found::MAIN, limits.functions));
         }
         for tail in explored.tails {
-            if let Some(entry) = work.add_entry(tail, Found::TAIL_CALL, limits.functions) {
-                queue.push(entry);
-            }
+            queue.extend(work.add_entry(tail, Found::TAIL_CALL, limits.functions));
         }
         for pointer in explored.pointers {
             if work.entries.contains_key(&pointer) {
@@ -1375,7 +1364,13 @@ impl Work<'_> {
                         (falls, true)
                     }
                     Flow::Invalid => (0, true),
-                    _ => {
+                    // On to the next instruction: the block ends where
+                    // another starts, or the code does.
+                    Flow::Next
+                    | Flow::Call(_)
+                    | Flow::CallSlot(_)
+                    | Flow::CallIndirect
+                    | Flow::CallRegister(_) => {
                         let next = addr.wrapping_add(u64::from(insn.len));
                         if leaders.contains(&next) && insns.contains_key(&next) {
                             (1, false)

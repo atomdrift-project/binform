@@ -438,6 +438,12 @@ impl Elf {
             .map(|&(_, value)| value)
     }
 
+    /// The file offset of the address the first dynamic entry tagged `tag`
+    /// holds.
+    fn dynamic_offset(&self, tag: u64) -> Option<u64> {
+        self.offset_of(self.dynamic_value(tag)?)
+    }
+
     fn read_dynamic(&self, r: &Reader<'_>) -> Vec<(u64, u64)> {
         let range = self
             .programs
@@ -552,17 +558,20 @@ impl Elf {
     /// The symbol table the dynamic section names, for a file whose section
     /// table is gone. Its length is the hash table's symbol count.
     fn dynamic_symbol_table(&self, r: &Reader<'_>, names: &mut usize) -> Vec<Symbol> {
-        let at = |tag| {
-            self.dynamic_value(tag)
-                .and_then(|addr| self.offset_of(addr))
-        };
-        let (Some(symtab), Some(strtab)) = (at(DT_SYMTAB), at(DT_STRTAB)) else {
+        let (Some(symtab), Some(strtab)) = (
+            self.dynamic_offset(DT_SYMTAB),
+            self.dynamic_offset(DT_STRTAB),
+        ) else {
             return Vec::new();
         };
-        let count = at(DT_HASH)
+        let count = self
+            .dynamic_offset(DT_HASH)
             .and_then(|hash| r.at(hash).u32(4))
             .map(u64::from)
-            .or_else(|| at(DT_GNU_HASH).and_then(|hash| gnu_hash_count(&r.at(hash), self.is_64)))
+            .or_else(|| {
+                self.dynamic_offset(DT_GNU_HASH)
+                    .and_then(|hash| gnu_hash_count(&r.at(hash), self.is_64))
+            })
             .unwrap_or(0);
         let entsize = if self.is_64 { 24 } else { 16 };
         let strsz = self.dynamic_value(DT_STRSZ).unwrap_or(u64::MAX);
@@ -586,15 +595,12 @@ impl Elf {
         if files.is_empty() {
             return;
         }
-        let versym = self
-            .dynamic_value(DT_VERSYM)
-            .and_then(|addr| self.offset_of(addr))
-            .or_else(|| {
-                self.sections
-                    .iter()
-                    .find(|sh| sh.kind == SHT_GNU_VERSYM)
-                    .map(|sh| sh.offset)
-            });
+        let versym = self.dynamic_offset(DT_VERSYM).or_else(|| {
+            self.sections
+                .iter()
+                .find(|sh| sh.kind == SHT_GNU_VERSYM)
+                .map(|sh| sh.offset)
+        });
         let Some(versym) = versym else {
             return;
         };
@@ -627,14 +633,14 @@ impl Elf {
     /// Each required version's index, and the file it is required from.
     fn version_files(&self, r: &Reader<'_>) -> HashMap<u16, String> {
         let mut files = HashMap::new();
-        let dynamic = (|| {
-            let at = self.offset_of(self.dynamic_value(DT_VERNEED)?)?;
+        let dynamic = || {
+            let at = self.dynamic_offset(DT_VERNEED)?;
             let count = self.dynamic_value(DT_VERNEEDNUM)?;
-            let strtab = self.offset_of(self.dynamic_value(DT_STRTAB)?)?;
+            let strtab = self.dynamic_offset(DT_STRTAB)?;
             let strsz = self.dynamic_value(DT_STRSZ).unwrap_or(u64::MAX);
             Some((at, count, (strtab, strsz)))
-        })();
-        let table = dynamic.or_else(|| {
+        };
+        let table = dynamic().or_else(|| {
             let sh = self.sections.iter().find(|sh| sh.kind == SHT_GNU_VERNEED)?;
             let strings = usize::try_from(sh.link)
                 .ok()
@@ -650,14 +656,9 @@ impl Elf {
         let mut budget = limits::TABLE;
         for _ in 0..count {
             let need = r.at(at);
-            let Some([version_count, file, aux, next]) = (|| {
-                Some([
-                    u32::from(need.u16(2)?),
-                    need.u32(4)?,
-                    need.u32(8)?,
-                    need.u32(12)?,
-                ])
-            })() else {
+            let (Some(version_count), Some([file, aux, next])) =
+                (need.u16(2), need.u32s([4, 8, 12]))
+            else {
                 break;
             };
             let name = string(r, strings, file);
@@ -689,20 +690,16 @@ impl Elf {
     /// file range is read once, and all within [`limits::RELOCATIONS`].
     fn read_relocations(&mut self, r: &Reader<'_>) {
         let mut budget = limits::RELOCATIONS;
-        let at = |tag| {
-            self.dynamic_value(tag)
-                .and_then(|addr| self.offset_of(addr))
-        };
         let size = |tag| self.dynamic_value(tag).unwrap_or(0);
         let mut dynamic = Vec::new();
-        if let Some(offset) = at(DT_JMPREL) {
+        if let Some(offset) = self.dynamic_offset(DT_JMPREL) {
             let rela = self.dynamic_value(DT_PLTREL) == Some(DT_RELA);
             dynamic.extend(self.reloc_table(r, offset, size(DT_PLTRELSZ), rela, &mut budget));
         }
-        if let Some(offset) = at(DT_RELA) {
+        if let Some(offset) = self.dynamic_offset(DT_RELA) {
             dynamic.extend(self.reloc_table(r, offset, size(DT_RELASZ), true, &mut budget));
         }
-        if let Some(offset) = at(DT_REL) {
+        if let Some(offset) = self.dynamic_offset(DT_REL) {
             dynamic.extend(self.reloc_table(r, offset, size(DT_RELSZ), false, &mut budget));
         }
 

@@ -14,7 +14,7 @@
 //! `r0..r6`; a call takes arguments in `r0..r3`.
 
 use super::state::{State, Val, rev16, word};
-use super::{RawTarget, Site, Step, Tracker, flow};
+use super::{Step, Tracker, flow};
 use crate::Binary;
 use crate::isa::Decoder;
 
@@ -77,21 +77,20 @@ impl<'a> Tracker<'a> for Arm<'a> {
             word(bytes).is_some_and(|w| w >> 28 < 0b1110)
         };
 
-        if is_svc(bytes, thumb) {
-            let args = (0..=6).map(|r| state.value(r)).collect();
-            let number = match state.get(7) {
-                Val::Int(n) => Some(n),
-                _ => None,
-            };
+        // `svc #0`, the Linux EABI syscall: the comment is zero, and the
+        // number is in `r7`. Any other comment is no Linux EABI syscall. A32
+        // `svc` is `cond 1111 imm24` with a real condition (`1111` is no
+        // condition); Thumb `svc` is `1101 1111 imm8`.
+        let svc = if thumb {
+            half(bytes) == Some(0xdf00)
+        } else {
+            word(bytes).is_some_and(|w| w & 0x0fff_ffff == 0x0f00_0000 && w >> 28 != 0b1111)
+        };
+        if svc {
+            let step = Step::syscall(insn.len, state.get(7), (0..=6).map(|r| state.value(r)));
             // The kernel returns in r0; r1..r7 survive.
             state.clear(0);
-            return Step::site(
-                insn.len,
-                Site {
-                    raw: RawTarget::Syscall(number),
-                    args,
-                },
-            );
+            return step;
         }
         if let Some(step) = flow(state, &insn, 0..=3, CLOBBERED) {
             return step;
@@ -124,18 +123,6 @@ impl<'a> Tracker<'a> for Arm<'a> {
             track(state);
         }
         Step::go(insn.len)
-    }
-}
-
-/// Whether `bytes` begin `svc #0`, the Linux EABI syscall: the comment is
-/// zero, and the number is in `r7`. Any other comment is no Linux EABI
-/// syscall. A32 `svc` is `cond 1111 imm24` with a real condition (`1111` is
-/// no condition); Thumb `svc` is `1101 1111 imm8`.
-fn is_svc(bytes: &[u8], thumb: bool) -> bool {
-    if thumb {
-        half(bytes) == Some(0xdf00)
-    } else {
-        word(bytes).is_some_and(|w| w & 0x0fff_ffff == 0x0f00_0000 && w >> 28 != 0b1111)
     }
 }
 

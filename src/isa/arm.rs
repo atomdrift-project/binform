@@ -213,13 +213,7 @@ fn a32(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
         let immediate = word & 0x0200_0000 == 0;
         let pre = word & 0x0100_0000 != 0;
         let offset = u64::from(word & 0xfff);
-        let at = |base: u64| {
-            if word & 0x0080_0000 != 0 {
-                wrap(base.wrapping_add(offset))
-            } else {
-                wrap(base.wrapping_sub(offset))
-            }
-        };
+        let at = |base: u64| wrap(add_or_sub(base, offset, word & 0x0080_0000 != 0));
         match rn {
             SP if !pre => Flow::Return,
             PC if immediate => Flow::JumpSlot(at(pc)),
@@ -255,12 +249,7 @@ fn a32(state: &mut State, bytes: &[u8], addr: u64) -> Insn {
                 .then_some(state.ip)
                 .flatten();
             state.ip = if word & 0x0f7f_f000 == 0x051f_c000 {
-                let offset = u64::from(word & 0xfff);
-                let at = if word & 0x0080_0000 != 0 {
-                    pc.wrapping_add(offset)
-                } else {
-                    pc.wrapping_sub(offset)
-                };
+                let at = add_or_sub(pc, u64::from(word & 0xfff), word & 0x0080_0000 != 0);
                 literal(bytes, addr, wrap(at)).map(u64::from)
             } else if word & 0x0fff_f000 == 0x028f_c000 {
                 Some(wrap(pc.wrapping_add(u64::from(rotated()))))
@@ -411,6 +400,16 @@ fn through_slot(state: &State, flow: Flow, word: u32) -> Flow {
     }
 }
 
+/// `base` plus `offset` when `up`, else minus it: an addressing offset
+/// whose `U` bit gives its sign.
+const fn add_or_sub(base: u64, offset: u64, up: bool) -> u64 {
+    if up {
+        base.wrapping_add(offset)
+    } else {
+        base.wrapping_sub(offset)
+    }
+}
+
 /// The little-endian word at `at` in `bytes`, which start at `addr`.
 fn literal(bytes: &[u8], addr: u64, at: u64) -> Option<u32> {
     let offset = usize::try_from(at.checked_sub(addr)?).ok()?;
@@ -518,12 +517,7 @@ fn track_t32(state: &mut State, bytes: &[u8], addr: u64, first: u32, second: u32
     // LDR.W rt, [pc, #+/-imm12]
     if first & 0xff7f == 0xf85f {
         let base = addr.wrapping_add(4) & !3;
-        let offset = u64::from(second & 0xfff);
-        let at = if first & 0x80 != 0 {
-            base.wrapping_add(offset)
-        } else {
-            base.wrapping_sub(offset)
-        };
+        let at = add_or_sub(base, u64::from(second & 0xfff), first & 0x80 != 0);
         let value = literal(bytes, addr, at).map(Held::Address);
         return state.regs.set(rt, value);
     }
@@ -627,12 +621,7 @@ fn t32(first: u32, second: u32, pc: u64, conditional: bool, ip: Option<u64>) -> 
             // A literal: the word-aligned PC, plus or minus 12 bits.
             PC => {
                 let offset = u64::from(second & 0xfff);
-                let base = pc & !3;
-                Flow::JumpSlot(wrap(if first & 0x80 != 0 {
-                    base.wrapping_add(offset)
-                } else {
-                    base.wrapping_sub(offset)
-                }))
+                Flow::JumpSlot(wrap(add_or_sub(pc & !3, offset, first & 0x80 != 0)))
             }
             // `pop.w {pc}`: post-indexed from the stack.
             SP if first & 0xfff0 == 0xf850 && second & 0x0f00 == 0x0b00 => Flow::Return,

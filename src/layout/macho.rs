@@ -199,9 +199,9 @@ pub(super) fn parse(bytes: &[u8]) -> Result<MachO, Error> {
         _ => return Err(Error::BadMagic),
     };
     let r = Reader::new(bytes, big);
-    let (cputype, filetype, ncmds, sizeofcmds) =
-        (|| Some((r.u32(4)?, r.u32(12)?, r.u32(16)?, r.u32(20)?)))()
-            .ok_or(Error::Truncated("Mach-O header"))?;
+    let [cputype, filetype, ncmds, sizeofcmds] = r
+        .u32s([4, 12, 16, 20])
+        .ok_or(Error::Truncated("Mach-O header"))?;
     let mut macho = MachO {
         is_64,
         big,
@@ -221,41 +221,51 @@ pub(super) fn parse(bytes: &[u8]) -> Result<MachO, Error> {
     let (mut main, mut thread) = (None, None);
     let mut at: u64 = if is_64 { 32 } else { 28 };
     let end = at.saturating_add(u64::from(sizeofcmds));
-    // A (file offset, size) pair at `field` in the command.
+    // A (file offset, size) pair at `field` in the command; `None` for an
+    // empty one.
     let range = |c: &Reader<'_>, field: u64| {
         let offset = c.u32(field)?;
-        let size = c.at(field).u32(4)?;
+        let size = c.at(field).u32(4).filter(|&size| size != 0)?;
         Some((u64::from(offset), u64::from(size)))
     };
     for _ in 0..u64::from(ncmds).min(limits::LOAD_COMMANDS) {
         if at >= end {
             break;
         }
-        let c = r.at(at);
-        let (Some(cmd), Some(size)) = (c.u32(0), c.u32(4)) else {
+        let (Some(cmd), Some(size)) = (r.at(at).u32(0), r.at(at).u32(4)) else {
             break;
         };
+        // One smaller than its own header is no command: dyld stops there.
+        if size < 8 {
+            break;
+        }
+        // Each command reads its own bytes, not the next one's.
+        let c = Reader::new(file_range(bytes, at, u64::from(size)), big);
         match cmd {
             LC_SEGMENT | LC_SEGMENT_64 => macho.read_segment(&c, size, cmd == LC_SEGMENT_64),
             LC_SYMTAB => macho.read_symbols(&r, &c),
-            LC_DYSYMTAB => macho.read_indirect(&r, &c),
+            // The indirect symbol table.
+            LC_DYSYMTAB => {
+                if let (Some(offset), Some(count)) = (c.u32(56), c.u32(60)) {
+                    macho.indirect = read::table(u64::from(offset), 4, u64::from(count))
+                        .map_while(|at| r.u32(at))
+                        .collect();
+                }
+            }
             LC_DYLD_INFO | LC_DYLD_INFO_ONLY => {
                 // Bind at 16, weak bind at 24 (by name alone, no library),
                 // lazy bind at 32; the export trie at 40.
                 macho.binds = [16, 32]
                     .into_iter()
                     .filter_map(|field| range(&c, field))
-                    .filter(|&(_, size)| size != 0)
                     .collect();
-                macho.exports_trie = range(&c, 40)
-                    .filter(|&(_, size)| size != 0)
-                    .or(macho.exports_trie);
+                macho.exports_trie = range(&c, 40).or(macho.exports_trie);
             }
             LC_DYLD_CHAINED_FIXUPS => {
-                macho.chained_fixups = range(&c, 8).filter(|&(_, size)| size != 0);
+                macho.chained_fixups = range(&c, 8);
             }
             LC_DYLD_EXPORTS_TRIE => {
-                macho.exports_trie = range(&c, 8).filter(|&(_, size)| size != 0);
+                macho.exports_trie = range(&c, 8);
             }
             LC_LOAD_DYLIB | LC_LOAD_WEAK_DYLIB | LC_REEXPORT_DYLIB | LC_LAZY_LOAD_DYLIB
             | LC_LOAD_UPWARD_DYLIB => {
@@ -267,9 +277,6 @@ pub(super) fn parse(bytes: &[u8]) -> Result<MachO, Error> {
             LC_MAIN if main.is_none() => main = c.u64(8),
             LC_UNIXTHREAD if thread.is_none() => thread = thread_pc(&c, cputype),
             _ => {}
-        }
-        if size < 8 {
-            break;
         }
         at = at.saturating_add(u64::from(size));
     }
@@ -312,35 +319,24 @@ impl MachO {
     /// The segment command `c` of `size` bytes, and as many of the sections
     /// it claims as fit in it, up to [`limits::SECTIONS`] in all.
     fn read_segment(&mut self, c: &Reader<'_>, size: u32, wide: bool) {
-        let segment = if wide {
-            (|| {
-                Some((
-                    Segment {
-                        name: c.array(8)?,
-                        vmaddr: c.u64(24)?,
-                        fileoff: c.u64(40)?,
-                    },
-                    c.u32(60)?,
-                    c.u32(64)?,
-                ))
-            })()
-        } else {
-            (|| {
-                Some((
-                    Segment {
-                        name: c.array(8)?,
-                        vmaddr: u64::from(c.u32(24)?),
-                        fileoff: u64::from(c.u32(32)?),
-                    },
-                    c.u32(44)?,
-                    c.u32(48)?,
-                ))
-            })()
-        };
-        let Some((segment, initprot, nsects)) = segment else {
+        // A 64-bit command widens addresses and sizes to eight bytes, which
+        // moves the fields after them.
+        let word = |r: &Reader<'_>, at32, at64| r.word(if wide { at64 } else { at32 }, wide);
+        let field = |r: &Reader<'_>, at32, at64| r.u32(if wide { at64 } else { at32 });
+        let (Some(name), Some(vmaddr), Some(fileoff), Some(initprot), Some(nsects)) = (
+            c.array(8),
+            word(c, 24, 24),
+            word(c, 32, 40),
+            field(c, 44, 60),
+            field(c, 48, 64),
+        ) else {
             return;
         };
-        self.segments.push(segment);
+        self.segments.push(Segment {
+            name,
+            vmaddr,
+            fileoff,
+        });
         let executable = initprot & VM_PROT_EXECUTE != 0;
         let (header, entry) = if wide { (72, 80) } else { (56, 68) };
         let fit = u64::from(size)
@@ -351,51 +347,49 @@ impl MachO {
             .min(limits::SECTIONS.saturating_sub(self.sections.len()) as u64);
         for at in read::table(header, entry, fit) {
             let s = c.at(at);
-            let section = if wide {
-                (|| {
-                    Some(Section {
-                        name: s.array(0)?,
-                        segment: s.array(16)?,
-                        protection: initprot,
-                        addr: s.u64(32)?,
-                        size: s.u64(40)?,
-                        offset: u64::from(s.u32(48)?),
-                        reloff: s.u32(56)?,
-                        nreloc: s.u32(60)?,
-                        flags: s.u32(64)?,
-                        reserved1: s.u32(68)?,
-                        reserved2: s.u32(72)?,
-                        code: false,
-                    })
-                })()
-            } else {
-                (|| {
-                    Some(Section {
-                        name: s.array(0)?,
-                        segment: s.array(16)?,
-                        protection: initprot,
-                        addr: u64::from(s.u32(32)?),
-                        size: u64::from(s.u32(36)?),
-                        offset: u64::from(s.u32(40)?),
-                        reloff: s.u32(48)?,
-                        nreloc: s.u32(52)?,
-                        flags: s.u32(56)?,
-                        reserved1: s.u32(60)?,
-                        reserved2: s.u32(64)?,
-                        code: false,
-                    })
-                })()
+            let (
+                Some(name),
+                Some(segment),
+                Some(addr),
+                Some(size),
+                Some(offset),
+                Some([reloff, nreloc, flags, reserved1, reserved2]),
+            ) = (
+                s.array(0),
+                s.array(16),
+                word(&s, 32, 32),
+                word(&s, 36, 40),
+                field(&s, 40, 48),
+                s.u32s(if wide {
+                    [56, 60, 64, 68, 72]
+                } else {
+                    [48, 52, 56, 60, 64]
+                }),
+            )
+            else {
+                break;
             };
-            let Some(mut section) = section else { break };
-            section.code = executable
-                && section.flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS) != 0;
-            self.sections.push(section);
+            self.sections.push(Section {
+                name,
+                segment,
+                protection: initprot,
+                addr,
+                size,
+                offset: u64::from(offset),
+                reloff,
+                nreloc,
+                flags,
+                reserved1,
+                reserved2,
+                code: executable
+                    && flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS) != 0,
+            });
         }
     }
 
     /// The symbol table `LC_SYMTAB` command `c` names in the file `r`.
     fn read_symbols(&mut self, r: &Reader<'_>, c: &Reader<'_>) {
-        let Some((symoff, nsyms, stroff)) = (|| Some((c.u32(8)?, c.u32(12)?, c.u32(16)?)))() else {
+        let Some([symoff, nsyms, stroff, strsize]) = c.u32s([8, 12, 16, 20]) else {
             return;
         };
         let stroff = u64::from(stroff);
@@ -411,11 +405,12 @@ impl MachO {
                 } else {
                     u64::from(entry.u32(8)?)
                 };
-                let name = if names == 0 {
+                // An index past the string table names nothing.
+                let strx = entry.u32(0)?;
+                let name = if names == 0 || strx >= strsize {
                     String::new()
                 } else {
-                    r.name(stroff.saturating_add(u64::from(entry.u32(0)?)))
-                        .into_owned()
+                    r.name(stroff.saturating_add(u64::from(strx))).into_owned()
                 };
                 names = names.saturating_sub(name.len());
                 Some(Symbol {
@@ -425,16 +420,6 @@ impl MachO {
                     n_value,
                 })
             })
-            .collect();
-    }
-
-    /// The indirect symbol table `LC_DYSYMTAB` command `c` names in `r`.
-    fn read_indirect(&mut self, r: &Reader<'_>, c: &Reader<'_>) {
-        let (Some(offset), Some(count)) = (c.u32(56), c.u32(60)) else {
-            return;
-        };
-        self.indirect = read::table(u64::from(offset), 4, u64::from(count))
-            .map_while(|at| r.u32(at))
             .collect();
     }
 }
@@ -580,11 +565,19 @@ fn bind_opcodes<'a>(stream: &'a [u8], record: &mut impl FnMut(&'a [u8], i64)) {
                 };
                 true
             }
-            // SET_SYMBOL_TRAILING_FLAGS_IMM: the name follows.
+            // SET_SYMBOL_TRAILING_FLAGS_IMM: the name follows, to its NUL
+            // however long it is; a long one is kept cut short.
             0x40 => {
-                symbol = Reader::new(stream, false).cstr(at as u64);
-                at = at.saturating_add(symbol.len()).saturating_add(1);
-                at <= stream.len()
+                let rest = stream.get(at..).unwrap_or_default();
+                match rest.iter().position(|&b| b == 0) {
+                    Some(len) => {
+                        let name = rest.get(..len).unwrap_or_default();
+                        symbol = name.get(..limits::NAME_LEN).unwrap_or(name);
+                        at = at.saturating_add(len).saturating_add(1);
+                        true
+                    }
+                    None => false,
+                }
             }
             // DO_BIND, DO_BIND_ADD_ADDR_IMM_SCALED
             0x90 | 0xb0 => {
@@ -621,8 +614,7 @@ fn chained_imports<'a>(data: &'a [u8], big: bool, record: &mut impl FnMut(&'a [u
     let r = Reader::new(data, big);
     // imports_offset, symbols_offset, imports_count, imports_format,
     // symbols_format.
-    let header = (|| Some((r.u32(8)?, r.u32(12)?, r.u32(16)?, r.u32(20)?, r.u32(24)?)))();
-    let Some((imports, symbols, count, format, 0)) = header else {
+    let Some([imports, symbols, count, format, 0]) = r.u32s([8, 12, 16, 20, 24]) else {
         return;
     };
     let size = match format {
@@ -749,6 +741,20 @@ mod tests {
         assert_eq!(macho.entry, 0x1_0000_1010);
     }
 
+    /// A command reads only its own bytes: a segment command too small for
+    /// a segment's fields is none, not one made of the next command's.
+    #[test]
+    fn a_command_too_small_for_its_fields_reads_none_past_it() {
+        let mut commands: Vec<u8> = [LC_SEGMENT_64, 16, 0, 0]
+            .iter()
+            .flat_map(|w| w.to_le_bytes())
+            .collect();
+        commands.extend(text(1));
+        let macho = parse(&header(2, &commands)).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!((macho.segments.len(), macho.sections.len()), (1, 1));
+        assert_eq!(super::text(&macho.segments[0].name), b"__TEXT");
+    }
+
     /// More sections and commands claimed than the file holds: the ones
     /// there.
     #[test]
@@ -775,15 +781,20 @@ mod tests {
         assert_eq!((macho.segments.len(), macho.sections.len()), (2, 2));
     }
 
-    /// 65,536 segment commands of 8 bytes, one after another, each reading
-    /// the next ones as its sections: none of them has room for any.
+    /// More than 65,536 segment commands, one after another, each claiming
+    /// every section there could be: none has room for any past its own
+    /// header, and only the first 65,536 commands are read.
     #[test]
     fn overlapping_segment_commands_claim_no_sections() {
-        let commands: Vec<u8> = [LC_SEGMENT_64, 8]
+        let mut command = [0_u32; 18];
+        command[0] = LC_SEGMENT_64;
+        command[1] = 72;
+        command[16] = u32::MAX; // nsects
+        let commands: Vec<u8> = command
             .iter()
             .flat_map(|w| w.to_le_bytes())
             .cycle()
-            .take(8 << 16 | 4096)
+            .take(72 << 16 | 4096)
             .collect();
         let bytes = header(u32::MAX, &commands);
         let start = std::time::Instant::now();
@@ -791,6 +802,28 @@ mod tests {
         assert!(macho.sections.is_empty());
         assert_eq!(macho.segments.len() as u64, limits::LOAD_COMMANDS);
         assert!(start.elapsed().as_secs() < 5);
+    }
+
+    /// A symbol's name lies in the string table `LC_SYMTAB` sizes: an index
+    /// past it names nothing, not whatever follows the table.
+    #[test]
+    fn symbol_names_lie_in_the_string_table() {
+        let (symoff, strings) = (32 + 24, 32 + 24 + 2 * 16);
+        let mut commands = Vec::new();
+        for word in [LC_SYMTAB, 24, symoff, 2, strings, 4] {
+            commands.extend(word.to_le_bytes());
+        }
+        for strx in [1_u32, 4] {
+            commands.extend(strx.to_le_bytes());
+            commands.extend([0x0f, 1, 0, 0]); // N_SECT | N_EXT, section 1
+            commands.extend(0x1_0000_0000_u64.to_le_bytes());
+        }
+        commands.extend(b"\0_a\0_beyond\0");
+        let bytes = header(1, &commands[..24]);
+        let bytes = [bytes.as_slice(), &commands[24..]].concat();
+        let macho = parse(&bytes).unwrap_or_else(|e| panic!("{e}"));
+        let names: Vec<&str> = macho.symbols.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, ["_a", ""]);
     }
 
     /// Tables past the end of the file, and absurd counts, cost those
@@ -876,6 +909,27 @@ mod tests {
                 ("_free".to_owned(), 130),
                 ("_napi_get_cb_info".to_owned(), -2),
             ]
+        );
+    }
+
+    /// A name longer than names are kept runs to its NUL all the same: the
+    /// opcodes go on after it, not inside it (where `@_evil` would set
+    /// another symbol).
+    #[test]
+    fn bind_opcodes_step_over_a_long_name() {
+        let mut long = b"_".to_vec();
+        long.resize(limits::NAME_LEN + 5, b'a');
+        long.extend(b"@_evil");
+        let mut stream = vec![0x11, 0x40]; // SET_DYLIB_ORDINAL_IMM 1, SET_SYMBOL
+        stream.extend(&long);
+        stream.extend([0x00, 0x90]); // its NUL, DO_BIND
+        stream.extend(b"@_free\0");
+        stream.push(0x90);
+        let mut found = Vec::new();
+        bind_opcodes(&stream, &mut |name, ordinal| found.push((name, ordinal)));
+        assert_eq!(
+            found,
+            [(&long[..limits::NAME_LEN], 1), (b"_free".as_slice(), 1)]
         );
     }
 

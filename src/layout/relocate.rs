@@ -564,7 +564,16 @@ fn arm(bytes: &mut [u8], offset: u64, kind: u32, fix: Fix) -> Option<()> {
         // `blx`, from the word-aligned PC.
         R_ARM_THM_CALL | R_ARM_THM_JUMP24 => {
             let (first, second) = (insn & 0xffff, insn >> 16);
-            let addend = fix.addend.unwrap_or_else(|| thumb_offset(first, second));
+            // The offset the halfwords hold: S:I1:I2:imm10:imm11:0, with
+            // I = not (J xor S).
+            let addend = fix.addend.unwrap_or_else(|| {
+                let s = (first >> 10) & 1;
+                let i1 = !((second >> 13) & 1 ^ s) & 1;
+                let i2 = !((second >> 11) & 1 ^ s) & 1;
+                let raw =
+                    s << 24 | i1 << 23 | i2 << 22 | (first & 0x3ff) << 12 | (second & 0x7ff) << 1;
+                i64::from((raw << 7).cast_signed() >> 7)
+            });
             let s_a = fix.value.wrapping_add_signed(addend);
             let to_a32 = !thumb(s_a);
             if to_a32 && kind == R_ARM_THM_JUMP24 {
@@ -584,16 +593,6 @@ fn arm(bytes: &mut [u8], offset: u64, kind: u32, fix: Fix) -> Option<()> {
         }
         _ => None,
     }
-}
-
-/// The offset a Thumb `bl`'s halfwords hold: S:I1:I2:imm10:imm11:0, with
-/// I = not (J xor S).
-fn thumb_offset(first: u32, second: u32) -> i64 {
-    let s = (first >> 10) & 1;
-    let i1 = !((second >> 13) & 1 ^ s) & 1;
-    let i2 = !((second >> 11) & 1 ^ s) & 1;
-    let raw = s << 24 | i1 << 23 | i2 << 22 | (first & 0x3ff) << 12 | (second & 0x7ff) << 1;
-    i64::from((raw << 7).cast_signed() >> 7)
 }
 
 /// MIPS: `R_MIPS_26` fills a `jal` or `j`; position-independent code calls

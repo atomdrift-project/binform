@@ -80,9 +80,11 @@ impl Decode for Decoder {
         });
         let mut insn = Insn::new(4, flow).with_slot(slot);
         // The 32-bit ABI's struct return: the caller follows the call's slot
-        // with `unimp size`, and the callee returns past it, to `%o7 + 12`
-        // (`jmp %i7 + 12`). The word is the call's, not code.
-        if !self.wide && insn.flow.is_call() && be_word(bytes, 8).is_some_and(struct_size) {
+        // with `unimp size` (a nonzero size within the 12 bits the callee's
+        // check reads), and the callee returns past it, to `%o7 + 12` (`jmp
+        // %i7 + 12`). The word is the call's, not code.
+        let unimp = |word: u32| word >> 22 == 0 && (1..0x1000).contains(&(word & 0x3f_ffff));
+        if !self.wide && insn.flow.is_call() && be_word(bytes, 8).is_some_and(unimp) {
             insn.len = 12;
         }
         insn
@@ -271,15 +273,14 @@ impl Decoder {
     /// Where control goes after the transfer at `addr` and its slot; `None`
     /// for an instruction that is no transfer.
     fn flow(&self, word: u32, addr: u64) -> Option<Flow> {
-        let wrap = |target| self.wrap(target);
         let rd = (word >> 25) & 0x1f;
         let cond = (word >> 25) & 0xf;
         match word >> 30 {
             // CALL disp30; a call past its own delay slot only reads the PC
             // (position-independent code finding its GOT).
             1 => {
-                let target = wrap(relative(addr, word, 30, 4));
-                Some(if target == wrap(addr.wrapping_add(8)) {
+                let target = self.wrap(relative(addr, word, 30, 4));
+                Some(if target == self.wrap(addr.wrapping_add(8)) {
                     Flow::Next
                 } else {
                     Flow::Call(target)
@@ -296,7 +297,7 @@ impl Decoder {
                     // BPr: 16 bits split in two fields; no "always" condition.
                     3 => {
                         let field = (word >> 6) & 0xc000 | word & 0x3fff;
-                        return Some(Flow::Branch(wrap(relative(addr, field, 16, 4))));
+                        return Some(Flow::Branch(self.wrap(relative(addr, field, 16, 4))));
                     }
                     _ => return None,
                 };
@@ -304,8 +305,8 @@ impl Decoder {
                     // BN: never taken, but a prefetch of its slot.
                     0 => Flow::Next,
                     // BA: always.
-                    8 => Flow::Jump(wrap(target)),
-                    _ => Flow::Branch(wrap(target)),
+                    8 => Flow::Jump(self.wrap(target)),
+                    _ => Flow::Branch(self.wrap(target)),
                 })
             }
             2 => {
@@ -343,13 +344,6 @@ impl Decoder {
             _ => None,
         }
     }
-}
-
-/// Whether `word` is the `unimp size` a 32-bit caller places after a call
-/// to a function returning a structure: a nonzero size within the 12 bits
-/// the callee's check reads.
-fn struct_size(word: u32) -> bool {
-    word >> 22 == 0 && (1..0x1000).contains(&(word & 0x3f_ffff))
 }
 
 /// Whether a call's delay slot `word` makes the callee return past the

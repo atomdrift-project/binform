@@ -378,12 +378,7 @@ impl Decoder {
         match ea {
             Ea::Slot(slot) if call => Flow::CallSlot(slot),
             Ea::Slot(slot) => Flow::JumpSlot(slot),
-            Ea::Ind(reg) => match loaded.filter(|&(held, _)| held == reg) {
-                Some((_, slot)) if call => Flow::CallSlot(slot),
-                Some((_, slot)) => Flow::JumpSlot(slot),
-                None if call => Flow::CallRegister(reg),
-                None => Flow::JumpRegister(reg),
-            },
+            Ea::Ind(reg) => Flow::through(reg, None, loaded, call),
             _ if call => Flow::CallIndirect,
             // `jmp (2, pc, d0.w)`, `jmp (a0, d0.w)`: a table's address plus
             // its entry.

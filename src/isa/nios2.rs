@@ -66,14 +66,13 @@ impl Decoder {
 
     /// Where a `jmp` (or, when `call`, a `callr`) through `reg` goes.
     fn through(&self, reg: u32, call: bool) -> Flow {
-        match (self.get(reg), self.slots.get(reg), call) {
-            (Some((to, _)), _, false) => Flow::Jump(to),
-            (Some((to, _)), _, true) => Flow::Call(to),
-            (None, Some(slot), false) => Flow::JumpSlot(slot),
-            (None, Some(slot), true) => Flow::CallSlot(slot),
-            (None, None, false) => Flow::JumpRegister(reg),
-            (None, None, true) => Flow::CallRegister(reg),
-        }
+        let target = self.get(reg).map(|(to, _)| to);
+        Flow::through(
+            reg,
+            target,
+            self.slots.get(reg).map(|slot| (reg, slot)),
+            call,
+        )
     }
 
     /// The R-type instruction `w` (opcode 0x3a), its operation in `opx`.

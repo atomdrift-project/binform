@@ -580,7 +580,9 @@ fn stubs(bytes: &[u8], arch: Arch, sections: &ElfSections<'_>) -> Vec<u64> {
         return arm_stubs(bytes, sections);
     }
     // Each set's header size, and its stub size when the section's entry
-    // size does not give it (Arm's `.plt` says 4, a word).
+    // size does not give it. No stub is under 8 bytes: an entry size of 4
+    // is a word's (Arm's `.plt`), or UnixWare's convention that GNU ld
+    // follows for the i386 `.plt`, whose stubs are 16.
     let (header, stub) = match arch {
         Arch::X86 | Arch::X86_64 => (16, None),
         Arch::Arm64 => (32, None),
@@ -606,7 +608,7 @@ fn stubs(bytes: &[u8], arch: Arch, sections: &ElfSections<'_>) -> Vec<u64> {
         let size = match stub {
             Some(0) => return Vec::new(),
             Some(size) => size,
-            None if sh.entsize >= 4 => sh.entsize,
+            None if sh.entsize >= 8 => sh.entsize,
             None => 16,
         };
         let Some(first) = addr.checked_add(skip) else {
@@ -706,6 +708,57 @@ fn initializers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A file of `sections`, each `(name, addr, size, entsize)`, mapped
+    /// where its header says.
+    fn elf(sections: &[(&str, u64, u64, u64)]) -> Elf {
+        Elf {
+            is_64: false,
+            big: false,
+            machine: 0,
+            header_flags: 0,
+            kind: 3,
+            entry: 0,
+            programs: Vec::new(),
+            sections: sections
+                .iter()
+                .map(|&(name, addr, size, entsize)| elf::Section {
+                    name: name.into(),
+                    kind: 1,
+                    flags: 6,
+                    addr,
+                    offset: addr,
+                    size,
+                    link: 0,
+                    info: 0,
+                    addralign: 16,
+                    entsize,
+                })
+                .collect(),
+            symbols: Vec::new(),
+            dynamic_symbols: Vec::new(),
+            dynamic: Vec::new(),
+            relocations: Vec::new(),
+            dynamic_relocations: Vec::new(),
+        }
+    }
+
+    /// GNU ld gives the i386 `.plt` an entry size of 4, UnixWare's
+    /// convention, though its header and each stub are 16 bytes: a stub
+    /// every 16 bytes, not every 4. `.plt.got`'s 8-byte stubs say 8.
+    #[test]
+    fn i386_plt_entry_size_of_4_is_no_stub_size() {
+        let elf = elf(&[(".plt", 0x1000, 64, 4), (".plt.got", 0x1040, 16, 8)]);
+        let addrs: Vec<u64> = elf.sections.iter().map(|sh| sh.addr).collect();
+        let sections = ElfSections {
+            elf: &elf,
+            addrs: &addrs,
+        };
+        assert_eq!(
+            stubs(&[], Arch::X86, &sections),
+            [0x1000, 0x1010, 0x1020, 0x1030, 0x1040, 0x1048]
+        );
+    }
 
     #[test]
     fn fences_data_out_of_code() {

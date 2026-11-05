@@ -21,7 +21,7 @@
 //! nothing else: an instruction it does not model forgets the registers it
 //! writes.
 
-use crate::isa::{Extend, Flow, Mem, Memory, Note};
+use crate::isa::{Extend, Flow, Mem, Memory, Note, sext};
 
 /// Register values along one path through a function.
 #[derive(Clone)]
@@ -283,10 +283,14 @@ impl Tracker {
         }
         let cases = match self.get(index) {
             Some(Value::Case(n)) => Cases::First(n),
-            Some(Value::Entry(map)) if map.is_byte_map() => match map.cases {
-                Cases::First(n) => Cases::Mapped { bytes: map.addr, n },
-                _ => return None,
-            },
+            // One-byte entries packed together: a map from case values to
+            // entries of this table.
+            Some(Value::Entry(map)) if map.size == 1 && map.scale == 1 && map.base.is_none() => {
+                match map.cases {
+                    Cases::First(n) => Cases::Mapped { bytes: map.addr, n },
+                    _ => return None,
+                }
+            }
             _ => Cases::Unbounded,
         };
         Some(Table {
@@ -359,12 +363,6 @@ impl Table {
         !matches!(self.cases, Cases::Unbounded)
     }
 
-    /// One-byte entries packed together: a map from case values to entries
-    /// of another table.
-    fn is_byte_map(&self) -> bool {
-        self.size == 1 && self.scale == 1 && self.base.is_none()
-    }
-
     /// The case targets in case-value order, up to `most` and up to the
     /// first that is not code: past it the table has ended, or was never
     /// one. A target counts once per case value that selects it.
@@ -405,8 +403,7 @@ impl Table {
 
 /// `value`, read as a signed `size`-byte integer, widened to 64 bits.
 pub(super) fn sign_extend(value: u64, size: u8) -> u64 {
-    let shift = 64_u32.wrapping_sub(8 * u32::from(size.clamp(1, 8)));
-    ((value << shift).cast_signed() >> shift).cast_unsigned()
+    sext(value, 8 * u32::from(size.clamp(1, 8))).cast_unsigned()
 }
 
 #[cfg(test)]

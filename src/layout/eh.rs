@@ -147,30 +147,35 @@ fn read_lsda(memory: &Memory<'_>, addr: u64, width: u8, sites: &mut usize) -> Ls
         base: addr,
         width,
     };
-    let mut seen = HashSet::new();
-    let _complete = (|| {
-        let start_encoding = c.u8()?;
-        if start_encoding != OMIT {
-            lsda.start = Some(c.encoded(start_encoding)?);
-        }
-        if c.u8()? != OMIT {
-            c.uleb()?; // type-table offset
-        }
-        let site_encoding = c.u8()?;
-        let end = c.at.checked_add(c.uleb()?)?.min(bytes.len() as u64);
-        while c.at < end && lsda.pads.len() < limits::PADS {
-            *sites = sites.checked_sub(1)?;
-            c.encoded(site_encoding)?; // call-site start
-            c.encoded(site_encoding)?; // call-site length
-            let pad = c.encoded(site_encoding)?;
-            c.uleb()?; // action
-            if pad != 0 && seen.insert(pad) {
-                lsda.pads.push(pad);
-            }
-        }
-        Some(())
-    })();
+    // A truncated LSDA, or one past the budget, keeps what was read.
+    let _ = read_call_sites(&mut c, &mut lsda, sites);
     lsda
+}
+
+/// Read the LSDA header and call-site table at `c` into `lsda`, spending
+/// `sites`; `None` where they end early.
+fn read_call_sites(c: &mut Cursor<'_>, lsda: &mut Lsda, sites: &mut usize) -> Option<()> {
+    let start_encoding = c.u8()?;
+    if start_encoding != OMIT {
+        lsda.start = Some(c.encoded(start_encoding)?);
+    }
+    if c.u8()? != OMIT {
+        c.uleb()?; // type-table offset
+    }
+    let site_encoding = c.u8()?;
+    let end = c.at.checked_add(c.uleb()?)?.min(c.r.bytes.len() as u64);
+    let mut seen = HashSet::new();
+    while c.at < end && lsda.pads.len() < limits::PADS {
+        *sites = sites.checked_sub(1)?;
+        c.encoded(site_encoding)?; // call-site start
+        c.encoded(site_encoding)?; // call-site length
+        let pad = c.encoded(site_encoding)?;
+        c.uleb()?; // action
+        if pad != 0 && seen.insert(pad) {
+            lsda.pads.push(pad);
+        }
+    }
+    Some(())
 }
 
 /// A cursor over DWARF exception-handling encodings.

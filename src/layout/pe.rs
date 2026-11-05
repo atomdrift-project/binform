@@ -42,6 +42,8 @@ pub(super) struct Pe<'a> {
     directories: Vec<(u32, u32)>,
     /// What the file backs, as [`spans`] gives it.
     spans: Vec<Span>,
+    /// `FileAlignment`, a power of two.
+    pub(super) file_alignment: u64,
 }
 
 /// One exported function: by name, or `Ordinal_n`; a forwarder names
@@ -92,8 +94,11 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Pe<'_>, Error> {
         return Err(Error::BadMagic);
     }
     let coff = nt.at(4);
-    let (machine, count, optional_size) = (|| Some((coff.u16(0)?, coff.u16(2)?, coff.u16(16)?)))()
-        .ok_or(Error::Truncated("COFF header"))?;
+    let (Some(machine), Some(count), Some(optional_size)) =
+        (coff.u16(0), coff.u16(2), coff.u16(16))
+    else {
+        return Err(Error::Truncated("COFF header"));
+    };
     let optional = coff.at(20);
     let is_64 = match optional.u16(0) {
         Some(PE32) => false,
@@ -183,13 +188,27 @@ pub(super) fn parse(bytes: &[u8]) -> Result<Pe<'_>, Error> {
         sections,
         directories,
         spans,
+        file_alignment: alignment,
     })
 }
 
 impl Section {
+    /// The file offset the loader reads the section from: the raw pointer
+    /// rounded down to 512 bytes, whatever the file alignment, unless the
+    /// file is aligned more finely than that (a low-alignment image, which
+    /// the loader maps as it is).
+    pub(super) fn raw_start(&self, file_alignment: u64) -> u64 {
+        let pointer = u64::from(self.pointer_to_raw_data);
+        if file_alignment >= 0x200 {
+            pointer & !0x1ff
+        } else {
+            pointer
+        }
+    }
+
     /// How many bytes from the section's RVA the file backs, as the loader
-    /// rounds them: the raw pointer down to 512 bytes, the end up to the
-    /// file alignment, and neither size past its 4 KiB rounding.
+    /// rounds them: from [`Self::raw_start`], the end up to the file
+    /// alignment, and neither size past its 4 KiB rounding.
     fn read_size(&self, file_alignment: u64) -> u64 {
         let raw = u64::from(self.size_of_raw_data);
         if raw == 0 {
@@ -201,7 +220,9 @@ impl Section {
             .saturating_add(raw)
             .checked_next_multiple_of(file_alignment)
             .unwrap_or(u64::MAX);
-        let size = end.saturating_sub(pointer & !0x1ff).min(page(raw));
+        let size = end
+            .saturating_sub(self.raw_start(file_alignment))
+            .min(page(raw));
         match u64::from(self.virtual_size) {
             0 => size,
             virtual_size => size.min(page(virtual_size)),
@@ -219,7 +240,7 @@ fn spans(sections: &[Section], alignment: u64) -> Vec<Span> {
         .filter_map(|section| {
             let start = u64::from(section.virtual_address);
             let end = start.checked_add(section.read_size(alignment))?;
-            let offset = u64::from(section.pointer_to_raw_data);
+            let offset = section.raw_start(alignment);
             (end > start).then_some(Span { start, end, offset })
         })
         .collect();
@@ -325,16 +346,9 @@ impl Pe<'_> {
         let Some(header) = self.at(dir) else {
             return Vec::new();
         };
-        let fields = (|| {
-            Some((
-                header.u32(20)?,
-                header.u32(24)?,
-                header.u32(28)?,
-                header.u32(32)?,
-                header.u32(36)?,
-            ))
-        })();
-        let Some((functions, names, function_table, name_table, ordinal_table)) = fields else {
+        let Some([functions, names, function_table, name_table, ordinal_table]) =
+            header.u32s([20, 24, 28, 32, 36])
+        else {
             return Vec::new();
         };
         let ordinal_base = header.u32(16).unwrap_or(1);
@@ -409,9 +423,7 @@ impl Pe<'_> {
         {
             for at in read::table(0, 20, limits::DESCRIPTORS) {
                 let d = table.at(at);
-                let Some([lookup, name, address]) =
-                    (|| Some([d.u32(0)?, d.u32(12)?, d.u32(16)?]))()
-                else {
+                let Some([lookup, name, address]) = d.u32s([0, 12, 16]) else {
                     break;
                 };
                 // The table ends at an empty descriptor, or one naming no
@@ -435,8 +447,7 @@ impl Pe<'_> {
         if let Some(table) = delayed {
             for at in read::table(0, 32, limits::DESCRIPTORS) {
                 let d = table.at(at);
-                let fields = (|| Some([d.u32(0)?, d.u32(4)?, d.u32(12)?, d.u32(16)?]))();
-                let Some([attributes, name, address, lookup]) = fields else {
+                let Some([attributes, name, address, lookup]) = d.u32s([0, 4, 12, 16]) else {
                     break;
                 };
                 if name == 0 || address == 0 {
@@ -544,6 +555,14 @@ impl Pe<'_> {
         read::entries(at, bytes, size)
     }
 
+    /// The exception directory's 8-byte entries, as Arm and A64 lay them
+    /// out: a function's start, and a word that describes it.
+    fn runtime_pairs(&self) -> impl Iterator<Item = (u32, u32)> + '_ {
+        let r = &self.r;
+        self.runtime_functions(8)
+            .map_while(|at| Some((r.u32(at)?, r.at(at).u32(4)?)))
+    }
+
     /// The x64 `.pdata` entries that start functions, as (begin, end) RVAs.
     /// A chained entry continues a function that starts elsewhere.
     pub(super) fn x64_functions(&self) -> Vec<(u32, u32)> {
@@ -589,9 +608,7 @@ impl Pe<'_> {
     /// The A64 `.pdata` entries that start functions, as RVAs: all but
     /// fragments, which continue a function MSVC shrink-wrapped.
     pub(super) fn arm64_functions(&self) -> Vec<u32> {
-        let r = &self.r;
-        self.runtime_functions(8)
-            .map_while(|at| Some((r.u32(at)?, r.at(at).u32(4)?)))
+        self.runtime_pairs()
             .filter(|&(_, unwind)| !self.arm64_fragment(unwind))
             .map(|(begin, _)| begin)
             .collect()
@@ -603,9 +620,7 @@ impl Pe<'_> {
     /// instructions (22 bits), a flag set for 32-bit (Arm) code and one for
     /// an exception handler.
     pub(super) fn wince_functions(&self) -> Vec<(u64, u64)> {
-        let r = &self.r;
-        self.runtime_functions(8)
-            .map_while(|at| Some((r.u32(at)?, r.at(at).u32(4)?)))
+        self.runtime_pairs()
             .map(|(begin, packed)| {
                 let arm = packed >> 30 & 1 != 0;
                 let size = u64::from(packed >> 8 & 0x3f_ffff) << if arm { 2 } else { 1 };
@@ -619,9 +634,7 @@ impl Pe<'_> {
     /// RVAs (Thumb, so odd): all but fragments, whose packed flag or
     /// `.xdata` `F` bit says they have no prologue of their own.
     pub(super) fn arm_functions(&self) -> Vec<u32> {
-        let r = &self.r;
-        self.runtime_functions(8)
-            .map_while(|at| Some((r.u32(at)?, r.at(at).u32(4)?)))
+        self.runtime_pairs()
             .filter(|&(_, unwind)| match unwind & 3 {
                 0 => self
                     .at(unwind)
@@ -955,6 +968,7 @@ mod tests {
             directories: Vec::new(),
             spans: spans(&sections, 0x200),
             sections: Vec::new(),
+            file_alignment: 0x200,
         };
         assert_eq!(pe.offset(0x1004), Some(0x1404));
         assert_eq!(pe.offset(0x2004), Some(0x404));
@@ -964,6 +978,61 @@ mod tests {
         assert_eq!(pe.offset(0x3fff), Some(0x43ff));
         assert_eq!(pe.offset(0x0fff), None);
         assert_eq!(pe.offset(0x4000), None);
+    }
+
+    /// The loader reads a section from its raw pointer rounded down to 512
+    /// bytes, as it rounds the size: an RVA maps to the rounded pointer
+    /// plus its offset into the section. A file aligned more finely (a low
+    /// alignment image, mapped as it is) keeps the pointer it gives.
+    #[test]
+    fn unaligned_raw_pointers_round_down_to_512() {
+        let section = Section {
+            name: String::new(),
+            virtual_size: 0x1000,
+            virtual_address: 0x1000,
+            size_of_raw_data: 0x200,
+            pointer_to_raw_data: 0x410,
+            characteristics: 0,
+        };
+        let offset = |alignment: u64| {
+            let pe = Pe {
+                r: Reader::new(&[], false),
+                machine: 0,
+                is_64: true,
+                image_base: 0,
+                entry: 0,
+                directories: Vec::new(),
+                spans: spans(std::slice::from_ref(&section), alignment),
+                sections: Vec::new(),
+                file_alignment: alignment,
+            };
+            pe.offset(0x1004)
+        };
+        assert_eq!(offset(0x200), Some(0x404));
+        assert_eq!(offset(0x1000), Some(0x404));
+        assert_eq!(offset(0x10), Some(0x414));
+    }
+
+    /// The code at a section's RVA is what the rounded-down raw pointer
+    /// holds, not what the pointer itself does.
+    #[test]
+    fn code_maps_from_the_rounded_raw_pointer() {
+        let mut bytes = image(&[], &[0xc3; 0x20]);
+        // `.text`'s header follows the 0x18-byte COFF header and the
+        // optional header; its raw pointer is 20 bytes in.
+        let pointer = 0x40 + 0x18 + 112 + 8 * 16 + 20;
+        bytes[pointer..pointer + 4].copy_from_slice(&0x210_u32.to_le_bytes());
+        bytes[0x200] = 0xcc;
+        let bin = crate::parse(&bytes).unwrap_or_else(|e| panic!("{e}"));
+        let text = bin
+            .segments
+            .iter()
+            .find(|segment| segment.executable)
+            .unwrap_or_else(|| panic!("no code"));
+        assert_eq!(text.addr, 0x1_4000_1000);
+        assert_eq!(text.bytes.first(), Some(&0xcc));
+        // As many bytes as the section's virtual size.
+        assert_eq!(text.bytes.len(), 0x200);
     }
 
     /// 65,535 section headers, the one that backs the export directory

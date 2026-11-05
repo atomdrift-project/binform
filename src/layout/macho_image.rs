@@ -96,7 +96,9 @@ fn image<'a>(bytes: &'a [u8], macho: &MachO, arch: Arch) -> Binary<'a> {
     }
     let text = macho.text_base();
     if let (Some(mut addr), Some((offset, size))) = (text, macho.function_starts) {
-        for delta in uleb128s(file_range(bytes, offset, size)).take_while(|&delta| delta != 0) {
+        let starts = file_range(bytes, offset, size);
+        let mut at = 0;
+        while let Some(delta) = read::uleb128(starts, &mut at).filter(|&delta| delta != 0) {
             addr = addr.wrapping_add(delta);
             seeds.push(seed(addr, Origin::FunctionStarts));
         }
@@ -184,15 +186,6 @@ fn slots(macho: &MachO) -> Vec<Slot> {
         .collect()
 }
 
-/// An install name's library stem: `/usr/lib/libSystem.B.dylib` is
-/// `libSystem.B`.
-fn dylib_stem(path: &str) -> &str {
-    let base = path.rsplit_once('/').map_or(path, |(_, base)| base);
-    base.strip_suffix(".dylib")
-        .or_else(|| base.strip_suffix(".tbd"))
-        .unwrap_or(base)
-}
-
 /// A Mach-O file's sections, imports and exports.
 fn tables(bytes: &[u8], macho: &MachO, slots: &[Slot]) -> Tables {
     let symbols = &macho.symbols;
@@ -253,42 +246,44 @@ fn tables(bytes: &[u8], macho: &MachO, slots: &[Slot]) -> Tables {
         .exports_trie
         .map(|(offset, size)| macho::exports_trie(file_range(bytes, offset, size)))
         .unwrap_or_default();
-    let mut exports: Vec<Export> = symbols
+    let mut seen = HashSet::new();
+    let exports = symbols
         .iter()
         .filter(external)
         // A private external symbol is linked as one but not exported.
         .filter(|symbol| symbol.n_type & macho::N_TYPE == macho::N_SECT)
         .filter(|symbol| symbol.n_type & macho::N_PEXT == 0)
-        .map(|symbol| (symbol.name.clone(), symbol.n_value, None))
-        .chain(trie.into_iter().map(|(name, exported)| match exported {
-            macho::Exported::At(offset) => (name, text.wrapping_add(offset), None),
+        .map(|symbol| (symbol.name.as_str(), symbol.n_value, None))
+        .chain(trie.iter().map(|(name, exported)| match exported {
+            macho::Exported::At(offset) => (name.as_str(), text.wrapping_add(*offset), None),
             macho::Exported::Reexport {
                 ordinal,
                 name: there,
             } => {
-                let library = i64::try_from(ordinal).ok().and_then(dylib).map(dylib_stem);
-                let there = if there.is_empty() {
-                    name.clone()
-                } else {
-                    there
+                let there = if there.is_empty() { name } else { there };
+                // The library's stem: `/usr/lib/libSystem.B.dylib` is
+                // `libSystem.B`.
+                let forward = match i64::try_from(*ordinal).ok().and_then(dylib) {
+                    Some(path) => {
+                        let base = path.rsplit_once('/').map_or(path, |(_, base)| base);
+                        let stem = base
+                            .strip_suffix(".dylib")
+                            .or_else(|| base.strip_suffix(".tbd"))
+                            .unwrap_or(base);
+                        format!("{stem}.{there}")
+                    }
+                    None => there.clone(),
                 };
-                let forward = library.map(|library| format!("{library}.{there}"));
-                (name, 0, Some(forward.unwrap_or(there)))
+                (name.as_str(), 0, Some(forward))
             }
         }))
+        .filter(|&(name, _, _)| seen.insert(name))
         .map(|(name, addr, forward)| Export {
-            name,
+            name: name.to_owned(),
             addr: (addr != 0).then_some(addr),
             forward,
         })
         .collect();
-    let mut seen = HashSet::new();
-    let first: Vec<bool> = exports
-        .iter()
-        .map(|export| seen.insert(export.name.as_str()))
-        .collect();
-    let mut first = first.into_iter();
-    exports.retain(|_| first.next().unwrap_or(false));
 
     Tables {
         sections,
@@ -302,40 +297,29 @@ fn tables(bytes: &[u8], macho: &MachO, slots: &[Slot]) -> Tables {
 /// LSDA entries; the runs are contiguous, so the table is the span from the
 /// first entry's run to the last's (the sentinel).
 fn unwind_info_lsdas(info: &[u8]) -> impl Iterator<Item = (u32, u32)> + '_ {
-    let r = Reader::new(info, false);
-    let span = (|| {
-        if r.u32(0)? != 1 {
-            return None;
-        }
-        let index = u64::from(r.u32(20)?);
-        let count = u64::from(r.u32(24)?);
-        let last = index.checked_add(count.checked_sub(1)?.checked_mul(12)?)?;
-        let start = usize::try_from(r.at(index).u32(8)?).ok()?;
-        let end = usize::try_from(r.at(last).u32(8)?).ok()?;
-        info.get(start..end.max(start))
-    })()
-    .unwrap_or_default();
+    let span = lsda_span(info).unwrap_or_default();
     span.as_chunks::<8>().0.iter().filter_map(|pair| {
         let pair = Reader::new(pair, false);
         Some((pair.u32(0)?, pair.u32(4)?))
     })
 }
 
-/// The ULEB128 values packed in `data`, ending at the first truncated one.
-fn uleb128s(data: &[u8]) -> impl Iterator<Item = u64> + '_ {
-    let mut at = 0;
-    std::iter::from_fn(move || read::uleb128(data, &mut at))
+/// The LSDA entries of a version 1 compact unwind table, as bytes.
+fn lsda_span(info: &[u8]) -> Option<&[u8]> {
+    let r = Reader::new(info, false);
+    let [1, index, count] = r.u32s([0, 20, 24])? else {
+        return None;
+    };
+    let (index, count) = (u64::from(index), u64::from(count));
+    let last = index.checked_add(count.checked_sub(1)?.checked_mul(12)?)?;
+    let start = usize::try_from(r.at(index).u32(8)?).ok()?;
+    let end = usize::try_from(r.at(last).u32(8)?).ok()?;
+    info.get(start..end.max(start))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn uleb128() {
-        let values: Vec<u64> = uleb128s(&[0x02, 0xe5, 0x8e, 0x26, 0x80]).collect();
-        assert_eq!(values, [2, 624_485]);
-    }
 
     /// A compact unwind table: two first-level entries (the second the
     /// sentinel) and the run of LSDA entries between them.

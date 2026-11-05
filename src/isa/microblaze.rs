@@ -43,24 +43,12 @@ struct Displaced {
     disp: u64,
 }
 
-/// A register a load may read a table entry through.
-#[derive(Clone, Copy)]
-enum Sum {
-    Indexed(Indexed),
-    Displaced(Displaced),
-}
-
 /// The link register calls set.
 const LR: u32 = 15;
 /// The registers a call may change: the return values (`r3`, `r4`), the
 /// arguments (`r5`-`r10`), the temporaries (`r11`, `r12`), the link
 /// register and the assembler's temporary (`r18`).
 const VOLATILE: u32 = 0x0004_9ff8;
-
-/// A register's value as a signed 32-bit offset.
-fn signed32(value: u64) -> i64 {
-    sext(value, 32)
-}
 
 /// The MicroBlaze decoder, big-endian when `big`.
 #[derive(Clone, Debug)]
@@ -203,17 +191,8 @@ impl Cx<'_> {
 
     /// Where `target` in a register takes a jump or a call.
     fn through(&self, reg: u32, call: bool) -> Flow {
-        match (
-            self.get(reg).filter(|_| reg != 0),
-            self.state.pending.loaded,
-        ) {
-            (Some(target), _) if call => Flow::Call(target),
-            (Some(target), _) => Flow::Jump(target),
-            (None, Some((loaded, slot))) if loaded == reg && call => Flow::CallSlot(slot),
-            (None, Some((loaded, slot))) if loaded == reg => Flow::JumpSlot(slot),
-            _ if call => Flow::CallRegister(reg),
-            _ => Flow::JumpRegister(reg),
-        }
+        let target = self.get(reg).filter(|_| reg != 0);
+        Flow::through(reg, target, self.state.pending.loaded, call)
     }
 
     /// Where control goes after `word`, if it is a transfer, and whether a
@@ -247,7 +226,7 @@ impl Cx<'_> {
                         } else {
                             match self.get(rb).filter(|_| rb != 0) {
                                 Some(offset) => {
-                                    let to = relative(signed32(offset));
+                                    let to = relative(sext(offset, 32));
                                     if call { Flow::Call(to) } else { Flow::Jump(to) }
                                 }
                                 None if call => Flow::CallIndirect,
@@ -264,7 +243,9 @@ impl Cx<'_> {
                 let offset = if op == 0x2f {
                     Some(imm)
                 } else {
-                    self.get(rb).filter(|_| rb != 0).map(signed32)
+                    self.get(rb)
+                        .filter(|_| rb != 0)
+                        .map(|offset| sext(offset, 32))
                 };
                 let flow = offset.map_or(Flow::Next, |offset| Flow::Branch(relative(offset)));
                 (flow, rd & 0x10 != 0)
@@ -296,9 +277,7 @@ impl Cx<'_> {
         let imm = self.immediate(word);
         let uimm = imm.cast_unsigned() & 0xffff_ffff;
         let before = std::mem::take(&mut self.state.pending);
-        let Pending {
-            scaled, indexed, ..
-        } = before;
+        let scaled = before.scaled;
         let displaced = self.state.displaced.take();
         let note = match word >> 26 {
             // ADD, ADDK
@@ -385,14 +364,7 @@ impl Cx<'_> {
                     0x39 => 2,
                     _ => 4,
                 };
-                self.load(
-                    rd,
-                    ra,
-                    imm,
-                    size,
-                    scaled,
-                    indexed.map(Sum::Indexed).or(displaced.map(Sum::Displaced)),
-                )
+                self.load(rd, ra, imm, size, before, displaced)
             }
             // SB, SH, SW; SBI, SHI, SWI
             0x34..=0x36 | 0x3c..=0x3e => Note::None,
@@ -563,46 +535,31 @@ impl Cx<'_> {
         Note::Clobber(1 << rd)
     }
 
+    /// `lwi rD, rA, imm`: a table entry when `rA` is a sum that `pending`
+    /// or `displaced` names, or is scaled.
     fn load(
         &mut self,
         rd: u32,
         ra: u32,
         imm: i64,
         size: u8,
-        scaled: Option<(u32, u8)>,
-        sum: Option<Sum>,
+        pending: Pending,
+        displaced: Option<Displaced>,
     ) -> Note {
+        let Pending {
+            scaled, indexed, ..
+        } = pending;
         if rd == 0 {
             return Note::None;
         }
         let base_value = self.get(ra);
         self.set(rd, None);
-        if let Some(Sum::Displaced(Displaced {
-            sum,
-            index,
-            shift,
-            disp,
-        })) = sum
-            && sum == ra
-        {
-            return Note::Load {
-                reg: rd,
-                mem: Mem {
-                    base: None,
-                    index: Some(index),
-                    scale: 1 << shift,
-                    disp: disp.wrapping_add_signed(imm) & 0xffff_ffff,
-                },
-                size,
-                signed: false,
-            };
-        }
-        if let Some(Sum::Indexed(Indexed {
+        if let Some(Indexed {
             sum,
             base,
             index,
             shift,
-        })) = sum
+        }) = indexed
             && sum == ra
         {
             return Note::Load {
@@ -612,6 +569,26 @@ impl Cx<'_> {
                     index: Some(index),
                     scale: 1 << shift,
                     disp: imm.cast_unsigned() & 0xffff_ffff,
+                },
+                size,
+                signed: false,
+            };
+        }
+        if let Some(Displaced {
+            sum,
+            index,
+            shift,
+            disp,
+        }) = displaced
+            && sum == ra
+        {
+            return Note::Load {
+                reg: rd,
+                mem: Mem {
+                    base: None,
+                    index: Some(index),
+                    scale: 1 << shift,
+                    disp: disp.wrapping_add_signed(imm) & 0xffff_ffff,
                 },
                 size,
                 signed: false,
@@ -800,6 +777,39 @@ mod tests {
     /// `addik r22, r0, 6; cmpu r18, r4, r22; bltid r18, default; xori r3,
     /// r4, 4; addk r3, r0, r4; addk r3, r4, r4; addk r3, r3, r3; imm
     /// 0x1002; addik r3, r3, 0xf768; lwi r3, r3, 0; bra r3`.
+    /// A displaced table's address and an indexed sum, both live: a load
+    /// through the displaced register reads the table, whatever the other
+    /// sum. `addk r3, r5, r5; addk r3, r3, r3` scales r5 by 4; `addik r4,
+    /// r3, 0x100` displaces it; `addk r6, r3, r7` sums it with r7; `lwi r8,
+    /// r4, 0` reads the displaced table.
+    #[test]
+    fn displaced_table_beside_an_indexed_sum() {
+        let insns = run(
+            &[
+                0x1065_2800,
+                0x1063_1800,
+                0x3083_0100,
+                0x10c3_3800,
+                0xe904_0000,
+            ],
+            0x1000,
+        );
+        assert_eq!(
+            insns[4].note,
+            Note::Load {
+                reg: 8,
+                mem: Mem {
+                    base: None,
+                    index: Some(3),
+                    scale: 4,
+                    disp: 0x100,
+                },
+                size: 4,
+                signed: false,
+            }
+        );
+    }
+
     #[test]
     fn displaced_table() {
         let insns = run(
