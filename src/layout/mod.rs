@@ -58,8 +58,9 @@ impl fmt::Display for Error {
 
 impl std::error::Error for Error {}
 
-/// The [`Binary`] of an ELF, PE or Mach-O file. A universal Mach-O yields its
-/// first slice of an instruction set binform decodes, else its first slice.
+/// The [`Binary`] of an ELF, PE or Mach-O file. A universal Mach-O yields
+/// the slice this machine runs, else its first slice of an instruction set
+/// binform decodes, else its first slice.
 /// A binary of an instruction set binform does not decode has its layout
 /// and no [`Binary::arch`].
 ///

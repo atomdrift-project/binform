@@ -44,15 +44,25 @@ fn arch(cputype: u32) -> Option<Arch> {
     }
 }
 
-/// The slice of a universal binary to read: the one a 64-bit x86 host
-/// runs, else Apple silicon's, else 32-bit x86's, else the first. Fixed,
-/// not the host's, so every machine reads the same slice.
+/// The slice of a universal binary to read: the one this machine runs, else
+/// a 64-bit x86 host's, else Apple silicon's, else 32-bit x86's, else the
+/// first. A reader on Apple silicon and one on x86-64 read different slices
+/// of the same file.
+// TODO: a universal binary holds several images, and no order of preference
+// among them is right for every reader. Read each slice as an image of its
+// own, and leave no slice to pick.
 fn preferred_slice(slices: &[macho::Slice]) -> Option<&macho::Slice> {
+    let host = if cfg!(target_arch = "aarch64") {
+        Arch::Arm64
+    } else {
+        Arch::X86_64
+    };
     let rank = |slice: &&macho::Slice| match arch(slice.cputype) {
-        Some(Arch::X86_64) => 0,
-        Some(Arch::Arm64) => 1,
-        Some(_) => 2,
-        None => 3,
+        Some(arch) if arch == host => 0,
+        Some(Arch::X86_64) => 1,
+        Some(Arch::Arm64) => 2,
+        Some(_) => 3,
+        None => 4,
     };
     // `min_by_key` keeps the first of equals: header order breaks ties.
     slices.iter().min_by_key(rank)
@@ -342,7 +352,7 @@ mod tests {
     }
 
     #[test]
-    fn a_universal_binary_reads_its_x86_64_slice_first() {
+    fn a_universal_binary_reads_this_machines_slice_first() {
         let slice = |cputype| macho::Slice {
             cputype,
             offset: 0,
@@ -358,8 +368,14 @@ mod tests {
             macho::CPU_TYPE_ARM64,
             18,
         );
+        let host = if cfg!(target_arch = "aarch64") {
+            a64
+        } else {
+            x64
+        };
         assert_eq!(pick(&[i386, x64, ppc]), Some(x64));
-        assert_eq!(pick(&[a64, x64]), Some(x64));
+        assert_eq!(pick(&[a64, x64]), Some(host));
+        assert_eq!(pick(&[x64, a64]), Some(host));
         assert_eq!(pick(&[ppc, a64, i386]), Some(a64));
         assert_eq!(pick(&[ppc, i386]), Some(i386));
         assert_eq!(pick(&[ppc]), Some(ppc));

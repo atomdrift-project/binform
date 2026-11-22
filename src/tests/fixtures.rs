@@ -224,8 +224,13 @@ fn golden(outcome: &Outcome<'_>) -> String {
 }
 
 fn check(name: &str, claims: impl Fn(&Outcome<'_>)) {
+    check_image(name, |bytes| bytes, claims);
+}
+
+/// [`check`], of the image `image_of` finds in the fixture's bytes.
+fn check_image(name: &str, image_of: fn(&[u8]) -> &[u8], claims: impl Fn(&Outcome<'_>)) {
     let bytes = read_zst(&format!("{name}.zst"));
-    let image = crate::parse(&bytes).unwrap_or_else(|e| panic!("{name}: {e}"));
+    let image = crate::parse(image_of(&bytes)).unwrap_or_else(|e| panic!("{name}: {e}"));
     let mut recovery = super::recover(&image);
     // Thumb entries carry their mode in bit 0; rizin's are even.
     if image.arch == Some(crate::Arch::Arm) {
@@ -414,11 +419,25 @@ fn elf_arm64_cxx() {
     });
 }
 
-/// A universal Mach-O: the x86-64 slice (rizin's choice too), and its
-/// `__stubs`.
+/// A universal Mach-O: the x86-64 slice (rizin's choice), and its `__stubs`.
+/// Which slice a universal file is read as depends on the machine reading
+/// it, so the slice is taken from the file here, on any machine.
 #[test]
 fn macho_universal_cxx() {
-    check("classic-level-darwin.node", |outcome| {
+    fn x86_64_slice(file: &[u8]) -> &[u8] {
+        let word = |at: usize| {
+            let bytes = file.get(at..at + 4).and_then(|b| b.try_into().ok());
+            u32::from_be_bytes(bytes.unwrap_or_default()) as usize
+        };
+        // A 32-bit universal header: the count, then 20-byte entries of CPU
+        // type, subtype, offset, size and alignment.
+        let entry = (0..word(4))
+            .map(|i| 8 + 20 * i)
+            .find(|&entry| word(entry) == 0x0100_0007)
+            .unwrap_or_else(|| panic!("no x86-64 slice"));
+        &file[word(entry + 8)..][..word(entry + 12)]
+    }
+    check_image("classic-level-darwin.node", x86_64_slice, |outcome| {
         assert_eq!(outcome.image.arch, Some(crate::Arch::X86_64));
         assert!(outcome.found(Found::STUB) > 0, "no __stubs");
     });

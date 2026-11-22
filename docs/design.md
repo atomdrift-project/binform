@@ -86,9 +86,11 @@ caller's choice.
 - A relocatable ELF object's sections are placed at addresses of binform's
   choosing (as a reference disassembler places them) and its relocations
   applied, so calls reach their callees.
-- A universal Mach-O file is read as one slice: x86-64, else A64, else the
-  first slice of an instruction set binform decodes. The choice does not
-  depend on the host.
+- A universal Mach-O file is read as one slice: the one the reading machine
+  runs, else x86-64, else A64, else the first slice of an instruction set
+  binform decodes. Two machines of different architectures read different
+  slices of the same file; reading every slice as an image of its own is
+  still to do.
 
 ## Efficiency
 
